@@ -303,6 +303,12 @@ describe('Orchestrator', () => {
     const session = runner.sessions.get(runner.sessions.listSummaries(1)[0].id);
     assert.equal(session.callUsage.length, 2);
     assert.equal(session.callUsage[0].cacheHitRate, 0.4);
+    assert.equal(session.inputRound, 2);
+    assert.ok(session.inputTools.length > 0);
+    const auditedAssistant = session.inputMessages.find((m) => m.role === 'assistant');
+    assert.equal(auditedAssistant.reasoning_content, '先读取成员再决定');
+    assert.equal(auditedAssistant.tool_calls[0].function.name, 'get_active_members');
+    assert.ok(session.inputPayloadChars > 0);
   });
 
   it('deterministically wakes the same participant inside the threaded continuation window', async (t) => {
@@ -458,6 +464,16 @@ describe('Orchestrator', () => {
     const latest = runner.sessions.get(runner.sessions.listSummaries(1)[0].id);
     assert.equal(latest.contextTier, 6);
     assert.match(latest.contextReason, /生命周期/);
+    assert.deepEqual(
+      latest.injectedMessages,
+      requests[2].messages.slice(1, -1),
+      'Session 应单独保存生命周期注入的 provider transcript'
+    );
+    assert.deepEqual(
+      latest.inputMessages,
+      requests[2].messages,
+      'Session 应保存当前轮发送给模型的完整 messages'
+    );
   });
 
   it('consumes rollover-armed state with the next arbitrary message', async (t) => {
@@ -523,6 +539,77 @@ describe('Orchestrator', () => {
     assert.equal(thread.state, 'active');
     assert.ok(thread.idleDeadline - thread.updatedAt >= 19 * 60000);
     assert.equal(store.latestThreadCheckpoint('group:1').state.nextStep, '等待日志');
+  });
+
+  it('clears handoff memory without closing a listening lifecycle', async (t) => {
+    const { cfg, runner, store, memory, append } = fixture(t);
+    cfg.conversation.mode = 'lifecycle';
+    memory.setHandoff('group:1', { topic: '旧话题', summary: '应当清除' });
+    globalThis.fetch = async () => Response.json({
+      choices: [{
+        message: {
+          tool_calls: [{
+            id: 'finish-clear-memory',
+            type: 'function',
+            function: {
+              name: 'finish',
+              arguments: JSON.stringify({
+                summary: '旧话题结束，但继续监听新消息',
+                threadDisposition: 'listening',
+                clearHandoff: true
+              })
+            }
+          }]
+        }
+      }],
+      usage: { total_tokens: 10 }
+    });
+
+    append(1, '@bot 换个话题', '42');
+    await runner.wake('group:1');
+
+    assert.equal(memory.getHandoff('group:1'), null);
+    assert.equal(store.getConversationThread('group:1')?.state, 'listening');
+  });
+
+  it('keeps the lifecycle thread id on the Session that closes it', async (t) => {
+    const { cfg, runner, store, append } = fixture(t);
+    cfg.conversation.mode = 'lifecycle';
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls += 1;
+      return Response.json({
+        choices: [{
+          message: {
+            tool_calls: [{
+              id: `finish-${calls}`,
+              type: 'function',
+              function: {
+                name: 'finish',
+                arguments: JSON.stringify({
+                  summary: calls === 1 ? '继续' : '结束',
+                  threadDisposition: calls === 1 ? 'active' : 'close'
+                })
+              }
+            }]
+          }
+        }],
+        usage: { total_tokens: 10 }
+      });
+    };
+
+    append(1, '@bot 开始', '42');
+    await runner.wake('group:1');
+    const threadId = store.getConversationThread('group:1')?.threadId;
+
+    append(2, '结束吧', '42');
+    await runner.wake('group:1');
+    const latest = runner.sessions.get(runner.sessions.listSummaries(1)[0].id);
+
+    assert.ok(threadId);
+    assert.equal(store.getConversationThread('group:1'), null);
+    assert.equal(latest.threadId, threadId);
+    assert.equal(latest.threadState, 'closed');
   });
 
   it('does not drop a previously claimed retry when the trigger state changes', async (t) => {

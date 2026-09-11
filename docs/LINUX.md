@@ -37,6 +37,15 @@ Electron, GUI, X11, browser, compiler or native SQLite add-on.
 If no compatible Node.js is found, the script downloads Node.js 22 into
 `INSTALL_DIR/.runtime` and verifies it against the official SHA-256 manifest.
 `--node /absolute/path/to/node` remains available to use an existing runtime.
+Run `bash deploy.sh --help` for the complete option list.
+
+For an existing installation, deployment creates a code snapshot under
+`DATA_DIR/deploy-backups/` before stopping the service. Source synchronization
+uses deletion-aware `rsync`, while preserving the data directory, local runtime,
+deployment metadata and credentials. If dependency installation, configuration,
+systemd validation or health checking fails, the installer restores the previous
+code, configuration and service unit before restarting the old service. Use
+`--no-backup` only when an external rollback mechanism is already in place.
 
 Optional import on FIRST install only:
 
@@ -47,7 +56,8 @@ bash deploy.sh --install-dir /mnt/data/qq-agent/app \
   --credential-file /home/sourcecode/.config/dsh/credentials.env
 ```
 
-Every deployment enters observe mode. It does not activate replies automatically.
+The first installation enters observe mode and does not activate replies
+automatically. Updating an existing installation preserves its current mode.
 Model/API settings for non-DeepSeek providers must be configured in the new console.
 The repository contains no Electron shell, Windows installer, bundled protocol
 launcher, community upload client, telemetry client, or online updater. Manage the
@@ -142,13 +152,16 @@ unmatched messages before calling the model.
   response or unknown provider-side billing. Usage of failed attempts is retained.
 - LLM transient requests retry twice with backoff; persisted batch attempts cap at three.
 
-LLM sessions do not carry prior tool traces or hidden reasoning into future runs.
-Only the structured handoff summary is injected into the next run, with newer
-messages taking precedence. Each run still has multiple API rounds; total cost
-depends on batch size, outputs, images, tool use and provider caching. This is
-bounded context, not a constant-price guarantee. General DSH
-Skills/workspace/approval capabilities are intentionally not included. Old owner
-friend-approval commands continue to belong to the old Bridge.
+Legacy and threaded Agent Sessions use bounded reconstructed context plus the
+structured handoff. Lifecycle mode additionally carries the active thread's
+provider transcript, including tool traces and provider-returned
+`reasoning_content`, into later runs with the same `threadId`. The console exposes
+the injected transcript, latest complete model request and per-round provider
+Token/cache counters. Total cost still depends on batch size, outputs, images,
+tool use and provider caching. This is bounded context, not a constant-price
+guarantee. General DSH Skills/workspace/approval capabilities are intentionally
+not included. Old owner friend-approval commands continue to belong to the old
+Bridge.
 
 ## Data And Backup
 

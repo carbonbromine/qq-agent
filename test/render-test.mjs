@@ -182,17 +182,164 @@ try {
   const conversationControls = [
     'cfg-conversation-mode', 'cfg-conversation-unified',
     'conversation-group-select', 'conversation-group-mode',
+    'cfg-cont-window', 'cfg-thread-ttl', 'cfg-cont-history',
     'cfg-life-silent', 'cfg-life-active', 'cfg-life-hard',
     'cfg-life-rollover', 'cfg-life-history', 'cfg-life-chars'
   ].every((id) => conversationHtml.includes(`id="${id}"`));
   if (conversationControls
-      && conversationHtml.includes('value="lifecycle" selected')
-      && conversationHtml.includes('value="threaded"')) {
+      && conversationHtml.includes('id="cfg-conversation-mode" value="lifecycle"')
+      && ['legacy', 'threaded', 'lifecycle'].every((mode) =>
+        conversationHtml.includes(`data-conversation-mode="${mode}"`)
+        && conversationHtml.includes(`data-conversation-panel="${mode}"`))) {
     pass++;
     console.log('  OK    三种对话模式及分群覆盖控件完整');
   } else {
     fail++;
     console.log('  FAIL  三种对话模式或分群覆盖控件缺失');
+  }
+  const modePanel = (html, mode) => {
+    const match = html.match(new RegExp(
+      `<section class="conversation-mode-panel([^"]*)"[^>]*data-conversation-panel="${mode}"[^>]*>([\\s\\S]*?)<\\/section>`
+    ));
+    return match ? { classes: match[1], html: match[2] } : null;
+  };
+  const modeViews = Object.fromEntries(['legacy', 'threaded', 'lifecycle'].map((mode) => {
+    const html = ctx.renderChatSection({
+      ...cfg,
+      conversation: { ...cfg.conversation, mode }
+    });
+    return [mode, {
+      legacy: modePanel(html, 'legacy'),
+      threaded: modePanel(html, 'threaded'),
+      lifecycle: modePanel(html, 'lifecycle')
+    }];
+  }));
+  const isolatedModePanels =
+    !modeViews.legacy.legacy.classes.includes('hidden')
+    && modeViews.legacy.threaded.classes.includes('hidden')
+    && modeViews.legacy.lifecycle.classes.includes('hidden')
+    && !modeViews.threaded.threaded.classes.includes('hidden')
+    && modeViews.threaded.threaded.html.includes('cfg-cont-window')
+    && !modeViews.threaded.threaded.html.includes('cfg-life-silent')
+    && !modeViews.lifecycle.lifecycle.classes.includes('hidden')
+    && modeViews.lifecycle.lifecycle.html.includes('cfg-life-silent')
+    && !modeViews.lifecycle.lifecycle.html.includes('cfg-cont-window');
+  if (isolatedModePanels) {
+    pass++;
+    console.log('  OK    模式切换仅显示当前模式的专属参数');
+  } else {
+    fail++;
+    console.log('  FAIL  不同模式的参数仍混在同一可见面板');
+  }
+  const statusText = ctx.sessionStatusText || sandbox.sessionStatusText;
+  const conversationText = ctx.conversationStatusText || sandbox.conversationStatusText;
+  const modeBand = ctx.renderSessionModeBand || sandbox.renderSessionModeBand;
+  const lifecycleSession = {
+    status: 'done',
+    conversationMode: 'lifecycle',
+    threadState: 'listening',
+    threadId: '12345678-abcd'
+  };
+  if (
+    statusText(lifecycleSession) === '本轮已发言'
+    && conversationText(lifecycleSession) === '完整生命周期 · 监听中'
+    && statusText({ status: 'done', conversationMode: 'legacy' }) === '已发言'
+    && modeBand(lifecycleSession).includes('session-mode-band mode-lifecycle')
+    && modeBand(lifecycleSession).includes('线程 12345678')
+  ) {
+    pass++;
+    console.log('  OK    Session 结束与各模式运行态 UI 已明确区分');
+  } else {
+    fail++;
+    console.log('  FAIL  Session 模式状态仍未清晰区分');
+  }
+  const groupSessions = ctx.buildSessionDisplayItems || sandbox.buildSessionDisplayItems;
+  const threadTimeline = ctx.renderSessionThreadTimeline || sandbox.renderSessionThreadTimeline;
+  const groupedRuns = [
+    {
+      id: 'life-2', chatKey: 'group:1', startedAt: 2, status: 'done',
+      conversationMode: 'lifecycle', threadId: 'thread-1', threadState: 'listening',
+      trigger: '第二批', rounds: 2, webSearchCount: 1,
+      usage: { promptTokens: 20, completionTokens: 2, totalTokens: 22, cachedTokens: 15, calls: 2 }
+    },
+    {
+      id: 'life-1', chatKey: 'group:1', startedAt: 1, status: 'done',
+      conversationMode: 'lifecycle', threadId: 'thread-1', threadState: 'active',
+      trigger: '第一批', rounds: 1, webSearchCount: 0,
+      usage: { promptTokens: 10, completionTokens: 1, totalTokens: 11, cachedTokens: 0, calls: 1 }
+    },
+    {
+      id: 'legacy-1', chatKey: 'group:2', startedAt: 1, status: 'done',
+      conversationMode: 'legacy', threadId: null, rounds: 1,
+      usage: { totalTokens: 5, calls: 1 }
+    }
+  ];
+  const groupedView = groupSessions(groupedRuns);
+  vm.runInContext(`state.sessions = ${JSON.stringify(groupedRuns)};`, ctx);
+  const timelineHtml = threadTimeline(groupedRuns[0]);
+  const lifecycleGroup = groupedView.find((item) => item.threadId === 'thread-1');
+  if (
+    groupedView.length === 2
+    && lifecycleGroup?.runCount === 2
+    && lifecycleGroup?.usage?.totalTokens === 33
+    && lifecycleGroup?.latestSessionId === 'life-2'
+    && (timelineHtml.match(/data-thread-session-id=/g) || []).length === 2
+    && timelineHtml.includes('2 批 · 3 次调用')
+  ) {
+    pass++;
+    console.log('  OK    生命周期 Session 按 threadId 聚合并保留批次时间线');
+  } else {
+    fail++;
+    console.log('  FAIL  生命周期 Session 聚合或时间线不完整');
+  }
+  vm.runInContext('state.sessions = [];', ctx);
+  const contextInspector = ctx.renderSessionContextInspector || sandbox.renderSessionContextInspector;
+  const contextSession = {
+    id: 'context-test',
+    status: 'done',
+    model: 'deepseek-reasoner',
+    promptLayout: 'deepseek-lifecycle-append-v1',
+    threadId: 'thread-1',
+    inputRound: 2,
+    inputPayloadChars: 4096,
+    injectedMessages: [{ role: 'assistant', content: '上一轮回复' }],
+    inputMessages: [
+      { role: 'system', content: '系统提示' },
+      { role: 'assistant', content: '上一轮回复', reasoning_content: '上一轮推理' },
+      { role: 'user', content: '本轮输入' }
+    ],
+    inputTools: [{ type: 'function', function: { name: 'finish' } }],
+    inputRequestOptions: { toolChoice: 'auto', temperature: 0.8 },
+    callUsage: [
+      { round: 1, promptTokens: 1000, cachedTokens: 700, completionTokens: 100, totalTokens: 1100 },
+      { round: 2, promptTokens: 1400, cachedTokens: 1100, completionTokens: 80, totalTokens: 1480 }
+    ],
+    messages: [
+      { role: 'assistant', content: null, reasoning_content: '检查上下文后调用工具' },
+      { toolCall: { name: 'finish', args: {}, result: 'ok' } },
+      { role: 'assistant', content: 'done', reasoning_content: '任务已完成' }
+    ]
+  };
+  vm.runInContext("state.sessionInspectorTab = 'input';", ctx);
+  const inputInspector = contextInspector(contextSession);
+  vm.runInContext("state.sessionInspectorTab = 'injected';", ctx);
+  const injectedInspector = contextInspector(contextSession);
+  vm.runInContext("state.sessionInspectorTab = 'reasoning';", ctx);
+  const reasoningInspector = contextInspector(contextSession);
+  const contextInspectorOk =
+    inputInspector.includes('完整输入 · 3')
+    && inputInspector.includes('1,400')
+    && inputInspector.includes('1,100')
+    && inputInspector.includes('&quot;tools&quot;')
+    && injectedInspector.includes('上一轮回复')
+    && reasoningInspector.includes('检查上下文后调用工具')
+    && reasoningInspector.includes('任务已完成');
+  if (contextInspectorOk) {
+    pass++;
+    console.log('  OK    注入对话、完整输入、Token 与模型推理检查器完整');
+  } else {
+    fail++;
+    console.log('  FAIL  模型上下文检查器缺失关键数据');
   }
 
   // 滑条换算函数

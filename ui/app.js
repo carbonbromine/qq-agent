@@ -15,6 +15,7 @@ const state = {
   sessions: [],          // 摘要列表
   currentSessionId: null,
   sessionDetail: null,   // 完整记录
+  sessionInspectorTab: 'input',
   chats: [],
   currentChatKey: null,
   chatMessages: [],
@@ -195,6 +196,88 @@ function esc(s) {
 }
 
 const STATUS_LABEL = { waiting: '等待中', done: '已发言', noreply: '未回复', running: '运行中', error: '出错', aborted: '中止' };
+const CONVERSATION_MODE_LABEL = { legacy: '传统触发', threaded: '参与者续接', lifecycle: '完整生命周期' };
+const THREAD_STATE_LABEL = {
+  engaged: '续接窗口中',
+  active: '活跃中',
+  listening: '监听中',
+  rollover_armed: '等待下一条消息续接',
+  closed: '已结束'
+};
+
+function sessionStatusText(s) {
+  const base = STATUS_LABEL[s.status] || s.status;
+  return s.conversationMode === 'lifecycle' && ['done', 'noreply'].includes(s.status)
+    ? `本轮${base}`
+    : base;
+}
+
+function conversationStatusText(s) {
+  const mode = s.conversationMode || 'legacy';
+  const modeLabel = CONVERSATION_MODE_LABEL[mode] || mode;
+  const threadLabel = THREAD_STATE_LABEL[s.threadState];
+  return threadLabel ? `${modeLabel} · ${threadLabel}` : modeLabel;
+}
+
+function renderSessionModeBand(s) {
+  const mode = ['legacy', 'threaded', 'lifecycle'].includes(s.conversationMode)
+    ? s.conversationMode
+    : 'legacy';
+  const stateLabel = THREAD_STATE_LABEL[s.threadState]
+    || (mode === 'legacy' ? '单轮运行' : '尚未建立线程');
+  const detail = mode === 'legacy'
+    ? '本轮按响应档位独立触发'
+    : mode === 'threaded'
+      ? '当前参与者可在续接窗口内确定性唤醒'
+      : '生命周期内的新消息批次继续交给模型判断';
+  const threadRef = s.threadId ? `线程 ${String(s.threadId).slice(0, 8)}` : '无持续线程';
+  return `
+    <div class="session-mode-band mode-${mode}">
+      <div class="session-mode-name">${esc(CONVERSATION_MODE_LABEL[mode])}</div>
+      <div class="session-mode-state">${esc(stateLabel)}</div>
+      <div class="session-mode-detail">${esc(detail)}</div>
+      <div class="session-mode-ref">${esc(threadRef)}</div>
+    </div>`;
+}
+
+function renderSessionThreadTimeline(s) {
+  const mode = ['threaded', 'lifecycle'].includes(s.conversationMode)
+    ? s.conversationMode
+    : '';
+  if (!mode || !s.threadId) return '';
+  const runs = (state.sessions || [])
+    .filter((entry) =>
+      entry.conversationMode === mode
+      && entry.chatKey === s.chatKey
+      && entry.threadId === s.threadId)
+    .slice()
+    .sort((a, b) => Number(a.startedAt) - Number(b.startedAt));
+  if (!runs.length) return '';
+  const totalTokens = runs.reduce((sum, run) => sum + (Number(run.usage?.totalTokens) || 0), 0);
+  const totalCalls = runs.reduce((sum, run) => sum + (Number(run.usage?.calls) || 0), 0);
+  const title = mode === 'lifecycle' ? '生命周期批次' : '续接线程批次';
+  return `
+    <section class="thread-timeline mode-${mode}">
+      <div class="thread-timeline-head">
+        <div>
+          <strong>${title}</strong>
+          <span>${esc(s.threadId)}</span>
+        </div>
+        <span>${runs.length} 批 · ${totalCalls} 次调用 · ${fmtTokens(totalTokens)}</span>
+      </div>
+      <div class="thread-run-list">
+        ${runs.map((run, index) => `
+          <button type="button"
+            class="thread-run${run.id === s.id ? ' active' : ''}"
+            data-thread-session-id="${esc(run.id)}"
+            title="${esc(run.trigger || '')}">
+            <span>#${index + 1}</span>
+            <strong>${fmtClock(run.startedAt)}</strong>
+            <small>${esc(sessionStatusText(run))} · ${fmtTokens(run.usage?.totalTokens)}</small>
+          </button>`).join('')}
+      </div>
+    </section>`;
+}
 
 // ── 启动 loading 壳：页面先渲染，等服务可用后自动隐藏 ──
 const loadingOverlay = $('#loading-overlay');
@@ -693,6 +776,49 @@ function startListPoller() {
 }
 startListPoller();
 
+function buildSessionDisplayItems(sessions = []) {
+  const items = [];
+  const grouped = new Map();
+  for (const session of sessions) {
+    const mode = ['legacy', 'threaded', 'lifecycle'].includes(session.conversationMode)
+      ? session.conversationMode
+      : 'legacy';
+    const groupable = mode !== 'legacy' && Boolean(session.threadId);
+    const displayKey = groupable
+      ? `thread:${mode}:${session.chatKey}:${session.threadId}`
+      : `session:${session.id}`;
+    let item = grouped.get(displayKey);
+    if (!item) {
+      item = {
+        ...session,
+        displayKey,
+        latestSessionId: session.id,
+        sessionIds: [],
+        runCount: 0,
+        totalRounds: 0,
+        totalSearches: 0,
+        usage: {
+          promptTokens: 0,
+          completionTokens: 0,
+          totalTokens: 0,
+          cachedTokens: 0,
+          calls: 0
+        }
+      };
+      grouped.set(displayKey, item);
+      items.push(item);
+    }
+    item.sessionIds.push(session.id);
+    item.runCount += 1;
+    item.totalRounds += Number(session.rounds) || 0;
+    item.totalSearches += Number(session.webSearchCount) || 0;
+    for (const key of ['promptTokens', 'completionTokens', 'totalTokens', 'cachedTokens', 'calls']) {
+      item.usage[key] += Number(session.usage?.[key]) || 0;
+    }
+  }
+  return items;
+}
+
 function renderSessionList() {
   const box = $('#session-items');
   state.seenSessionIds = state.seenSessionIds || new Set();
@@ -700,8 +826,9 @@ function renderSessionList() {
   // 会话可能积累到几百条，全量渲染会让列表变卡。
   state.sessionLimit = Math.max(SESSION_PAGE, Number(state.sessionLimit) || SESSION_PAGE);
   const all = state.sessions || [];
-  const shown = all.slice(0, state.sessionLimit);
-  const rest = all.length - shown.length;
+  const displayItems = buildSessionDisplayItems(all);
+  const shown = displayItems.slice(0, state.sessionLimit);
+  const rest = displayItems.length - shown.length;
   box.innerHTML = shown.map((s) => {
     const chatName = formatChatTitle(s.chatKey, chatNameOf(s.chatKey));
     const waitHtml = s.status === 'waiting' && s.waitUntil
@@ -710,22 +837,29 @@ function renderSessionList() {
     const activityHtml = s.status === 'running' && s.activity
       ? `<span class="session-activity">${esc(s.activity)}</span>`
       : '';
-    const searchHtml = Number(s.webSearchCount) > 0
-      ? `<span class="muted">搜 ${s.webSearchCount}</span>`
+    const searchHtml = Number(s.totalSearches) > 0
+      ? `<span class="muted">搜 ${s.totalSearches}</span>`
       : '';
-    const isNew = !state.seenSessionIds.has(s.id);
+    const mode = ['legacy', 'threaded', 'lifecycle'].includes(s.conversationMode)
+      ? s.conversationMode
+      : 'legacy';
+    const isNew = !state.seenSessionIds.has(s.displayKey);
+    const selected = s.sessionIds.includes(state.currentSessionId);
+    const runLabel = s.runCount > 1 ? `${s.runCount} 批` : '';
     return `
-      <div class="session-item ${s.id === state.currentSessionId ? 'selected' : ''} ${s.status === 'waiting' ? 'session-waiting-row' : ''} ${isNew ? 'new-item' : ''}" data-id="${s.id}">
+      <div class="session-item mode-${mode} ${s.runCount > 1 ? 'session-thread-group' : ''} ${selected ? 'selected' : ''} ${s.status === 'waiting' ? 'session-waiting-row' : ''} ${isNew ? 'new-item' : ''}"
+        data-id="${s.latestSessionId}" role="button" tabindex="0">
         <div class="session-title">
           <span class="session-chat">${esc(chatName)}</span>
           <span class="session-time">${fmtTime(s.startedAt)}</span>
         </div>
-        <div class="session-trigger">${esc(s.trigger || '')}</div>
+        <div class="session-trigger">${esc(s.trigger || '')}${runLabel ? ` · ${runLabel}` : ''}</div>
         <div class="session-meta">
-          <span class="status-badge status-${s.status}">${STATUS_LABEL[s.status] || s.status}</span>
+          <span class="status-badge status-${s.status}">${esc(sessionStatusText(s))}</span>
+          <span class="mode-chip mode-${mode}">${esc(conversationStatusText(s))}</span>
           ${waitHtml}
           ${activityHtml}
-          ${s.status !== 'waiting' ? `<span>${s.usage ? fmtTokens(s.usage.totalTokens) : '-'}</span><span>${s.rounds || 0} 轮</span>${searchHtml}</span>` : ''}
+          ${s.status !== 'waiting' ? `<span>${s.usage ? fmtTokens(s.usage.totalTokens) : '-'}</span><span>${s.totalRounds || 0} 模型轮</span>${searchHtml}</span>` : ''}
         </div>
       </div>`;
   }).join('');
@@ -734,16 +868,24 @@ function renderSessionList() {
   if (more) {
     more.textContent = rest > 0
       ? `向下滚动加载更多（还有 ${rest} 条）`
-      : (all.length > SESSION_PAGE ? `已显示全部 ${all.length} 条` : '');
+      : (displayItems.length > SESSION_PAGE ? `已显示全部 ${displayItems.length} 个窗口` : '');
   }
   // 头部显示总数（已显示 / 总数），便于确认分页是否真的加载完了
   const cnt = $('#session-count');
   if (cnt) {
-    cnt.textContent = all.length ? `${shown.length}/${all.length}` : '';
+    cnt.textContent = all.length
+      ? `${shown.length}/${displayItems.length} 个窗口 · ${all.length} 次运行`
+      : '';
   }
-  for (const s of state.sessions) state.seenSessionIds.add(s.id);
+  for (const s of displayItems) state.seenSessionIds.add(s.displayKey);
   $$('.session-item', box).forEach((el) => {
-    el.addEventListener('click', () => selectSession(el.dataset.id));
+    const activate = () => selectSession(el.dataset.id);
+    el.addEventListener('click', activate);
+    el.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      activate();
+    });
   });
   // 等待中会话的剩余时间按 0.1s 本地刷新（不重新拉列表）
   if ($$('.session-wait[data-until]', box).length) startWaitTicker();
@@ -775,6 +917,7 @@ function startWaitTicker() {
 async function selectSession(id) {
   state.currentSessionId = id;
   state.sessionDetail = null;
+  state.sessionInspectorTab = 'input';
   lastDetailFp = null;
   renderSessionList();
   $('#session-detail').innerHTML = '<div class="empty-hint">加载中…</div>';
@@ -794,12 +937,122 @@ async function loadSessionDetail(id, { quiet = false } = {}) {
   }
 }
 
+function sessionInjectedMessages(s) {
+  if (Array.isArray(s.injectedMessages)) return s.injectedMessages;
+  const input = Array.isArray(s.inputMessages) ? s.inputMessages : [];
+  return s.lifecycleContinuation && input.length > 2 ? input.slice(1, -1) : [];
+}
+
+function sessionModelRequest(s) {
+  const options = s.inputRequestOptions || {};
+  const tools = Array.isArray(s.inputTools) ? s.inputTools : [];
+  return {
+    model: s.model || '',
+    messages: Array.isArray(s.inputMessages) ? s.inputMessages : [],
+    ...(tools.length ? { tools, tool_choice: options.toolChoice || 'auto' } : {}),
+    ...(Number.isFinite(Number(options.temperature))
+      ? { temperature: Number(options.temperature) }
+      : {})
+  };
+}
+
+function renderSessionContextInspector(s) {
+  const tabs = ['injected', 'input', 'reasoning'];
+  const active = tabs.includes(state.sessionInspectorTab) ? state.sessionInspectorTab : 'input';
+  const injected = sessionInjectedMessages(s);
+  const request = sessionModelRequest(s);
+  const tools = Array.isArray(s.inputTools) ? s.inputTools : [];
+  const calls = Array.isArray(s.callUsage) ? s.callUsage : [];
+  const latestCall = calls.at(-1) || {};
+  const promptTokens = Number(latestCall.promptTokens) || 0;
+  const cachedTokens = Math.min(promptTokens, Number(latestCall.cachedTokens) || 0);
+  const freshTokens = Math.max(0, promptTokens - cachedTokens);
+  const payloadChars = Number(s.inputPayloadChars)
+    || JSON.stringify({ messages: request.messages, tools }).length;
+  const reasoning = (s.messages || [])
+    .filter((message) => message?.role === 'assistant')
+    .map((message, index) => ({
+      round: index + 1,
+      content: String(
+        message.reasoning_content
+        || message.raw?.choices?.[0]?.message?.reasoning_content
+        || ''
+      ).trim()
+    }))
+    .filter((entry) => entry.content);
+
+  let body = '';
+  if (active === 'injected') {
+    body = injected.length
+      ? `<pre class="context-json">${esc(JSON.stringify({
+          threadId: s.threadId || null,
+          messages: injected
+        }, null, 2))}</pre>`
+      : '<div class="context-empty">本轮没有复用上一生命周期的 provider transcript。</div>';
+  } else if (active === 'reasoning') {
+    body = reasoning.length
+      ? `<div class="reasoning-list">${reasoning.slice().reverse().map((entry, index) => `
+          <section class="reasoning-entry">
+            <div class="reasoning-entry-head">第 ${entry.round} 轮${index === 0 ? ' · 最新' : ''}</div>
+            <pre>${esc(entry.content)}</pre>
+          </section>`).join('')}</div>`
+      : `<div class="context-empty">${s.status === 'running'
+          ? '模型请求进行中；当前接口为非流式，推理内容会在本轮响应完成后出现。'
+          : '本次模型响应没有返回 reasoning_content。'}</div>`;
+  } else {
+    body = `
+      ${s.inputHasOmittedImages
+        ? '<div class="context-warning">内联图片二进制未重复写入审计文件；消息结构和原始字符体积已保留。</div>'
+        : ''}
+      ${tools.length
+        ? ''
+        : '<div class="context-warning">该 Session 创建于完整请求审计上线前，工具 schema 未留存。</div>'}
+      <pre class="context-json">${esc(JSON.stringify(request, null, 2))}</pre>`;
+  }
+
+  return `
+    <section class="context-inspector">
+      <div class="context-inspector-head">
+        <div>
+          <strong>模型上下文</strong>
+          <span>第 ${Number(s.inputRound) || Math.max(1, calls.length)} 轮请求快照</span>
+        </div>
+        <span class="context-layout">${esc(s.promptLayout || 'stable-prefix-v2')}</span>
+      </div>
+      <div class="context-metrics">
+        <div><span>实际输入</span><strong>${promptTokens ? fmtTok(promptTokens) : '-'}</strong><small>token</small></div>
+        <div><span>缓存命中</span><strong>${promptTokens ? fmtTok(cachedTokens) : '-'}</strong><small>${promptTokens ? `${Math.round(cachedTokens / promptTokens * 100)}%` : 'token'}</small></div>
+        <div><span>未缓存输入</span><strong>${promptTokens ? fmtTok(freshTokens) : '-'}</strong><small>token</small></div>
+        <div><span>请求体积</span><strong>${fmtTok(payloadChars)}</strong><small>字符</small></div>
+        <div><span>注入历史</span><strong>${fmtTok(injected.length)}</strong><small>条消息</small></div>
+        <div><span>工具定义</span><strong>${fmtTok(tools.length)}</strong><small>个</small></div>
+      </div>
+      ${calls.length ? `
+        <div class="context-call-table-wrap">
+          <table class="context-call-table">
+            <thead><tr><th>轮次</th><th>输入</th><th>缓存</th><th>未缓存</th><th>输出</th><th>总量</th></tr></thead>
+            <tbody>${calls.map((call) => {
+              const input = Number(call.promptTokens) || 0;
+              const cached = Math.min(input, Number(call.cachedTokens) || 0);
+              return `<tr><td>${Number(call.round) || '-'}</td><td>${fmtTok(input)}</td><td>${fmtTok(cached)}</td><td>${fmtTok(Math.max(0, input - cached))}</td><td>${fmtTok(call.completionTokens)}</td><td>${fmtTok(call.totalTokens)}</td></tr>`;
+            }).join('')}</tbody>
+          </table>
+        </div>` : ''}
+      <div class="context-tabs" role="tablist" aria-label="模型上下文检查器">
+        <button type="button" data-context-tab="injected" class="${active === 'injected' ? 'active' : ''}" aria-selected="${active === 'injected'}">注入对话 · ${injected.length}</button>
+        <button type="button" data-context-tab="input" class="${active === 'input' ? 'active' : ''}" aria-selected="${active === 'input'}">完整输入 · ${request.messages.length}</button>
+        <button type="button" data-context-tab="reasoning" class="${active === 'reasoning' ? 'active' : ''}" aria-selected="${active === 'reasoning'}">模型推理 · ${reasoning.length}</button>
+      </div>
+      <div class="context-tab-body" data-active-context-tab="${active}">${body}</div>
+    </section>`;
+}
+
 function renderSessionDetail(s) {
   const detail = $('#session-detail');
   if (!detail) return;
   // 内容没变（轮询/SSE 重复推送）→ 完全不动 DOM，保住滚动位置和展开状态
   // json 模式切换也要触发重渲染
-  const fp = `${s.id}|${s.status}|${s.rounds || 0}|${(s.messages || []).length}|${(s.sent || []).length}|${s.error ? 1 : 0}|${s.activity || ''}|${state.sessionJsonMode === s.id ? 'json' : 'ui'}`;
+  const fp = `${s.id}|${s.status}|${s.conversationMode || 'legacy'}|${s.threadState || ''}|${s.rounds || 0}|${s.inputRound || 0}|${s.inputPayloadChars || 0}|${(s.messages || []).length}|${(s.sent || []).length}|${s.error ? 1 : 0}|${s.activity || ''}|${state.sessionInspectorTab}|${state.sessionJsonMode === s.id ? 'json' : 'ui'}`;
   if (lastDetailFp === fp) return;
   const firstRender = lastDetailFp === null;
   lastDetailFp = fp;
@@ -808,7 +1061,7 @@ function renderSessionDetail(s) {
   const wasAtBottom = detail.scrollHeight - detail.scrollTop - detail.clientHeight < 48;
   const keepScroll = detail.scrollTop;
   const chatName = formatChatTitle(s.chatKey, chatNameOf(s.chatKey));
-  const statusBadge = `<span class="status-badge status-${s.status}">${STATUS_LABEL[s.status] || s.status}</span>`;
+  const statusBadge = `<span class="status-badge status-${s.status}">${esc(sessionStatusText(s))}</span>`;
   const usage = s.usage || {};
   const firstCall = Array.isArray(s.callUsage) ? s.callUsage[0] : null;
 
@@ -820,15 +1073,16 @@ function renderSessionDetail(s) {
       </h2>
       <div class="sub">
         <span>触发：${esc(s.triggerSummary || (s.trigger === 'proactive' ? '主动机会' : '-'))}</span>
-        <span>开始 ${fmtClock(s.startedAt)}${s.endedAt ? ` · 结束 ${fmtClock(s.endedAt)}` : ' · 进行中'}</span>
+        <span>开始 ${fmtClock(s.startedAt)}${s.endedAt ? ` · ${s.conversationMode === 'lifecycle' ? '本轮结束' : '结束'} ${fmtClock(s.endedAt)}` : ' · 进行中'}</span>
         <span>模型 ${esc(s.model || '-')}</span>
-        <span>对话模式 ${esc(s.conversationMode || 'legacy')}${s.threadState ? ` · ${esc(s.threadState)}` : ''}</span>
         ${firstCall ? `<span>首轮缓存 ${((Number(firstCall.cacheHitRate) || 0) * 100).toFixed(0)}%</span>` : ''}
         <span>${usage.calls || 0} 次调用 · ${fmtTokens(usage.promptTokens)} 入 / ${fmtTokens(usage.completionTokens)} 出 / ${fmtTokens(usage.totalTokens)} 总</span>
         <span>${s.rounds || 0} 轮工具</span>
         <span>联网搜索 ${Number(s.webSearchCount) || 0} 次</span>
       </div>
-    </div>`);
+    </div>
+    ${renderSessionModeBand(s)}
+    ${renderSessionThreadTimeline(s)}`);
 
   const jsonMode = state.sessionJsonMode === s.id;
   if (jsonMode) {
@@ -844,10 +1098,15 @@ function renderSessionDetail(s) {
       callUsage: s.callUsage || [],
       systemPrompt: s.systemPrompt || '',
       userPrompt: s.userPrompt || '',
-      inputMessages: (s.inputMessages || []).map((m) => ({ role: m.role, content: m.content })),
+      injectedMessages: sessionInjectedMessages(s),
+      currentModelRequest: sessionModelRequest(s),
+      inputRound: s.inputRound || 0,
+      inputPayloadChars: s.inputPayloadChars || 0,
+      inputHasOmittedImages: s.inputHasOmittedImages === true,
       llmMessages: (s.messages || []).filter((m) => m.role === 'assistant').map((m) => ({
         role: m.role,
         content: m.content,
+        reasoning_content: m.reasoning_content ?? null,
         tool_calls: m.tool_calls ?? null,
         raw: m.raw ?? null
       })),
@@ -865,23 +1124,7 @@ function renderSessionDetail(s) {
         <div class="coll-body" style="max-height:none">${esc(JSON.stringify(raw, null, 2))}</div>
       </details>`);
   } else {
-    if (s.systemPrompt) {
-      html.push(`
-        <details class="collapsible">
-          <summary>系统提示（${s.systemPrompt.length} 字符，每次运行重发）</summary>
-          <div class="coll-body">${esc(s.systemPrompt)}</div>
-        </details>`);
-    }
-    if (s.userPrompt) {
-      const inputNote = s.lifecycleContinuation
-        ? '生命周期增量，历史前缀已复用'
-        : '由消息存档和记忆动态生成';
-      html.push(`
-        <details class="collapsible" open>
-          <summary>本次输入（${s.userPrompt.length} 字符 · ${inputNote}）</summary>
-          <div class="coll-body">${esc(s.userPrompt)}</div>
-        </details>`);
-    }
+    html.push(renderSessionContextInspector(s));
   }
 
   html.push('<div class="msg-flow">');
@@ -905,7 +1148,7 @@ function renderSessionDetail(s) {
         if (item.tool_calls && item.tool_calls.length && !text.trim()) continue; // 纯工具调用轮，卡片已展示
         html.push(`
           <div class="bubble bubble-assistant">
-            <div class="asr-label">思考（不发送）</div>
+            <div class="asr-label">模型文本（不发送）</div>
             ${esc(text || '（无文本输出，仅调用工具）')}
           </div>`);
       }
@@ -933,6 +1176,20 @@ function renderSessionDetail(s) {
     state.sessionJsonMode = state.sessionJsonMode === s.id ? null : s.id;
     lastDetailFp = null;   // 强制重渲染
     renderSessionDetail(s);
+  });
+  detail.querySelectorAll('[data-context-tab]').forEach((button) => {
+    button.addEventListener('click', () => {
+      state.sessionInspectorTab = button.dataset.contextTab;
+      lastDetailFp = null;
+      renderSessionDetail(s);
+    });
+  });
+  detail.querySelectorAll('[data-thread-session-id]').forEach((button) => {
+    button.addEventListener('click', () => {
+      if (button.dataset.threadSessionId !== state.currentSessionId) {
+        selectSession(button.dataset.threadSessionId);
+      }
+    });
   });
   if (firstRender || (s.status === 'running' && wasAtBottom)) {
     detail.scrollTop = detail.scrollHeight;      // 首次打开 / 贴底跟随新内容
@@ -982,7 +1239,7 @@ function renderChatList() {
       <div class="chat-item ${c.key === state.currentChatKey ? 'selected' : ''} ${c.unread ? 'unread-row' : ''} ${isNew ? 'new-item' : ''}" data-key="${c.key}">
         <div class="chat-item-title">
           <span class="session-chat">${esc(name)}</span>
-          ${threadLabel ? `<span class="unread-pill">${threadLabel}</span>` : ''}
+          ${threadLabel ? `<span class="thread-pill mode-${mode}">${threadLabel}</span>` : ''}
           ${c.unread ? `<span class="unread-pill">${c.unread}</span>` : ''}
         </div>
         <div class="chat-item-sub">${esc(c.lastText || '（空）')}</div>
@@ -3013,6 +3270,96 @@ const TIER_HINT = {
   4: '任何消息都响应（改造前的行为，最费 token）'
 };
 
+function renderConversationModePanels(conversation = {}) {
+  const activeMode = ['legacy', 'threaded', 'lifecycle'].includes(conversation.mode)
+    ? conversation.mode
+    : 'legacy';
+  const modes = [
+    ['legacy', '传统触发', '按规则启动'],
+    ['threaded', '参与者续接', '短窗口延续'],
+    ['lifecycle', '完整生命周期', '持续批次判断']
+  ];
+  const panelAttrs = (mode) =>
+    `class="conversation-mode-panel${activeMode === mode ? '' : ' hidden'} mode-${mode}" `
+    + `data-conversation-panel="${mode}" aria-hidden="${activeMode === mode ? 'false' : 'true'}"`;
+
+  return `
+    <div class="conversation-mode-shell mode-${activeMode}" id="conversation-mode-shell" data-mode="${activeMode}">
+      <div class="conversation-mode-switch" role="tablist" aria-label="默认对话模式">
+        ${modes.map(([mode, label, subtitle]) => `
+          <button type="button"
+            class="conversation-mode-option mode-${mode}${activeMode === mode ? ' active' : ''}"
+            data-conversation-mode="${mode}" role="tab"
+            aria-selected="${activeMode === mode ? 'true' : 'false'}">
+            <span>${label}</span>
+            <small>${subtitle}</small>
+          </button>`).join('')}
+      </div>
+      <input type="hidden" id="cfg-conversation-mode" value="${activeMode}" />
+
+      <div class="conversation-mode-stage">
+        <section ${panelAttrs('legacy')}>
+          <div class="conversation-mode-heading">
+            <div>
+              <strong>传统触发</strong>
+              <span>每个消息批次独立判断</span>
+            </div>
+            <span class="mode-state-token">无持续线程</span>
+          </div>
+          <div class="conversation-mode-flow" aria-label="传统触发流程">
+            <span>响应档位</span><i></i><span>单次运行</span><i></i><span>结束</span>
+          </div>
+          <dl class="conversation-mode-facts">
+            <div><dt>启动条件</dt><dd>@ / 关键词 / 概率</dd></div>
+            <div><dt>后续消息</dt><dd>重新判断触发条件</dd></div>
+            <div><dt>上下文</dt><dd>按档位读取消息</dd></div>
+          </dl>
+        </section>
+
+        <section ${panelAttrs('threaded')}>
+          <div class="conversation-mode-heading">
+            <div>
+              <strong>参与者续接</strong>
+              <span>机器人发言后为当前参与者保留续接窗口</span>
+            </div>
+            <span class="mode-state-token">参与者限定</span>
+          </div>
+          <div class="conversation-mode-flow" aria-label="参与者续接流程">
+            <span>首次触发</span><i></i><span>参与者续接</span><i></i><span>线程过期</span>
+          </div>
+          <div class="field-row conversation-mode-fields">
+            <div class="field"><label>确定性续接窗口（秒）</label><input type="number" id="cfg-cont-window" min="10" max="1800" value="${esc(Math.round((conversation.continuationWindowMs ?? 180000) / 1000))}" /></div>
+            <div class="field"><label>线程空闲过期（分钟）</label><input type="number" id="cfg-thread-ttl" min="5" max="1440" value="${esc(Math.round((conversation.threadTtlMs ?? 1800000) / 60000))}" /></div>
+            <div class="field"><label>续接读取历史条数</label><input type="number" id="cfg-cont-history" min="1" max="500" value="${esc(conversation.continuationContextCount ?? 100)}" /></div>
+          </div>
+        </section>
+
+        <section ${panelAttrs('lifecycle')}>
+          <div class="conversation-mode-heading">
+            <div>
+              <strong>完整生命周期</strong>
+              <span>生命周期内每批消息都进入模型判断</span>
+            </div>
+            <span class="mode-state-token">持久化线程</span>
+          </div>
+          <div class="conversation-mode-flow" aria-label="完整生命周期流程">
+            <span>监听</span><i></i><span>活跃</span><i></i><span>硬上限</span><i></i><span>待续接</span>
+          </div>
+          <div class="field-row conversation-mode-fields">
+            <div class="field"><label>监听空闲结束（分钟）</label><input type="number" id="cfg-life-silent" min="1" max="60" value="${esc(Math.round((conversation.silentIdleMs ?? 300000) / 60000))}" /></div>
+            <div class="field"><label>活跃空闲结束（分钟）</label><input type="number" id="cfg-life-active" min="1" max="120" value="${esc(Math.round((conversation.activeIdleMs ?? 1200000) / 60000))}" /></div>
+            <div class="field"><label>生命周期硬上限（分钟）</label><input type="number" id="cfg-life-hard" min="5" max="240" value="${esc(Math.round((conversation.hardLifetimeMs ?? 1800000) / 60000))}" /></div>
+          </div>
+          <div class="field-row conversation-mode-fields">
+            <div class="field"><label>硬上限后待续接（分钟）</label><input type="number" id="cfg-life-rollover" min="1" max="60" value="${esc(Math.round((conversation.rolloverArmedMs ?? 600000) / 60000))}" /></div>
+            <div class="field"><label>首次读取历史条数</label><input type="number" id="cfg-life-history" min="1" max="500" value="${esc(conversation.lifecycleContextCount ?? 100)}" /></div>
+            <div class="field"><label>追加上下文上限（字符）</label><input type="number" id="cfg-life-chars" min="20000" max="1000000" step="10000" value="${esc(conversation.maxTranscriptChars ?? 240000)}" /></div>
+          </div>
+        </section>
+      </div>
+    </div>`;
+}
+
 function renderChatSection(c) {
   const st = c.store || {};
   const conversation = c.conversation || {};
@@ -3024,64 +3371,43 @@ function renderChatSection(c) {
   //    整个 renderChatSection 抛 ReferenceError，聊天设置页直接打不开。
   const B = TIER_SLIDER_BANDS;
 return `
-    <h3>运行节奏</h3>
+    <h3>对话模式</h3>
+    ${renderConversationModePanels(conversation)}
+
+    <div class="conversation-scope">
+      <div class="conversation-scope-heading">
+        <strong>应用范围</strong>
+        <span>模式参数按类型共用，群聊只选择使用哪一种模式</span>
+      </div>
+      <div class="checkbox-row"><input type="checkbox" id="cfg-conversation-unified" ${conversation.unifiedMode !== false ? 'checked' : ''} />
+        <label for="cfg-conversation-unified">所有群聊统一使用默认模式</label></div>
+      <div id="conversation-pergroup-wrap"${conversation.unifiedMode === false ? '' : ' style="display:none"'}>
+        <div class="field-row">
+          <div class="field"><label>选择群聊</label><select id="conversation-group-select"></select></div>
+          <div class="field"><label>该群模式</label>
+            <select id="conversation-group-mode">
+              <option value="legacy">传统触发</option>
+              <option value="threaded">参与者续接</option>
+              <option value="lifecycle">完整生命周期</option>
+            </select>
+          </div>
+        </div>
+        <input type="hidden" id="conversation-group-json" value="${esc(JSON.stringify(conversation.groupModes || {}))}" />
+        <div class="conversation-scope-actions">
+          <button class="btn btn-small btn-danger" id="conversation-group-clear-btn">清除该群覆盖</button>
+          <span class="hint">未覆盖的群聊与私聊跟随默认模式。</span>
+        </div>
+      </div>
+    </div>
+
+    <h3>所有模式 · 运行节奏</h3>
     <div class="field-row">
       <div class="field"><label>防抖聚批窗口（毫秒）—— 等连发消息聚成一批再开运行</label><input type="number" id="cfg-wakedelay" min="0" value="${esc(c.wakeDelayMs)}" /></div>
       <div class="field"><label>批次间隔（毫秒）—— 上轮结束到下轮处理的间隔</label><input type="number" id="cfg-draindelay" min="0" value="${esc(c.drainDelayMs)}" /></div>
       <div class="field"><label>同时处理几个会话</label><input type="number" id="cfg-maxruns" min="1" max="8" value="${esc(c.maxConcurrentRuns)}" /></div>
     </div>
 
-    <h3>对话机制</h3>
-    <div class="field-row">
-      <div class="field"><label>默认模式</label>
-        <select id="cfg-conversation-mode">
-          <option value="legacy" ${conversation.mode === 'legacy' ? 'selected' : ''}>传统触发</option>
-          <option value="threaded" ${conversation.mode === 'threaded' ? 'selected' : ''}>参与者续接</option>
-          <option value="lifecycle" ${conversation.mode === 'lifecycle' ? 'selected' : ''}>完整生命周期</option>
-        </select>
-      </div>
-      <div class="field"><label>续接时读取历史条数</label><input type="number" id="cfg-cont-history" min="1" max="500" value="${esc(conversation.continuationContextCount ?? 100)}" /></div>
-    </div>
-    <div class="checkbox-row"><input type="checkbox" id="cfg-conversation-unified" ${conversation.unifiedMode !== false ? 'checked' : ''} />
-      <label for="cfg-conversation-unified">所有群聊统一使用默认模式</label></div>
-    <div id="conversation-pergroup-wrap"${conversation.unifiedMode === false ? '' : ' style="display:none"'}>
-      <div class="field-row">
-        <div class="field"><label>选择群聊</label><select id="conversation-group-select"></select></div>
-        <div class="field"><label>该群模式</label>
-          <select id="conversation-group-mode">
-            <option value="legacy">传统触发</option>
-            <option value="threaded">参与者续接</option>
-            <option value="lifecycle">完整生命周期</option>
-          </select>
-        </div>
-      </div>
-      <input type="hidden" id="conversation-group-json" value="${esc(JSON.stringify(conversation.groupModes || {}))}" />
-      <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
-        <button class="btn btn-small btn-danger" id="conversation-group-clear-btn">清除该群覆盖</button>
-        <span class="hint" style="margin:0">没有单独设置的群聊跟随默认模式；私聊始终跟随默认模式。</span>
-      </div>
-    </div>
-    <div class="hint">传统触发只按 @/关键词/概率运行；参与者续接只放行短窗口内的对话对象；完整生命周期会把生命周期内每批消息交给模型自行决定是否回复。</div>
-
-    <h3>参与者续接参数</h3>
-    <div class="field-row">
-      <div class="field"><label>确定性续接窗口（秒）</label><input type="number" id="cfg-cont-window" min="10" max="1800" value="${esc(Math.round((conversation.continuationWindowMs ?? 180000) / 1000))}" /></div>
-      <div class="field"><label>线程空闲过期（分钟）</label><input type="number" id="cfg-thread-ttl" min="5" max="1440" value="${esc(Math.round((conversation.threadTtlMs ?? 1800000) / 60000))}" /></div>
-    </div>
-
-    <h3>完整生命周期参数</h3>
-    <div class="field-row">
-      <div class="field"><label>沉默状态空闲结束（分钟）</label><input type="number" id="cfg-life-silent" min="1" max="60" value="${esc(Math.round((conversation.silentIdleMs ?? 300000) / 60000))}" /></div>
-      <div class="field"><label>活跃状态空闲结束（分钟）</label><input type="number" id="cfg-life-active" min="1" max="120" value="${esc(Math.round((conversation.activeIdleMs ?? 1200000) / 60000))}" /></div>
-      <div class="field"><label>绝对生命周期上限（分钟）</label><input type="number" id="cfg-life-hard" min="5" max="240" value="${esc(Math.round((conversation.hardLifetimeMs ?? 1800000) / 60000))}" /></div>
-    </div>
-    <div class="field-row">
-      <div class="field"><label>硬上限后任意消息续接（分钟）</label><input type="number" id="cfg-life-rollover" min="1" max="60" value="${esc(Math.round((conversation.rolloverArmedMs ?? 600000) / 60000))}" /></div>
-      <div class="field"><label>生命周期首次读取历史条数</label><input type="number" id="cfg-life-history" min="1" max="500" value="${esc(conversation.lifecycleContextCount ?? 100)}" /></div>
-      <div class="field"><label>追加式上下文上限（字符）</label><input type="number" id="cfg-life-chars" min="20000" max="1000000" step="10000" value="${esc(conversation.maxTranscriptChars ?? 240000)}" /></div>
-    </div>
-
-    <h3>发送保护</h3>
+    <h3>所有模式 · 发送保护</h3>
     <div class="field-row">
       <div class="field"><label>相邻消息最小间隔（毫秒）</label><input type="number" id="cfg-mingap" min="200" value="${esc(c.send.minGapMs)}" /></div>
       <div class="field"><label>最大间隔（毫秒）</label><input type="number" id="cfg-maxgap" min="500" value="${esc(c.send.maxGapMs)}" /></div>
@@ -3093,7 +3419,7 @@ return `
       <div class="field"><label>QQ 硬限制切分长度（0 = 不切）</label><input type="number" id="cfg-hardsplit" min="0" value="${esc(c.send.hardSplitAt ?? 4000)}" /></div>
     </div>
 
-    <h3>主动开话题</h3>
+    <h3>所有模式 · 主动开话题</h3>
     <div class="checkbox-row"><input type="checkbox" id="cfg-proactive" ${c.proactive.enabled ? 'checked' : ''} />
       <label for="cfg-proactive">冷场时按概率主动开话题</label></div>
     <div class="field-row">
@@ -3102,7 +3428,7 @@ return `
       <div class="field"><label>触发概率 0~1</label><input type="number" id="cfg-pro-prob" step="0.05" min="0" max="1" value="${esc(c.proactive.probability)}" /></div>
     </div>
 
-    <h3>表情包</h3>
+    <h3>所有模式 · 表情包</h3>
     <div class="checkbox-row"><input type="checkbox" id="cfg-sticker" ${c.sticker.enabled ? 'checked' : ''} />
       <label for="cfg-sticker">启用表情包（收藏表情同步 + 发送工具）</label></div>
 
@@ -3118,7 +3444,8 @@ return `
       </div>
     </div>
 
-    <h3>响应档位</h3>
+    <h3>首次唤醒与历史</h3>
+    <div class="hint conversation-trigger-hint" id="conversation-trigger-hint"></div>
 
     <div class="checkbox-row"><input type="checkbox" id="cfg-unifiedtier" ${st.unifiedTier !== false ? 'checked' : ''} />
       <label for="cfg-unifiedtier">统一设置全部响应档位（关掉就能给每个白名单群聊单独拖档位）</label></div>
@@ -3412,6 +3739,42 @@ function bindSettingsEvents(c) {
     tierSlider.addEventListener('input', sync);
     sync();   // 初始同步一次
   }
+
+  // ── 对话模式：分段切换器只展示当前模式相关参数 ──
+  const conversationModeInput = $('#cfg-conversation-mode');
+  const conversationModeShell = $('#conversation-mode-shell');
+  const conversationModeHint = $('#conversation-trigger-hint');
+  const triggerHints = {
+    legacy: '每批消息都依据以下档位决定是否启动。',
+    threaded: '没有有效续接线程时使用以下档位；续接对象直接进入运行。',
+    lifecycle: '没有活动生命周期时使用以下档位；生命周期内消息不再受档位拦截。'
+  };
+  const syncConversationMode = (mode) => {
+    const next = ['legacy', 'threaded', 'lifecycle'].includes(mode) ? mode : 'legacy';
+    if (conversationModeInput) conversationModeInput.value = next;
+    if (conversationModeShell) {
+      conversationModeShell.dataset.mode = next;
+      conversationModeShell.className = `conversation-mode-shell mode-${next}`;
+    }
+    document.querySelectorAll('[data-conversation-mode]').forEach((button) => {
+      const active = button.dataset.conversationMode === next;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+    document.querySelectorAll('[data-conversation-panel]').forEach((panel) => {
+      const active = panel.dataset.conversationPanel === next;
+      panel.classList.toggle('hidden', !active);
+      panel.setAttribute('aria-hidden', active ? 'false' : 'true');
+    });
+    if (conversationModeHint) conversationModeHint.textContent = triggerHints[next];
+  };
+  document.querySelectorAll('[data-conversation-mode]').forEach((button) => {
+    button.addEventListener('click', () => {
+      syncConversationMode(button.dataset.conversationMode);
+      conversationModeInput?.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+  });
+  syncConversationMode(conversationModeInput?.value);
 
   // ── 对话机制：全局默认 + 分群覆盖 ──
   const conversationUnified = $('#cfg-conversation-unified');

@@ -16,6 +16,8 @@ task_plan.md
 # 依赖
 node_modules/
 .runtime/
+.dbg/
+debug-*.md
 
 # 运行时临时文件
 .trash/

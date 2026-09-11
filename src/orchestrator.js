@@ -66,6 +66,25 @@ function hasInlineImage(messages) {
       && String(part?.image_url?.url || '').startsWith('data:')));
 }
 
+function modelMessagesForAudit(messages) {
+  return structuredClone(messages || []).map((message) => {
+    if (!Array.isArray(message?.content)) return message;
+    message.content = message.content.map((part) => {
+      const url = String(part?.image_url?.url || '');
+      if (part?.type !== 'image_url' || !url.startsWith('data:')) return part;
+      const mime = /^data:([^;,]+)/.exec(url)?.[1] || 'application/octet-stream';
+      return {
+        ...part,
+        image_url: {
+          ...part.image_url,
+          url: `[inline ${mime} omitted from audit snapshot; ${url.length} chars]`
+        }
+      };
+    });
+    return message;
+  });
+}
+
 export class Orchestrator {
   constructor({ store, memory, stickers, sender, sessions, onebot, emit = null }) {
     this.store = store;
@@ -626,11 +645,9 @@ export class Orchestrator {
       );
       const disposition = session.threadDisposition
         || (session.sent.length > 0 || hasOpenWork ? 'active' : 'listening');
-      const closeReason = session.handoffDraft?.clearHandoff === true
-        ? 'handoff-cleared'
-        : session.threadDisposition === 'close'
-          ? 'model-close'
-          : '';
+      const closeReason = session.threadDisposition === 'close'
+        ? 'model-close'
+        : '';
       const persistThread = triggerEntries.length > 0
         || session.sent.length > 0
         || Boolean(session.threadDisposition);
@@ -667,7 +684,7 @@ export class Orchestrator {
         forceRollover: runResult?.forceThreadRollover || '',
         rolloverArmedMs: conversation?.rolloverArmedMs
       });
-      session.threadId = result.thread?.threadId || null;
+      session.threadId = result.thread?.threadId || session.threadId || null;
       session.threadState = result.thread?.state || (closeReason ? 'closed' : null);
       session.threadTranscriptChars = result.transcriptChars;
       return;
@@ -839,9 +856,13 @@ export class Orchestrator {
       currentUserMessage
     ];
     const transcriptStart = 1 + priorProviderMessages.length;
-    // JSON 模式需要看到输入给模型的完整 messages（去工具之前）
-    session.inputMessages = structuredClone(messages.map((m) => ({ role: m.role, content: m.content })));
-    this.sessions.update(session.id);
+    session.injectedMessages = modelMessagesForAudit(priorProviderMessages);
+    session.injectedMessageChars = JSON.stringify(priorProviderMessages).length;
+    session.inputTools = structuredClone(openAiTools);
+    session.inputRequestOptions = {
+      toolChoice: 'auto',
+      temperature: cfg.api.temperature ?? 0.8
+    };
 
     session.promptLayout = lifecycleContinuation
       ? 'deepseek-lifecycle-append-v1'
@@ -880,6 +901,13 @@ export class Orchestrator {
       if (session.usage.totalTokens >= (Number(cfg.api.maxRunTokens) || 120000)) {
         throw new Error('Run token budget exceeded');
       }
+      session.inputRound = round + 1;
+      session.inputPayloadChars = JSON.stringify({
+        messages,
+        tools: openAiTools
+      }).length;
+      session.inputHasOmittedImages = hasInlineImage(messages);
+      session.inputMessages = modelMessagesForAudit(messages);
       markActivity('正在思考…');
       // 网络抖动/5xx/429 会自动重试（同一轮请求，messages 不变，幂等不重复发言）
       const response = await chatCompletionWithRetry({
@@ -903,7 +931,9 @@ export class Orchestrator {
         round: round + 1,
         promptTokens,
         cachedTokens: Math.min(promptTokens, cachedTokens),
-        cacheHitRate: promptTokens ? Math.min(1, cachedTokens / promptTokens) : 0
+        cacheHitRate: promptTokens ? Math.min(1, cachedTokens / promptTokens) : 0,
+        completionTokens: Number(response.usage?.completion_tokens) || 0,
+        totalTokens: Number(response.usage?.total_tokens) || 0
       });
 
       const msg = response.message;

@@ -69,6 +69,52 @@ The active provider transcript is temporary working state. Closing or rolling a
 lifecycle deletes it from `thread_turns`; the normal per-run audit files retain
 their existing provider response records according to session retention policy.
 
+## Runtime Identity And Boundaries
+
+The runtime uses three different identifiers and persistence scopes:
+
+- `chatKey` identifies the QQ conversation, such as `group:1108998242`.
+- `sessionId` identifies one Agent execution for one claimed message batch.
+  It owns the timeout, tool rounds, usage, send audit and success/failure result.
+- `threadId` identifies the lifecycle shared by multiple Agent Sessions. It owns
+  lifecycle deadlines, the append-only provider transcript and checkpoints.
+
+One lifecycle therefore normally contains multiple Session records:
+
+```text
+QQ messages
+  -> debounced message batch
+  -> one Agent Session
+  -> read prior thread_turns by threadId
+  -> call model and tools
+  -> atomically acknowledge batch + append transcript + checkpoint
+  -> end Agent Session
+  -> keep lifecycle thread active/listening for the next batch
+```
+
+The Session boundary is intentional. It provides an isolated message lease and
+retry boundary without keeping an HTTP request or model process alive during the
+idle part of a lifecycle. It does not reset model context.
+
+The console keeps those execution boundaries but groups `threaded` and
+`lifecycle` Sessions by `threadId`. One thread appears as one list item with an
+internal batch timeline. Selecting a batch shows that run's exact audit data.
+Legacy Sessions remain one item per run because they do not share a thread.
+
+## Context Inspector
+
+Each new Session audit records:
+
+- the provider transcript injected from the existing lifecycle;
+- the latest complete model request (`messages`, tool schemas and request options);
+- exact provider token usage for every tool round, including cached input tokens;
+- provider `reasoning_content` when the selected model returns it.
+
+The request snapshot omits inline image bytes to avoid duplicating large base64
+payloads in every Session file. The message structure, MIME type and original
+request character count remain visible. Token values come from provider usage
+instead of being estimated from character counts.
+
 ## Operational Guidance
 
 Start with lifecycle mode on one active group. Compare it with threaded and

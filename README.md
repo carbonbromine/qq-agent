@@ -29,7 +29,7 @@ OneBot WebSocket
 要求：
 
 - Linux + systemd user service
-- `curl`、`tar`、`sha256sum`（缺少 Node.js 时自动安装已校验的 Node 22）
+- `curl`、`tar`、`sha256sum`、`rsync`（缺少 Node.js 时自动安装已校验的 Node 22）
 - 已运行的 OneBot v11 HTTP 和正向 WebSocket 服务
 - OpenAI Chat Completions 兼容模型
 
@@ -46,13 +46,30 @@ bash deploy.sh \
 
 部署脚本会：
 
+- 校验参数、源码和 Node.js `node:sqlite` 能力
 - 安装生产依赖
 - 自动检测或安装 Node.js 22 运行时
 - 初始化独立数据目录和控制台 Token
 - 注册并启用 `qq-agent-linux.service`
 - 配置进程异常自动重启
 - 检查端口冲突和 systemd unit
-- 以 `observe` 模式启动，避免误发消息
+- 首次安装以 `observe` 模式启动，更新时保留已有运行模式
+- 更新前自动创建代码快照，失败时恢复旧代码、配置和服务
+- 排除 `.git`、`.dbg`、运行数据、凭据和本地调试记录
+
+查看全部参数：
+
+```bash
+bash deploy.sh --help
+```
+
+如果已有外部备份流程，可以显式跳过代码快照：
+
+```bash
+bash deploy.sh --install-dir /mnt/data/qq-agent/app \
+  --data-dir /mnt/data/qq-agent/data --host 192.168.31.109 --port 3210 \
+  --no-backup
+```
 
 首次从旧 Bridge 迁移连接配置时可附加：
 
@@ -62,6 +79,21 @@ bash deploy.sh \
 ```
 
 该操作只复制配置，不修改旧目录或数据。
+
+更新已有安装：
+
+```bash
+git pull --ff-only
+bash deploy.sh \
+  --install-dir /mnt/data/qq-agent/app \
+  --data-dir /mnt/data/qq-agent/data \
+  --host 192.168.31.109 \
+  --port 3210
+```
+
+更新不会重置现有配置或运行模式。默认在
+`DATA_DIR/deploy-backups/` 创建部署前代码快照；任何安装、配置、systemd
+校验或健康检查失败都会自动恢复旧代码、配置和服务。
 
 ## 运维
 
@@ -91,9 +123,11 @@ bash manage.sh backup /path/to/new-backup-dir
 - `memory/`：群友长期印象和跨 Session 会话交接状态
 - `console-access.txt`：控制台地址和 Token，权限 `0600`
 
-每次运行仍是独立的模型会话，但 `finish` 会把已确认事实、决定、
-未决问题和下一步写入结构化交接文件，并在同一 QQ 会话的下次运行自动注入。
-默认有效期为 24 小时，可在记忆页检查、编辑或清除。原始隐藏思维链不会持久化。
+每次 Agent 运行仍有独立的审计记录。`lifecycle` 模式会按 `threadId`
+持久化 provider transcript（包括工具轨迹和供应商返回的
+`reasoning_content`），并在下一批消息中按原顺序续接；结构化 handoff
+作为生命周期滚动后的压缩状态继续保留。控制台可检查注入历史、最新完整模型
+输入以及逐轮 Token/缓存命中。
 
 聊天、密钥、Token 和运行数据均被 Git 忽略。
 
