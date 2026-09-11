@@ -13,9 +13,9 @@
       try {
         var saved = localStorage.getItem('qqa-theme') || '';
         var sys = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
-        // 合法值：dark / light / system / ?（整活主题）。未知值回退暗色。
-        var theme = (saved === 'light' || saved === 'dark' || saved === '?') ? saved : (saved === 'system' ? sys : (saved || sys));
-        if (theme !== 'light' && theme !== 'dark' && theme !== '?') theme = 'dark';
+        // 合法值：dark / light / system。未知值回退暗色。
+        var theme = (saved === 'light' || saved === 'dark') ? saved : (saved === 'system' ? sys : (saved || sys));
+        if (theme !== 'light' && theme !== 'dark') theme = 'dark';
         document.documentElement.setAttribute('data-theme', theme);
       } catch (e) {
         document.documentElement.setAttribute('data-theme', 'dark');
@@ -51,7 +51,7 @@
   <div id="loading-overlay" class="loading-overlay" data-page-node-id="MpXTOwnEFQFI3iciufCGwk">
     <div class="loading-card" data-page-node-id="boXG4AHTg9zdLRzAkPQU0d">
       <div class="loading-title" data-page-node-id="Jd8xjaha2bCfyriCNfs8Tn">QQ Agent 正在启动</div>
-      <div class="loading-sub" id="loading-status" data-page-node-id="pnFkOCeJYMuEWqSGBEF5NX">正在启动 SnowLuma 与 OneBot 服务，请稍候…</div>
+      <div class="loading-sub" id="loading-status" data-page-node-id="pnFkOCeJYMuEWqSGBEF5NX">正在连接 QQ Agent 服务，请稍候…</div>
       <div class="loading-spinner" data-page-node-id="pVvSFcW7FhjA5K8LpxpM5o"></div>
       <pre class="loading-logs" id="loading-logs" data-page-node-id="qCOILAMT7FkCZFYCEKYo4o"></pre>
     </div>
@@ -62,14 +62,7 @@
     <button class="tab" data-tab="chats" data-page-node-id="AdXD0D2NiWH5UBfpPQqzQ2">存档</button>
     <button class="tab" data-tab="memory" data-page-node-id="vXS9OY6wG4MkJlzQ2aLADZ">记忆</button>
     <button class="tab" data-tab="usage" data-page-node-id="hcZzcXuMojNoiE7UcRVYfR">用量</button>
-    <button class="tab" data-tab="snowluma" data-page-node-id="xFOx4aoCGOuX8g3AXNrBPj">SnowLuma</button>
     <button class="tab" data-tab="settings" data-page-node-id="4cXbRBtGmcpcL272eKvHPV">设置</button>
-    <!-- 社区功能（右侧）：金句上传 / 意见收集。金句勾选模式下「确认金句」出现在最左 -->
-    <span class="nav-spacer"></span>
-    <button class="nav-btn hidden" id="quote-confirm-btn">确认金句</button>
-    <button class="nav-btn" id="quote-btn" title="把机器人的精彩发言收录到金句墙">金句上传</button>
-    <button class="nav-btn" id="feedback-btn" title="向作者反馈意见和建议">意见收集</button>
-    <button class="nav-btn nav-btn-hot" id="open-site-btn" title="打开 QQ Agent 网站">打开网站！</button>
   </nav>
 
   <main id="layout" data-page-node-id="hvuDZ0DOoYC7fFheJnpiGZ">
@@ -94,11 +87,6 @@
       <div id="chat-detail" class="detail-pane" data-page-node-id="4Rt59kYD5wtdJBqdZ57bLM">
         <div class="empty-hint" data-page-node-id="ivIsDOFTVXiPkxXwnVOGlx">← 选择会话查看消息存档</div>
       </div>
-    </section>
-
-    <!-- SnowLuma 视图 -->
-    <section id="view-snowluma" class="view" data-page-node-id="53uE3Zo3JPnyOzB2ChLSiO">
-      <div id="snowluma-page" class="snowluma-pane" data-page-node-id="VeCbHXFvH0XsHAqkw2PfCF"></div>
     </section>
 
     <!-- 记忆视图 -->

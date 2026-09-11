@@ -156,6 +156,19 @@ try {
     fail++;
     console.log('  FAIL  控制台 Token 更新控件缺失或回显了密钥');
   }
+  const onebotHtml = ctx.renderOnebotSection({
+    ...cfg,
+    onebot: { ...cfg.onebot, accessToken: 'onebot-secret', httpAccessToken: 'onebot-http-secret',
+      hasAccessToken: true, hasHttpAccessToken: true }
+  });
+  if (onebotHtml.includes('cfg-obtoken') && onebotHtml.includes('留空保持不变')
+      && !onebotHtml.includes('onebot-secret') && !onebotHtml.includes('onebot-http-secret')) {
+    pass++;
+    console.log('  OK    OneBot Token 留空保持且不回显密钥');
+  } else {
+    fail++;
+    console.log('  FAIL  OneBot Token 控件会丢失或回显密钥');
+  }
 
   // 滑条换算函数
   console.log('\n=== 滑条换算（UI 侧）===');

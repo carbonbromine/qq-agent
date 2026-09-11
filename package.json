@@ -1,53 +1,14 @@
 {
   "name": "qq-agent",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": false,
-  "description": "Linux-ready stateless QQ Agent with SQLite message leases and an isolated console.",
+  "description": "Linux stateless QQ Agent with SQLite message leases and an isolated console.",
   "type": "module",
-  "main": "electron/main.js",
-  "build": {
-    "appId": "cn.kondius.qq-agent",
-    "productName": "QQ Agent",
-    "artifactName": "qq-agent-v0.3-setup.exe",
-    "asar": false,
-    "files": [
-      "**/*",
-      "!data/**",
-      "!snowluma/config/**",
-      "!snowluma/data/**",
-      "!snowluma/logs/**",
-      "!test/**",
-      "!docs/**",
-      "!scripts/**",
-      "!dist/**",
-      "!**/*.map",
-      "!package-lock.json.bak",
-      "!task_plan.md",
-      "!findings.md",
-      "!progress.md",
-      "!*.log"
-    ],
-    "win": {
-      "target": [
-        "nsis"
-      ],
-      "icon": "assets/icon.ico"
-    },
-    "nsis": {
-      "oneClick": false,
-      "perMachine": false,
-      "allowToChangeInstallationDirectory": true,
-      "allowElevation": false,
-      "deleteAppDataOnUninstall": false,
-      "shortcutName": "QQ Agent",
-      "include": "build/installer.nsh"
-    }
-  },
   "engines": {
     "node": ">=22.13.0"
   },
   "scripts": {
-    "start": "electron .",
+    "start": "node src/server.js",
     "server": "node src/server.js",
     "test": "node --test test/*.test.mjs && node test/test-prompt.mjs && node test/selftest.mjs && node test/render-test.mjs && node test/scroll-test.mjs && node test/usage-e2e.mjs",
     "test:unit": "node --test test/*.test.mjs",
@@ -57,13 +18,8 @@
     "test:usage": "node test/usage-e2e.mjs"
   },
   "dependencies": {
-    "js-yaml": "^5.4.1",
     "undici": "^6.28.0",
     "ws": "^8.18.0"
-  },
-  "devDependencies": {
-    "electron": "^39.0.0",
-    "electron-builder": "^26.15.3"
   },
   "license": "MIT",
   "author": "Kondius",
@@ -74,8 +30,8 @@
     "openai",
     "onebot",
     "llm",
-    "desktop",
-    "electron"
+    "linux",
+    "systemd"
   ],
   "repository": {
     "type": "git",

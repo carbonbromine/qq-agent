@@ -13,18 +13,20 @@ process.env.QQ_AGENT_DATA_DIR = path.resolve(values['data-dir']);
 const { getConfig, updateConfig, CONFIG_FILE } = await import('../src/config.js');
 const exists = fs.existsSync(CONFIG_FILE);
 const patch = {
-  server: { host: values.host, port: Number(values.port), strictPort: true },
-  telemetry: { enabled: false },
-  snowluma: { autoLaunch: false },
-  runtime: { mode: 'observe', paused: false }
+  server: { host: values.host, port: Number(values.port), strictPort: true }
 };
 if (!exists) {
+  patch.runtime = { mode: 'observe', paused: false };
   patch.server.token = crypto.randomBytes(24).toString('hex');
   if (values['import-bridge']) {
     const old = JSON.parse(fs.readFileSync(values['import-bridge'], 'utf8'));
-    patch.snowluma = { ...patch.snowluma, wsUrl: old.snowluma?.wsUrl,
-      httpUrl: old.snowluma?.httpUrl, accessToken: old.snowluma?.accessToken || '',
-      httpAccessToken: old.snowluma?.httpAccessToken || old.snowluma?.accessToken || '' };
+    const oldOneBot = old.onebot || old.snowluma || {};
+    patch.onebot = {
+      wsUrl: oldOneBot.wsUrl,
+      httpUrl: oldOneBot.httpUrl,
+      accessToken: oldOneBot.accessToken || '',
+      httpAccessToken: oldOneBot.httpAccessToken || oldOneBot.accessToken || ''
+    };
     patch.allow = old.allow;
     patch.deny = old.deny;
     patch.api = { baseUrl: old.dsh?.baseUrl?.includes('api.') ? old.dsh.baseUrl : 'https://api.deepseek.com',

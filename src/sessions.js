@@ -241,31 +241,6 @@ export class SessionRegistry {
     const tmp = path.join(DATA_DIR, 'usage-today.json.tmp');
     fs.writeFileSync(tmp, JSON.stringify(data), 'utf8');
     fs.renameSync(tmp, path.join(DATA_DIR, 'usage-today.json'));
-
-    // 累计总量（匿名遥测的唯一数据源：调用次数 + 三档 token 数，无任何身份信息）
-    try {
-      const tPath = path.join(DATA_DIR, 'telemetry-totals.json');
-      let t = { calls: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0, toolCounts: {} };
-      try { t = { ...t, ...JSON.parse(fs.readFileSync(tPath, 'utf8')) }; } catch { /* 首次 */ }
-      // ⚠️ calls 的口径是「LLM 调用次数」（与用量页一致：带 token 用量的 raw 条目数），
-      //    不是会话数；与 telemetry.js 的重建逻辑保持同一算法。
-      let llmCalls = 0;
-      for (const m of (s.messages || [])) {
-        const ru = m?.raw?.usage || {};
-        if ((Number(ru.prompt_tokens) || 0) + (Number(ru.completion_tokens) || 0) > 0) llmCalls += 1;
-      }
-      t.calls += llmCalls;
-      t.promptTokens += s.usage.promptTokens;
-      t.completionTokens += s.usage.completionTokens;
-      t.totalTokens += s.usage.totalTokens;
-      // 工具调用明细：会话结束时按消息里的 toolCall 逐个点名一次（与用量页同一口径）
-      if (!t.toolCounts || typeof t.toolCounts !== 'object') t.toolCounts = {};
-      for (const m of (s.messages || [])) {
-        const name = m?.toolCall?.name;
-        if (name) t.toolCounts[String(name)] = (t.toolCounts[String(name)] || 0) + 1;
-      }
-      fs.writeFileSync(tPath, JSON.stringify(t), 'utf8');
-    } catch { /* 遥测记账失败不影响主流程 */ }
   }
 
   /**

@@ -1,5 +1,4 @@
 // OneBot v11 客户端：WebSocket 只收事件，HTTP API 负责发送与查询。
-// （原版经 @snowluma/sdk 收事件；这里直接实现标准 OneBot v11，去掉 SDK 补丁依赖。）
 import WebSocket from 'ws';
 import { sanitizeUserText, escapeCqText } from './util.js';
 
@@ -154,7 +153,7 @@ export class OneBotClient {
     });
     if (!res.ok) {
       const hint = res.status === 426
-        ? '（HTTP 426：httpUrl 可能指向了 WebSocket 端口，请检查 snowluma.httpUrl 是否为 OneBot HTTP API 地址）'
+        ? '（HTTP 426：httpUrl 可能指向了 WebSocket 端口，请检查 onebot.httpUrl）'
         : '';
       throw new Error(`OneBot ${action} HTTP ${res.status}${hint}`);
     }

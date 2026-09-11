@@ -1,5 +1,5 @@
 // OpenAI 兼容 Chat Completions 客户端（非流式）。
-// 支持工具调用、usage 统计、可自选模型 —— 这是与 DSH 解耦后的"大脑"接口。
+// 支持工具调用、usage 统计和可选模型。
 import { getConfig } from './config.js';
 import { resolveOfficialPrice, resolveModelPrice, priceAt } from './model-prices.js';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -42,8 +42,8 @@ function getOpencodeSessionId() {
 export function resolveApiKey(cfg) {
   const pid = String(cfg?.api?.provider ?? '').trim();
   if (pid) {
-    const fromDsh = String(cfg?.dshProviderKeys?.[pid] ?? '').trim();
-    if (fromDsh && fromDsh !== '******') return fromDsh;
+    const fromCatalog = String(cfg?.providerKeys?.[pid] ?? '').trim();
+    if (fromCatalog && fromCatalog !== '******') return fromCatalog;
     const p = (cfg?.providers || []).find((x) => x.id === pid);
     const legacy = String(p?.apiKey ?? '').trim();
     if (legacy && legacy !== '******') return legacy;

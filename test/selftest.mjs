@@ -223,63 +223,11 @@ async function main() {
   const llm = createMockLLM();
   PORTS.llm = await listen(llm.server);
 
-  // fixture：模拟 DSH settings.yaml + .credentials.yaml（密钥优先级：凭据文件 > 环境变量）
-  const fixtureYaml = path.join(dataDir, 'dsh-settings.yaml');
-  fs.writeFileSync(fixtureYaml, `
-agent-default-model:
-  provider: openrouter
-  model: z-ai/glm-5.3-flash
-llm-pi-ai:
-  providers:
-    a6api:
-      displayName: A6API中转站
-      apiKeyEnv: A6API_API_KEY
-      api: anthropic-messages
-      baseURL: https://api.a6api.com/v1
-      models:
-        - glm-5.3-flash
-        - DeepSeek-V4-Flash-0731
-    a6apiforclaude:
-      displayName: A6API-Claude
-      apiKeyEnv: A6API_API_KEY
-      api: anthropic-messages
-      baseURL: https://api.a6api.com
-      models:
-        - claude-fable-5
-    openrouter:
-      apiKeyEnv: OPENROUTER_API_KEY
-      models:
-        - z-ai/glm-5.3-flash
-    local-8787:
-      displayName: 本地中转8787
-      apiKeyEnv: LOCAL_8787_API_KEY
-      api: openai-completions
-      baseURL: http://127.0.0.1:8787/v1
-      models:
-        - hy4-preview
-        - glm-5.3-flash
-    visiontest:
-      displayName: 视觉探测测试
-      apiKeyEnv: VISIONTEST_API_KEY
-      baseURL: http://127.0.0.1:${PORTS.llm}/v1
-      models:
-        - vision-ok-model
-        - vision-no-model
-`);
-  process.env.A6API_APIKEY = 'test-a6api-key'; // 模拟环境变量别名解析（应被凭据文件覆盖）
-  fs.writeFileSync(path.join(dataDir, '.credentials.yaml'), `version: 1
-refs:
-  A6API_API_KEY: cred-a6api-key
-  LOCAL_8787_API_KEY: cred-local-key
-  VISIONTEST_API_KEY: cred-visiontest-key
-`);
-
   const cfg = {
     api: { baseUrl: `http://127.0.0.1:${PORTS.llm}/v1`, apiKey: 'test-key', model: 'test-model-a', vision: true, temperature: 0.7, maxRounds: 6, priceInputPerM: 2, priceOutputPerM: 8 },
-    providersSourceYaml: fixtureYaml,
     webSearch: { enabled: true, searchUrl: `http://127.0.0.1:${PORTS.onebotHttp}/search`, maxResults: 6 },
     security: { allowPrivateImageHosts: false },
-    snowluma: { wsUrl: `ws://127.0.0.1:${PORTS.onebotWs}`, httpUrl: `http://127.0.0.1:${PORTS.onebotHttp}`, accessToken: '' },
+    onebot: { wsUrl: `ws://127.0.0.1:${PORTS.onebotWs}`, httpUrl: `http://127.0.0.1:${PORTS.onebotHttp}`, accessToken: '' },
     persona: { botName: '审计Bot', participation: 'medium', roleText: '你是审计群里的机器人。' },
     allow: { groups: ['456'], private: ['777'] },
     deny: { groups: [], private: [] },

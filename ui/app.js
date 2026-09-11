@@ -107,17 +107,16 @@ const USAGE_RANGES = [
 const CONSOLE_MARKER = 'qq-agent-console';
 
 /* ══════════════════════════════════════════════════════════════
-   主题（明/暗/系统/？）
+   主题（明/暗/系统）
    ══════════════════════════════════════════════════════════════
-   四种取值：'dark' | 'light' | 'system'（跟随系统偏好）| '?'（整活主题）。
    持久化两层：
      1. localStorage —— 立即生效，避免每次启动都等接口
      2. 后端 config.ui.theme —— 跨设备/重装后保留（尽力而为，失败不阻塞）
    首屏防闪由 index.html 的内联脚本负责（读 localStorage 直接设 data-theme）。
 */
-const THEME_ICON = { dark: '🌙', light: '☀️', system: '🖥️', '?': '❓' };
-const THEME_LABEL = { dark: '暗色', light: '亮色', system: '跟随系统', '?': '？' };
-const THEME_VALUES = ['dark', 'light', 'system', '?'];
+const THEME_ICON = { dark: '🌙', light: '☀️', system: '🖥️' };
+const THEME_LABEL = { dark: '暗色', light: '亮色', system: '跟随系统' };
+const THEME_VALUES = ['dark', 'light', 'system'];
 
 /** 读取当前主题设置（localStorage 优先，其次系统偏好）。 */
 function getThemePref() {
@@ -141,7 +140,6 @@ function resolveTheme(pref) {
 function applyTheme(pref) {
   const actual = resolveTheme(pref);
   document.documentElement.setAttribute('data-theme', actual);
-  syncChaosLayers(actual === '?');
   const btn = $('#theme-btn');
   if (btn) {
     btn.textContent = THEME_ICON[pref] || THEME_ICON.dark;
@@ -150,42 +148,7 @@ function applyTheme(pref) {
   try { localStorage.setItem('qqa-theme', pref); } catch { /* 忽略 */ }
 }
 
-/* ── 「？」主题的 JS 层：VHS 覆盖层 + 点击爆粒子 ──
-   CSS 管不了的就这两件需要一个真实 DOM 层（body 的 ::before/::after 已被占用）。
-   主题切走即移除，零残留。 */
-function syncChaosLayers(on) {
-  let vhs = document.getElementById('chaos-vhs');
-  if (on && !vhs) {
-    vhs = document.createElement('div');
-    vhs.id = 'chaos-vhs';
-    vhs.innerHTML = '<div class="vhs-track"></div>';   // 白闪太刺眼已移除，只留扫描线+追踪误差带
-    document.body.appendChild(vhs);
-  } else if (!on && vhs) {
-    vhs.remove();
-  }
-}
-
-// 点击爆「？」粒子：只在「？」主题下生效（判断放点击时，不绑状态）
-document.addEventListener('click', (e) => {
-  if (document.documentElement.getAttribute('data-theme') !== '?') return;
-  // 一次爆 3~5 个，方向随机（抽象 = 不统一）
-  const n = 3 + Math.floor(Math.random() * 3);
-  for (let i = 0; i < n; i++) {
-    const el = document.createElement('span');
-    el.className = 'chaos-pop';
-    el.textContent = '？';
-    el.style.left = `${e.clientX}px`;
-    el.style.top = `${e.clientY}px`;
-    el.style.setProperty('--dx', `${(Math.random() - 0.5) * 160}px`);
-    el.style.setProperty('--dy', `${-40 - Math.random() * 90}px`);
-    el.style.setProperty('--rot', `${(Math.random() - 0.5) * 540}deg`);
-    el.style.fontSize = `${14 + Math.random() * 20}px`;
-    document.body.appendChild(el);
-    setTimeout(() => el.remove(), 850);
-  }
-}, { passive: true });
-
-/** 点击按钮：暗 → 亮 → 跟随系统 → ？ → 暗。 */
+/** 点击按钮：暗 → 亮 → 跟随系统 → 暗。 */
 function cycleTheme() {
   const order = THEME_VALUES;
   const next = order[(order.indexOf(getThemePref()) + 1) % order.length];
@@ -259,13 +222,13 @@ async function pollUntilReady() {
   const startedAt = Date.now();
   try {
     const status = await api('/api/status');
-    if (!status.onebot?.connected) setLoadingStatus('SnowLuma 已就绪，正在连接 OneBot…');
+    if (!status.onebot?.connected) setLoadingStatus('正在连接外部 OneBot 服务…');
     else setLoadingStatus(`OneBot 已连接${status.onebot.self ? `（${status.onebot.self.nickname}）` : ''}，即将进入控制台…`);
     // 服务已可达，无需等到 OneBot 完全连上即可进入控制台（体检卡会继续提示）
     return true;
   } catch (e) {
     if (Date.now() - startedAt > 45000) {
-      setLoadingStatus('启动超时。请确认项目内 snowluma 文件夹完整，或到设置页手动启动 SnowLuma。');
+      setLoadingStatus('启动超时。请检查服务日志和 OneBot WS/HTTP 配置。');
       return false;
     }
     return false;
@@ -304,7 +267,7 @@ function assessReadiness(cfg, status) {
   const allowOk = (cfg.allow?.groups?.length || cfg.allow?.private?.length || cfg.allowAllWhenEmpty);
   checks.push({ ok: !!allowOk, label: allowOk ? `白名单：${(cfg.allow.groups || []).length} 个群 / ${(cfg.allow.private || []).length} 个好友` : '还没有配置白名单（必填）', fix: allowOk ? null : 'settings-allow' });
   const obOk = status?.onebot?.connected;
-  checks.push({ ok: !!obOk, label: obOk ? `OneBot 已连接${status.onebot.self ? `（${status.onebot.self.nickname}）` : ''}` : 'OneBot（SnowLuma）未连接 —— 请到 SnowLuma 页签启动', fix: obOk ? null : 'snowluma-tab' });
+  checks.push({ ok: !!obOk, label: obOk ? `OneBot 已连接${status.onebot.self ? `（${status.onebot.self.nickname}）` : ''}` : 'OneBot 未连接 —— 请检查设置中的 WS/HTTP 地址与令牌', fix: obOk ? null : 'settings-onebot' });
   return { ready: urlOk && modelOk && allowOk && obOk, checks };
 }
 
@@ -319,7 +282,7 @@ function renderBanner() {
     html = '⏸ 机器人已暂停，不会处理任何消息。';
   } else if (s && !s.onebot.connected && !s.onebot.everConnected) {
     show = true;
-    html = '🔌 OneBot（SnowLuma）还没连上：请确认 SnowLuma 已启动，且设置里的 WS/HTTP 地址正确。';
+    html = '🔌 OneBot 还没连上：请确认外部协议服务已启动，且 WS/HTTP 地址正确。';
   }
   banner.classList.toggle('hidden', !show);
   if (show) {
@@ -355,12 +318,10 @@ function switchTab(name) {
   $$('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === name));
   $$('.view').forEach((v) => v.classList.toggle('active', v.id === `view-${name}`));
   state.tab = name;
-  if (state.quoteMode && name !== 'chats') exitQuoteMode();   // 离开存档页自动退出金句勾选
   if (name === 'sessions') loadSessions();
   if (name === 'chats') loadChats();
   if (name === 'memory') loadMemoryView();
   if (name === 'usage') loadUsageView({ force: true });
-  if (name === 'snowluma') loadSnowlumaPage();
   if (name === 'settings') loadSettings();
 }
 
@@ -587,19 +548,8 @@ function connectSSE() {
   });
   es.addEventListener('onebot-status', () => {
     refreshStatus();
-    if (state.tab === 'snowluma') loadSnowlumaPage({ quiet: true });
   });
   es.addEventListener('status', () => refreshStatus());
-  es.addEventListener('snowluma-status', () => { refreshStatus(); if (state.tab === 'snowluma') loadSnowlumaPage({ quiet: true }); });
-  es.addEventListener('snowluma-log', (ev) => {
-    const d = JSON.parse(ev.data);
-    if (!appReady && d?.text) {
-      setLoadingStatus(d.text);
-    }
-    if (appReady && (state.tab === 'snowluma' || state.tab === 'settings')) {
-      refreshSnowlumaLogs();
-    }
-  });
   es.addEventListener('feedback', (ev) => {
     const d = JSON.parse(ev.data);
     if (d.level === 'error') console.warn('[agent 反馈]', d.message);
@@ -731,7 +681,6 @@ function startListPoller() {
   listPoller = setInterval(() => {
     if (state.tab === 'sessions') loadSessions({ quiet: true });
     if (state.tab === 'chats') loadChats({ quiet: true });
-    if (state.tab === 'snowluma') loadSnowlumaPage({ quiet: true });
     if (state.tab === 'usage') loadUsageView();   // 无 force：只更新数值，不重建 DOM
     if (state.tab === 'settings') refreshStatus();
   }, refreshIntervalMs());
@@ -980,142 +929,6 @@ function renderSessionDetail(s) {
   // 功能完全覆盖，2s 递归属于纯重复请求。
 }
 
-// ── SnowLuma 独立页签 ──
-/**
- * 只刷新 SnowLuma 的日志区（不重建整个页面）。
- * SSE 每来一条新日志就调一次 —— 如果这里重建整页，
- * 用户正在看的日志会被反复重绘，滚动位置也保不住。
- */
-async function refreshSnowlumaLogs() {
-  const box = $('#snowluma-page');
-  if (!box) return;
-  const pre = box.querySelector('.snowluma-logs-view');
-  if (!pre) return;                       // 页面还没渲染过，等下次整页刷新
-  try {
-    const logs = await api('/api/snowluma/logs');
-    const logText = (logs.logs || []).map((l) => {
-      const t = new Date(l.at).toLocaleTimeString('zh-CN', { hour12: false });
-      return `[${t}]${l.stream === 'stderr' ? ' ⚠' : ''} ${l.text}`;
-    }).join('\n') || '暂无日志';
-    // ⚠️ 先记贴底状态再换内容：新日志追加在底部，scrollTop 不变 = 阅读位置不变；
-    //    只有用户本来就贴底才跟随到底，往上翻历史时绝不把他拽回去。
-    //    滚动容器是 <pre> 自己（overflow-y:auto），不是 parentElement —— 之前滚错了对象。
-    const wasAtBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 40;
-    pre.textContent = logText;
-    if (wasAtBottom) pre.scrollTop = pre.scrollHeight;
-  } catch { /* 刷新失败静默，不影响主流程 */ }
-}
-
-async function loadSnowlumaPage({ quiet = false } = {}) {
-  try {
-    const [status, logs] = await Promise.all([
-      api('/api/status'),
-      api('/api/snowluma/logs')
-    ]);
-    const s = status;
-    const box = $('#snowluma-page');
-    if (!box) return;
-    const running = !!(s.snowluma?.running);
-    const onebotConnected = !!s.onebot?.connected;
-    const dir = s.snowluma?.dir || '';
-    const embedded = !!s.snowluma?.embedded;
-    const pid = s.snowluma?.pid ?? null;
-    const webuiUrl = s.snowluma?.webuiUrl || '';
-    const logText = (logs.logs || []).map((l) => {
-      const t = new Date(l.at).toLocaleTimeString('zh-CN', { hour12: false });
-      return `[${t}]${l.stream === 'stderr' ? ' ⚠' : ''} ${l.text}`;
-    }).join('\n') || '暂无日志';
-
-    // 整页重建前记住日志滚动位置：SSE/轮询触发的 quiet 重建会重置 DOM，
-    // 不补偿的话用户往下翻日志会被弹回顶部（Kondius 实测：划两下就蹦上去）
-    const oldPre = box.querySelector('.snowluma-logs-view');
-    const prevScroll = oldPre
-      ? { top: oldPre.scrollTop, atBottom: oldPre.scrollTop + oldPre.clientHeight >= oldPre.scrollHeight - 40 }
-      : null;
-
-    box.innerHTML = `
-      <div class="snowluma-page-card">
-        <h2>SnowLuma（OneBot 网关）</h2>
-        <div class="snowluma-state-row">
-          <span class="dot ${running ? 'dot-on' : 'dot-off'}"></span>
-          <span>SnowLuma：<strong>${running ? '运行中' : '未运行'}</strong></span>
-          ${pid ? `<span class="muted">pid ${pid}</span>` : ''}
-          <span class="muted">${embedded ? '内置模式（随 QQ Agent 退出）' : (running ? '独立模式' : '')}</span>
-        </div>
-        <div class="snowluma-state-row">
-          <span class="dot ${onebotConnected ? 'dot-on' : 'dot-off'}"></span>
-          <span>OneBot：<strong>${onebotConnected ? `已连接${s.onebot.self ? `（${s.onebot.self.nickname}）` : ''}` : '未连接'}</strong></span>
-          <span class="muted">WS ${s.onebot?.error ? `：${s.onebot.error}` : ''}</span>
-        </div>
-        <div class="snowluma-state-row muted">
-          <span>目录：${esc(dir || '（未找到项目内 snowluma/ 文件夹）')}</span>
-        </div>
-        <div class="snowluma-state-row">
-          <span>WebUI：</span>
-          ${webuiUrl
-            ? `<button class="btn btn-small" id="sl-open-webui-btn" title="在浏览器中打开 SnowLuma 控制台">${esc(webuiUrl)}</button>`
-            : '<span class="muted">等待 SnowLuma 启动后自动识别…</span>'}
-        </div>
-        <div class="snowluma-actions">
-          <button class="btn btn-primary" id="sl-start-btn" ${running ? 'disabled' : ''}>${running ? '已运行' : '启动 SnowLuma'}</button>
-          <button class="btn btn-danger" id="sl-stop-btn" ${running ? '' : 'disabled'}>关闭 SnowLuma</button>
-          <button class="btn btn-small" id="sl-refresh-btn">刷新状态</button>
-          <button class="btn btn-small" id="sl-open-folder-btn">打开文件夹</button>
-          <span id="sl-hint" class="muted" style="font-size:12px"></span>
-        </div>
-        <div>
-          <div class="hint" style="margin-bottom:6px">运行日志（仅保留最近 500 行）</div>
-          <pre class="snowluma-logs-view">${esc(logText)}</pre>
-        </div>
-      </div>`;
-
-    // 恢复日志滚动：贴底跟随新日志；否则回到原阅读位置；首次渲染贴底
-    const newPre = box.querySelector('.snowluma-logs-view');
-    if (newPre) newPre.scrollTop = prevScroll ? (prevScroll.atBottom ? newPre.scrollHeight : prevScroll.top) : newPre.scrollHeight;
-
-    $('#sl-start-btn').addEventListener('click', async () => {
-      const btn = $('#sl-start-btn');
-      btn.disabled = true; btn.textContent = '启动中…';
-      $('#sl-hint').textContent = '';
-      try {
-        const r = await api('/api/snowluma/launch', { method: 'POST', body: '{}' });
-        $('#sl-hint').textContent = r.alreadyRunning ? 'SnowLuma 已经在运行 ✓' : (r.ok ? '已启动，日志见下方。首次 QQ 登录需要几秒到几十秒。' : `启动失败：${r.error}`);
-      } catch (e) {
-        $('#sl-hint').textContent = `启动失败：${e.message}`;
-      }
-      setTimeout(() => loadSnowlumaPage({ quiet: true }), 2500);
-    });
-    $('#sl-stop-btn').addEventListener('click', async () => {
-      const btn = $('#sl-stop-btn');
-      btn.disabled = true; btn.textContent = '关闭中…';
-      $('#sl-hint').textContent = '';
-      try {
-        await api('/api/snowluma/stop', { method: 'POST', body: '{}' });
-        $('#sl-hint').textContent = '已请求关闭 SnowLuma。';
-      } catch (e) {
-        $('#sl-hint').textContent = `关闭失败：${e.message}`;
-      }
-      setTimeout(() => loadSnowlumaPage({ quiet: true }), 1500);
-    });
-    $('#sl-refresh-btn').addEventListener('click', () => loadSnowlumaPage());
-    $('#sl-open-folder-btn').addEventListener('click', async () => {
-      try { await api('/api/snowluma/open-folder', { method: 'POST', body: '{}' }); }
-      catch (e) { $('#sl-hint').textContent = `失败：${e.message}`; }
-    });
-    const webuiBtn = $('#sl-open-webui-btn');
-    if (webuiBtn) webuiBtn.addEventListener('click', async () => {
-      try {
-        const r = await api('/api/snowluma/open-webui', { method: 'POST', body: '{}' });
-        if (!r.ok) $('#sl-hint').textContent = r.error;
-      } catch (e) {
-        $('#sl-hint').textContent = `打开失败：${e.message}`;
-      }
-    });
-  } catch (e) {
-    if (!quiet) console.error(e);
-  }
-}
-
 // ── 存档视图 ──
 async function loadChats({ quiet = false } = {}) {
   try {
@@ -1155,7 +968,6 @@ function renderChatList() {
 
 async function selectChat(key) {
   state.currentChatKey = key;
-  if (state.quoteMode) state.quoteSelected = new Set();   // 金句按单段对话收录，换会话清空勾选
   renderChatList();
   $('#chat-detail').innerHTML = '<div class="empty-hint">加载中…</div>';
   await loadChatMessages(key);
@@ -1270,18 +1082,6 @@ function renderChatMessages() {
   updateChatMessagesBody();
   // 滚动加载只挂一次（attachScrollLoader 内部有防重复）
   initChatScrollLoader();
-  // 金句勾选：事件委托挂在容器上（tbody 会被轮询重建，委托不受影响的）。
-  // 防重复：renderChatMessages 每次切会话都会跑，容器只绑一次。
-  if (!detail.__quoteBound) {
-    detail.__quoteBound = true;
-    detail.addEventListener('change', (e) => {
-      const cb = e.target.closest?.('.quote-check');
-      if (!cb) return;
-      const mid = Number(cb.dataset.mid);
-      if (cb.checked) state.quoteSelected.add(mid); else state.quoteSelected.delete(mid);
-      cb.closest('tr')?.classList.toggle('quote-selected', cb.checked);
-    });
-  }
 }
 
 /**
@@ -1309,14 +1109,8 @@ function chatMessagesNewestFirst() {
 
 /** 单行消息 HTML（全量渲染与滚动追加共用同一个模板，保证两处长得一样）。 */
 function chatMsgRowHtml(m) {
-  // 金句勾选模式：行首加勾选框；选中态存 state.quoteSelected（按消息 id），
-  // 轮询重建行时勾选状态不丢
-  const q = state.quoteMode
-    ? `<td class="q-check"><input type="checkbox" class="quote-check" data-mid="${m.id}" ${state.quoteSelected.has(m.id) ? 'checked' : ''} /></td>`
-    : '';
-  const sel = state.quoteMode && state.quoteSelected.has(m.id) ? ' quote-selected' : '';
   return `
-    <tr class="${m.read ? '' : 'unread'}${sel}" data-midrow="${m.id}">${q}
+    <tr class="${m.read ? '' : 'unread'}" data-midrow="${m.id}">
       <td class="t">${fmtTime(m.ts)}</td>
       <td class="w ${m.self ? 'self' : ''}">${m.self ? '我' : esc(m.senderName)}</td>
       <td class="text">${esc(m.text)}${m.read ? '' : ' <span class="unread-pill">未读</span>'}</td>
@@ -2539,14 +2333,10 @@ function renderPersonaSaveBar() {
 function renderHealthCard() {
   const { ready, checks } = assessReadiness(state.config, state.status);
   const rows = checks.map((c) => {
-    let extra = '';
-    if (!c.ok && c.fix === 'snowluma-tab') {
-      extra = ' <button class="btn btn-small" id="hc-goto-snowluma">前往 SnowLuma 页签</button>';
-    }
     return `
     <div class="h-item ${c.ok ? 'ok' : 'bad'}">
       <span>${c.ok ? '✓' : '✗'}</span>
-      <span class="h-label">${esc(c.label)}${extra}</span>
+      <span class="h-label">${esc(c.label)}</span>
     </div>`;
   }).join('');
   const testRow = `
@@ -2606,7 +2396,7 @@ function bindModelDdDismiss() {
 
 function renderProviderColumn(c) {
   const provs = state.providers || [];
-  // 旧文案指向的"从 DSH 导入"功能早已移除，这里改成能实际操作的指引
+  // 提供商目录为空时给出可直接操作的指引。
   if (!provs.length) {
     return '<div class="muted" style="padding:10px;font-size:12px;line-height:1.7">'
       + '目录还是空的。先在右边「手动添加提供商」填上接口地址和 API Key，'
@@ -2651,7 +2441,7 @@ function applyProviderPick(value, { silent = false } = {}) {
   }
   const [pid, model] = value.split('|||');
   const p = (state.providers || []).find((x) => x.id === pid);
-  if (!p) { hint.textContent = '未找到该提供商，请重新从 DSH 导入。'; return; }
+  if (!p) { hint.textContent = '未找到该提供商，请重新添加。'; return; }
   store.value = pid;
   $('#cfg-model').value = model;
   // 价格卡片直接读界面控件的值，这里只需要通知它刷新
@@ -2676,7 +2466,6 @@ function applyProviderPick(value, { silent = false } = {}) {
     if (toggleBtn) toggleBtn.textContent = '显示';
     notes.push('⚠ 该提供商没有可用密钥，请手动粘贴 API Key');
   }
-  if (p.anthropicOrigin) notes.push('DSH 中为 Anthropic 协议，已按 OpenAI 兼容模式调用，若报错请换用其他模型');
   const vr = (state.visionResults || {})[`${pid}|||${model}`];
   if (vr && (vr.verdict === 'vision' || vr.verdict === 'no-vision')) {
     notes.push(vr.verdict === 'vision' ? '✅ 该模型支持图片输入' : '🚫 该模型不支持图片输入');
@@ -2695,8 +2484,8 @@ function renderSettingsSidebar() {
     ['persona', '人设'],
     ['allow', '聊天白名单'],
     ['chat', '聊天设置'],
-    ['desktop', '桌面端'],
-    ['onebot', 'OneBot（SnowLuma）']
+    ['desktop', '系统'],
+    ['onebot', 'OneBot']
   ];
   sidebar.innerHTML = `
     <div class="settings-runstate">
@@ -2705,17 +2494,8 @@ function renderSettingsSidebar() {
       <div class="rs-row muted">${state.paused ? '⏸ 已暂停' : (s?.orchestrator?.model ? `模型：${s.orchestrator.model}` : '模型：未设置')}</div>
     </div>
     <div class="settings-menu">
-      ${menu.map(([id, label]) => `<button class="settings-menu-item ${state.settingsSection === id ? 'active' : ''}" data-section="${id}">${label}${id === 'desktop' && updateAvailable ? '<span class="update-dot" title="发现新版本"></span>' : ''}</button>`).join('')}
-      <button class="settings-menu-item egg-hot" id="qrcode-egg-btn">！？群群？！</button>
+      ${menu.map(([id, label]) => `<button class="settings-menu-item ${state.settingsSection === id ? 'active' : ''}" data-section="${id}">${label}</button>`).join('')}
     </div>`;
-  // 群二维码彩蛋：点一下弹出，再点屏幕任意位置关闭
-  sidebar.querySelector('#qrcode-egg-btn')?.addEventListener('click', () => {
-    const ov = document.createElement('div');
-    ov.className = 'qrcode-egg-overlay';
-    ov.innerHTML = '<img src="group-qrcode.jpg" alt="群二维码" />';
-    ov.addEventListener('click', () => ov.remove());
-    document.body.appendChild(ov);
-  });
   sidebar.querySelectorAll('.settings-menu-item').forEach((el) => {
     el.addEventListener('click', () => {
       state.settingsSection = el.dataset.section;
@@ -3249,15 +3029,10 @@ function renderDesktopSection(c) {
       <button type="button" class="btn btn-small" id="change-console-token-btn">更新控制台 Token</button>
       <span class="hint" id="console-token-result">更新后旧 Token 和其他已登录会话立即失效。</span>
     </div>
-    <h3>桌面端</h3>
-    <div class="checkbox-row"><input type="checkbox" id="cfg-autostart" ${c.server?.autoStart ? 'checked' : ''} />
-      <label for="cfg-autostart">开机自启</label></div>
-    <div class="checkbox-row"><input type="checkbox" id="cfg-closetray" ${c.server?.closeToTray !== false ? 'checked' : ''} />
-      <label for="cfg-closetray">点关闭时最小化到托盘</label></div>
     <h3>界面</h3>
     <div class="field"><label>主题</label>
       <div class="theme-picker" id="theme-picker">
-        ${['dark', 'light', 'system', '?'].map((t) => `
+        ${THEME_VALUES.map((t) => `
           <div class="theme-option${getThemePref() === t ? ' on' : ''}" data-theme-opt="${t}" role="button" tabindex="0">
             <span class="t-ico">${THEME_ICON[t]}</span>
             <span>${THEME_LABEL[t]}</span>
@@ -3266,34 +3041,22 @@ function renderDesktopSection(c) {
     </div>
     <div class="checkbox-row"><input type="checkbox" id="cfg-showvision" ${c.ui?.showVision !== false ? 'checked' : ''} />
       <label for="cfg-showvision">模型目录显示“支持图片输入/不支持图片输入”徽标</label></div>
-    <div class="field"><label>界面刷新间隔（毫秒）</label><input type="number" id="cfg-refreshms" min="1000" step="1000" value="${esc(c.ui?.refreshMs ?? 15000)}" /></div>
-    <h3>版本更新</h3>
-    <div class="field"><label>当前版本 <b id="update-current">…</b><span id="update-status-text">${updateAvailable ? '<b style="color:var(--warn)">；发现新版本</b>' : '；检查线上是否有新版本'}</span></label>
-      <div style="display:flex;gap:10px;align-items:center">
-        <button class="btn btn-small" id="check-update-btn">检查更新</button>
-        <span class="hint" id="update-hint" style="margin:0"></span>
-      </div></div>`;
+    <div class="field"><label>界面刷新间隔（毫秒）</label><input type="number" id="cfg-refreshms" min="1000" step="1000" value="${esc(c.ui?.refreshMs ?? 15000)}" /></div>`;
 }
 
 function renderOnebotSection(c) {
   return `
-    <h3 id="settings-onebot">OneBot（SnowLuma）</h3>
-    <div class="hint" style="margin-bottom:10px">SnowLuma 的启动、关闭与日志已移动到顶部「SnowLuma」页签。此处只保留连接配置。</div>
-    <div class="field"><label>SnowLuma 程序目录（留空 = 自动使用项目内 snowluma/ 文件夹）</label>
-      <div style="display:flex;gap:8px">
-        <input type="text" id="cfg-snowlumadir" value="${esc(c.snowluma.dir || '')}" style="flex:1" />
-        <button class="btn btn-small" id="open-snowluma-btn">打开文件夹</button>
-      </div>
-      <div class="hint" id="snowluma-hint"></div></div>
-    <div class="checkbox-row"><input type="checkbox" id="cfg-snowlumalaunch" ${c.snowluma.autoLaunch ? 'checked' : ''} />
-      <label for="cfg-snowlumalaunch">QQ Agent 启动时自动拉起 SnowLuma（未运行时）</label></div>
+    <h3 id="settings-onebot">外部 OneBot v11 服务</h3>
+    <div class="hint" style="margin-bottom:10px">协议端由 Linux 运维独立管理。本服务只连接正向 WebSocket 和 HTTP API。</div>
     <div class="field-row">
-      <div class="field"><label>WebSocket 地址（收消息）</label><input type="text" id="cfg-wsurl" value="${esc(c.snowluma.wsUrl)}" /></div>
-      <div class="field"><label>HTTP 地址（发消息）</label><input type="text" id="cfg-httpurl" value="${esc(c.snowluma.httpUrl)}" /></div>
-      <div class="field"><label>WebSocket 令牌</label><input type="password" id="cfg-obtoken" value="${esc(c.snowluma.accessToken || '')}" /></div>
-      <div class="field"><label>HTTP 令牌（与 WS 不同时填；SnowLuma 默认分开）</label><input type="password" id="cfg-obhttptoken" value="${esc(c.snowluma.httpAccessToken || '')}" /></div>
+      <div class="field"><label>WebSocket 地址（收消息）</label><input type="text" id="cfg-wsurl" value="${esc(c.onebot.wsUrl)}" /></div>
+      <div class="field"><label>HTTP 地址（发消息）</label><input type="text" id="cfg-httpurl" value="${esc(c.onebot.httpUrl)}" /></div>
+      <div class="field"><label>WebSocket 令牌</label><input type="password" id="cfg-obtoken"
+        placeholder="${c.onebot.hasAccessToken ? '已保存；留空保持不变' : '未设置'}" /></div>
+      <div class="field"><label>HTTP 令牌（与 WS 不同时填）</label><input type="password" id="cfg-obhttptoken"
+        placeholder="${c.onebot.hasHttpAccessToken ? '已保存；留空保持不变' : '未设置'}" /></div>
     </div>
-    <div class="hint">改完 OneBot 地址需要重启应用生效；模型/人设/白名单即时生效。</div>`;
+    <div class="hint">改完 OneBot 地址或令牌后，执行 <code>manage.sh restart</code> 生效。</div>`;
 }
 
 function bindSettingsEvents(c) {
@@ -3909,36 +3672,6 @@ function bindSettingsEvents(c) {
   const pickFriendsBtn = $('#pick-friends-btn');
   if (pickFriendsBtn) pickFriendsBtn.addEventListener('click', () => openWhitelistPicker('friends'));
 
-  // ── 检查更新（桌面端区块） ──
-  const curVerEl = $('#update-current');
-  if (curVerEl) {
-    api('/api/version').then((d) => { curVerEl.textContent = `v${d.version || '?'}`; })
-      .catch(() => { curVerEl.textContent = ''; });
-  }
-  const checkUpdateBtn = $('#check-update-btn');
-  if (checkUpdateBtn) checkUpdateBtn.addEventListener('click', async () => {
-    const hint = $('#update-hint');
-    checkUpdateBtn.disabled = true;
-    if (hint) hint.textContent = '检查中…';
-    const data = await runUpdateCheck({ manual: true });   // 手动：即使关过浮窗也再弹一次
-    if (!data) {
-      if (hint) hint.textContent = '检查失败：网络不可达';
-    } else if (!data.ok) {
-      if (hint) hint.textContent = `检查失败：${data.error || '未知错误'}`;
-    } else if (data.hasUpdate) {
-      // 有新版：给下载链接。Electron 里 target=_blank 会被 main.js 转给系统浏览器。
-      if (hint) hint.innerHTML = `发现新版本 <b>v${esc(data.latest)}</b>（当前 v${esc(data.current)}） <a href="${esc(data.url)}" target="_blank" rel="noopener">去下载</a>`;
-    } else if (hint) hint.textContent = `已是最新（v${data.current}）`;
-    checkUpdateBtn.disabled = false;
-  });
-
-  // ── OneBot 区块事件 ──
-  const openSnowlumaBtn = $('#open-snowluma-btn');
-  if (openSnowlumaBtn) openSnowlumaBtn.addEventListener('click', async () => {
-    await saveConfig({ quiet: true });
-    try { await api('/api/snowluma/open-folder', { method: 'POST', body: '{}' }); }
-    catch (e) { $('#snowluma-hint').textContent = `失败：${e.message}`; }
-  });
 }
 
 // ── 模型选择/添加/删除 模态框 ──
@@ -4724,11 +4457,6 @@ async function saveConfig({ quiet = false } = {}) {
   }
 
   if (sec === 'desktop') {
-    patch.server = {
-      ...c.server,
-      autoStart: chk('#cfg-autostart', !!c.server?.autoStart),
-      closeToTray: chk('#cfg-closetray', c.server?.closeToTray !== false)
-    };
     patch.ui = {
       ...(c.ui || {}),
       // 主题在点选项时就已应用并写入 localStorage，这里把它一并存到后端以便跨设备保留
@@ -4742,13 +4470,13 @@ async function saveConfig({ quiet = false } = {}) {
   }
 
   if (sec === 'onebot') {
-    patch.snowluma = {
-      dir: val('#cfg-snowlumadir', c.snowluma?.dir || '').trim(),
-      autoLaunch: chk('#cfg-snowlumalaunch', !!c.snowluma?.autoLaunch),
-      wsUrl: val('#cfg-wsurl', c.snowluma?.wsUrl || '').trim(),
-      httpUrl: val('#cfg-httpurl', c.snowluma?.httpUrl || '').trim(),
-      accessToken: val('#cfg-obtoken', c.snowluma?.accessToken || '').trim(),
-      httpAccessToken: val('#cfg-obhttptoken', c.snowluma?.httpAccessToken || '').trim()
+    const wsToken = val('#cfg-obtoken', '').trim();
+    const httpToken = val('#cfg-obhttptoken', '').trim();
+    patch.onebot = {
+      wsUrl: val('#cfg-wsurl', c.onebot?.wsUrl || '').trim(),
+      httpUrl: val('#cfg-httpurl', c.onebot?.httpUrl || '').trim(),
+      ...(wsToken ? { accessToken: wsToken } : {}),
+      ...(httpToken ? { httpAccessToken: httpToken } : {})
     };
   }
 
@@ -4756,45 +4484,6 @@ async function saveConfig({ quiet = false } = {}) {
   state.config = data.config;
   if (!quiet) $('#model-label').textContent = `模型：${state.config.api.model || '未设置'}`;
   return data;
-}
-
-/* ══════════════════════════════════════════════════════════════
-   社区功能：意见收集 + 金句上传
-   ══════════════════════════════════════════════════════════════
-   数据流向：浏览器 → https://kondius.cn/qq-agent/api（作者自建的公开
-   收件箱，静态站之外的一个小型接收服务）。不经过本地后端 ——
-   本地后端只服务本机，碰不到作者的服务器；分发版用户也是这个地址
-   （意见和金句本来就是发给作者看的）。
-*/
-const COMMUNITY_API = 'https://kondius.cn/qq-agent/api';
-
-/** 统一的提示小模态框（替代 alert —— 原生对话框与 UI 风格割裂）。 */
-function showNoticeModal(title, text) {
-  const overlay = modelModalShell({
-    head: title,
-    body: `<div class="hint" style="font-size:13.5px;line-height:1.7">${esc(text)}</div>`,
-    foot: `<button class="btn btn-primary" id="notice-ok">知道了</button>`
-  });
-  overlay.querySelector('#notice-ok').addEventListener('click', () => closeModelModal(overlay));
-}
-
-/**
- * 上传成功浮框（右上角）：不自动消失，只能手动关闭，带目标网址。
- * 意见收集 / 金句上传成功后调用。
- */
-function showUploadToast(title, url, { onClose } = {}) {
-  // 同类型只留一个（连着传两次不堆叠）
-  document.querySelectorAll('.upload-toast').forEach((el) => el.remove());
-  const el = document.createElement('div');
-  el.className = 'upload-toast';
-  el.innerHTML = `
-    <div class="ut-head">
-      <span class="ut-title">${esc(title)}</span>
-      <button class="ut-close" title="关闭">×</button>
-    </div>
-    <a class="ut-link" href="${esc(url)}" target="_blank" rel="noopener">${esc(url)}</a>`;
-  document.body.appendChild(el);
-  el.querySelector('.ut-close').addEventListener('click', () => { el.remove(); onClose?.(); });
 }
 
 // ── 屏蔽名单 ──
@@ -4890,7 +4579,7 @@ function openBlocklistModal() {
       const n = (pending[activeGid] || []).length;
       statusEl.textContent = n ? `当前群已屏蔽 ${n} 人` : '';
     } catch (e) {
-      right.innerHTML = `<div class="empty-hint" style="padding:18px">拉取失败：${esc(e.message)}（SnowLuma 在线才能拿到群成员列表）</div>`;
+      right.innerHTML = `<div class="empty-hint" style="padding:18px">拉取失败：${esc(e.message)}（OneBot 在线才能拿到群成员列表）</div>`;
     }
   }
 
@@ -4913,394 +4602,6 @@ function openBlocklistModal() {
   renderLeft();
   loadMembers();
 }
-
-// ── 意见收集 ──
-const FB_DRAFT_KEY = 'qqa-feedback-draft';
-
-/** 读草稿（昵称/正文/图片 dataURL 列表）。 */
-function fbLoadDraft() {
-  try {
-    const d = JSON.parse(localStorage.getItem(FB_DRAFT_KEY) || '{}');
-    return {
-      nickname: String(d.nickname || ''),
-      text: String(d.text || ''),
-      images: Array.isArray(d.images) ? d.images.slice(0, 9) : []
-    };
-  } catch { return { nickname: '', text: '', images: [] }; }
-}
-
-/** 图片压缩：最大边 1200px、JPEG 0.75 —— 够看清，又不会把 localStorage 塞爆。 */
-function fbCompressImage(file) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => {
-      URL.revokeObjectURL(img.src);
-      const max = 1200;
-      let { width: w, height: h } = img;
-      if (w > max || h > max) {
-        const r = Math.min(max / w, max / h);
-        w = Math.round(w * r); h = Math.round(h * r);
-      }
-      const cv = document.createElement('canvas');
-      cv.width = w; cv.height = h;
-      cv.getContext('2d').drawImage(img, 0, 0, w, h);
-      resolve(cv.toDataURL('image/jpeg', 0.75));
-    };
-    img.onerror = () => { URL.revokeObjectURL(img.src); reject(new Error('图片读取失败')); };
-    img.src = URL.createObjectURL(file);
-  });
-}
-
-function openFeedbackModal() {
-  const draft = fbLoadDraft();
-  const state2 = { images: draft.images.slice() };   // 弹窗内的图片列表（dataURL）
-
-  const overlay = modelModalShell({
-    head: '意见收集',
-    body: `
-      <div id="fb-form">
-        <div class="hint" style="flex-shrink:0">
-          昵称和意见会上传到作者的服务器（kondius.cn/qq-agent/comments 公开展示）。
-          内容实时保存在本机，误点弹窗外面也不会丢。
-        </div>
-        <div class="field"><label>昵称</label>
-          <input type="text" id="fb-nickname" maxlength="32" placeholder="怎么称呼你" value="${esc(draft.nickname)}" /></div>
-        <div class="field"><label>意见 / 建议</label>
-          <textarea id="fb-text" rows="6" maxlength="5000" placeholder="哪里好用、哪里难用、想要什么功能…">${esc(draft.text)}</textarea></div>
-        <div class="field"><label>附图（最多 9 张，自动压缩）</label>
-          <!-- 原生 <input type=file> 的"选择文件"按钮是系统样式，与 UI 割裂：
-               隐藏本体，用统一的 .btn 风格 label 触发 -->
-          <input type="file" id="fb-file" accept="image/*" multiple style="display:none" />
-          <label for="fb-file" class="btn btn-small" id="fb-file-btn" style="cursor:pointer">＋ 添加图片（<span id="fb-img-count">${state2.images.length}</span>/9）</label>
-          <div class="fb-imgs" id="fb-imgs"></div>
-        </div>
-        <div id="fb-hint" class="muted" style="font-size:12px"></div>
-      </div>
-      <div id="fb-confirm" style="display:none">
-        <div class="hint">请确认上传内容：</div>
-        <div id="fb-summary" style="white-space:pre-wrap;font-size:13px;max-height:300px;overflow-y:auto"></div>
-        <div id="fb-confirm-hint" class="muted" style="font-size:12px;margin-top:8px"></div>
-      </div>`,
-    foot: `
-      <button class="btn" id="fb-cancel">取消</button>
-      <button class="btn btn-primary" id="fb-next">下一步</button>
-      <button class="btn hidden" id="fb-back">返回修改</button>
-      <button class="btn btn-primary hidden" id="fb-submit">确认上传</button>`
-  });
-
-  const $q = (sel) => overlay.querySelector(sel);
-  const formEl = $q('#fb-form'), confirmEl = $q('#fb-confirm');
-  const nextBtn = $q('#fb-next'), backBtn = $q('#fb-back'), submitBtn = $q('#fb-submit');
-
-  // ── 草稿实时保存（300ms 防抖）──
-  let saveTimer = null;
-  const saveDraft = () => {
-    clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => {
-      try {
-        localStorage.setItem(FB_DRAFT_KEY, JSON.stringify({
-          nickname: $q('#fb-nickname').value,
-          text: $q('#fb-text').value,
-          images: state2.images
-        }));
-      } catch { /* 图片太多塞不下时至少保住文字 */ 
-        try {
-          localStorage.setItem(FB_DRAFT_KEY, JSON.stringify({
-            nickname: $q('#fb-nickname').value, text: $q('#fb-text').value, images: []
-          }));
-        } catch { /* 放弃 */ }
-      }
-    }, 300);
-  };
-  $q('#fb-nickname').addEventListener('input', saveDraft);
-  $q('#fb-text').addEventListener('input', saveDraft);
-
-  // ── 图片九宫格 ──
-  function renderImgs() {
-    const cnt = $q('#fb-img-count');
-    if (cnt) cnt.textContent = state2.images.length;
-    $q('#fb-imgs').innerHTML = state2.images.map((d, i) => `
-      <div class="fb-img"><img src="${d}" alt="附图${i + 1}" />
-        <button class="fb-img-del" data-i="${i}" title="移除">×</button></div>`).join('');
-    $q('#fb-imgs').querySelectorAll('.fb-img-del').forEach((el) => {
-      el.addEventListener('click', () => {
-        state2.images.splice(Number(el.dataset.i), 1);
-        renderImgs();
-        saveDraft();
-      });
-    });
-  }
-  renderImgs();
-
-  $q('#fb-file').addEventListener('change', async (e) => {
-    const hint = $q('#fb-hint');
-    const files = [...(e.target.files || [])];
-    e.target.value = '';
-    for (const f of files) {
-      if (state2.images.length >= 9) { hint.textContent = '最多 9 张，超出的已忽略'; break; }
-      try {
-        state2.images.push(await fbCompressImage(f));
-      } catch (err) { hint.textContent = String(err.message || err); }
-    }
-    renderImgs();
-    saveDraft();
-  });
-
-  // ── 步骤切换 ──
-  $q('#fb-cancel').addEventListener('click', () => closeModelModal(overlay));
-  nextBtn.addEventListener('click', () => {
-    const nickname = $q('#fb-nickname').value.trim();
-    const text = $q('#fb-text').value.trim();
-    if (!nickname) { $q('#fb-hint').textContent = '先填个昵称'; return; }
-    if (!text) { $q('#fb-hint').textContent = '意见还没写'; return; }
-    saveDraft();
-    $q('#fb-summary').textContent =
-      `昵称：${nickname}\n\n${text}\n\n附图：${state2.images.length} 张`;
-    formEl.style.display = 'none';
-    confirmEl.style.display = '';
-    nextBtn.classList.add('hidden');
-    backBtn.classList.remove('hidden');
-    submitBtn.classList.remove('hidden');
-  });
-  backBtn.addEventListener('click', () => {
-    formEl.style.display = '';
-    confirmEl.style.display = 'none';
-    nextBtn.classList.remove('hidden');
-    backBtn.classList.add('hidden');
-    submitBtn.classList.add('hidden');
-  });
-
-  // ── 上传 ──
-  submitBtn.addEventListener('click', async () => {
-    const hint = $q('#fb-confirm-hint');
-    hint.textContent = '上传中…';
-    submitBtn.disabled = true;
-    try {
-      const res = await fetch(`${COMMUNITY_API}/comment`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          nickname: $q('#fb-nickname').value.trim(),
-          text: $q('#fb-text').value.trim(),
-          images: state2.images
-        })
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || data.ok === false) throw new Error(data.error || `HTTP ${res.status}`);
-      localStorage.removeItem(FB_DRAFT_KEY);   // 上传成功才清草稿
-      closeModelModal(overlay);
-      showUploadToast('意见已上传，感谢反馈！', 'https://kondius.cn/qq-agent/comments');
-    } catch (err) {
-      hint.textContent = `上传失败：${err.message}（内容已保存在本机，可稍后再试）`;
-      submitBtn.disabled = false;
-    }
-  });
-}
-
-// ── 打开网站 ──
-// Electron 里 window.open 会被 main.js 的 setWindowOpenHandler 转给系统默认浏览器；
-// 开发模式（纯浏览器）则正常开新标签页。
-function openSite() {
-  window.open('https://kondius.cn/qq-agent', '_blank', 'noopener');
-}
-
-// ── 自动检查更新 ──
-// 节奏：启动时一次 + 之后每小时一次（version.json 作者手动改，这个频率足够）。
-// 有更新 → 弹浮窗引导下载；用户手动关掉浮窗 → 本次启动内不再弹（重启恢复）。
-// 但只要检测到新版，设置侧栏「桌面端」右侧就一直挂红点，直到版本追平。
-let updateAvailable = false;
-let updateToastDismissed = false;   // 本次启动内用户关过更新浮窗
-
-function renderUpdateDot() {
-  // 侧栏菜单每次重渲染都会重建（菜单 HTML 里已按 updateAvailable 画了点）；
-  // 这里兜底处理"侧栏已渲染完、检测结果刚到"的情况。
-  const item = document.querySelector('.settings-menu-item[data-section="desktop"]');
-  if (!item) return;
-  let dot = item.querySelector('.update-dot');
-  if (updateAvailable && !dot) {
-    dot = document.createElement('span');
-    dot.className = 'update-dot';
-    item.appendChild(dot);
-  } else if (!updateAvailable && dot) {
-    dot.remove();
-  }
-  // 桌面端页签的版本文案同步：有新版时"检查线上是否有新版本"→"发现新版本"
-  const st = document.getElementById('update-status-text');
-  if (st) {
-    st.innerHTML = updateAvailable ? '<b style="color:var(--warn)">；发现新版本</b>' : '；检查线上是否有新版本';
-  }
-}
-
-async function runUpdateCheck({ manual = false } = {}) {
-  try {
-    const data = await api('/api/update-check');
-    if (!data?.ok) return data;   // 网络/服务器错误原样返回，手动检查要显示原因
-    updateLatest = data;
-    updateAvailable = !!data.hasUpdate;
-    renderUpdateDot();
-    // 自动检查弹浮窗；本次启动内被用户关过就不再弹（手动点「检查更新」除外）
-    if (updateAvailable && (!updateToastDismissed || manual)) {
-      showUploadToast(
-        `发现新版本 v${data.latest}（当前 v${data.current}）`,
-        data.url,
-        { onClose: () => { updateToastDismissed = true; } }
-      );
-    }
-    return data;
-  } catch { return null; }
-}
-let updateLatest = null;
-
-// ── 金句上传 ──
-state.quoteMode = false;
-state.quoteSelected = new Set();   // 当前存档会话里勾选的消息 id（m.id）
-
-/** 进入/退出勾选模式时切换顶栏按钮形态。 */
-function syncQuoteButtons() {
-  const qb = $('#quote-btn'), qc = $('#quote-confirm-btn');
-  if (!qb || !qc) return;
-  if (state.quoteMode) {
-    qb.textContent = '取消';
-    qc.classList.remove('hidden');
-  } else {
-    qb.textContent = '金句上传';
-    qc.classList.add('hidden');
-  }
-}
-
-function enterQuoteMode() {
-  state.quoteMode = true;
-  state.quoteSelected = new Set();
-  syncQuoteButtons();
-  switchTab('chats');
-  if (state.currentChatKey) renderChatMessages();   // 重建出勾选框
-}
-
-function exitQuoteMode() {
-  if (!state.quoteMode) return;
-  state.quoteMode = false;
-  state.quoteSelected = new Set();
-  syncQuoteButtons();
-  if (state.tab === 'chats' && state.currentChatKey) updateChatMessagesBody(true);
-}
-
-/** 勾选模式下的确认：二次确认框 + 昵称。 */
-function openQuoteConfirmModal() {
-  const all = state.chatMessages || [];
-  const picked = all.filter((m) => state.quoteSelected.has(m.id))
-    .sort((a, b) => (Number(a.ts) || 0) - (Number(b.ts) || 0));   // 按时间正序，读起来才是对话
-  if (!picked.length) { showNoticeModal('金句上传', '还没有勾选任何消息。先在存档列表里勾几段对话吧。'); return; }
-  const botCount = picked.filter((m) => m.self).length;
-  if (!botCount) {
-    showNoticeModal('金句上传', '勾选的消息里必须包含至少一条机器人发送的消息 —— 金句墙收的是机器人的发言。');
-    return;
-  }
-
-  const key = state.currentChatKey || '';
-  const chatName = formatChatTitle(key, chatNameOf(key));
-  const lastNickname = localStorage.getItem('qqa-quote-nickname') || '';
-
-  const overlay = modelModalShell({
-    head: '确认上传金句',
-    body: `
-      <div class="hint">将上传 ${picked.length} 条消息（含机器人 ${botCount} 条），
-        来自「${esc(chatName)}」，公开展示在 kondius.cn/qq-agent/holyshits。</div>
-      <div class="field"><label>昵称（收录人）</label>
-        <input type="text" id="q-nickname" maxlength="32" placeholder="怎么称呼你" value="${esc(lastNickname)}" /></div>
-      <div style="max-height:320px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:10px;font-size:12.5px">
-        ${picked.map((m) => `<div style="margin-bottom:8px">
-          <span class="muted">${esc(m.self ? '🤖 ' : '')}${esc(m.senderName || '?')}：</span>${esc(String(m.text || '').slice(0, 200))}
-        </div>`).join('')}
-      </div>
-      <div id="q-hint" class="muted" style="font-size:12px"></div>`,
-    foot: `<button class="btn" id="q-cancel">取消</button>
-           <button class="btn btn-primary" id="q-submit">确认上传</button>`
-  });
-
-  overlay.querySelector('#q-cancel').addEventListener('click', () => closeModelModal(overlay));
-  overlay.querySelector('#q-submit').addEventListener('click', async () => {
-    const nickname = overlay.querySelector('#q-nickname').value.trim();
-    const hint = overlay.querySelector('#q-hint');
-    if (!nickname) { hint.textContent = '先填个昵称'; return; }
-    overlay.querySelector('#q-submit').disabled = true;
-    try {
-      // ── 先取图：QQ 图床 URL 会过期（老消息全网 400），
-      //    让本地后端走 OneBot get_image 从 NapCat 缓存里把原图读出来转 dataURL，
-      //      随消息一起上传 —— 服务器不再依赖 URL 时效。
-      const mediaItems = [];
-      const mediaOwners = [];   // 记录每个 item 属于哪条消息，方便回填
-      for (const m of picked) {
-        for (const x of (Array.isArray(m.media) ? m.media : [])) {
-          if (x && (x.url || x.file)) {
-            mediaItems.push({ file: x.file || '', url: x.url || '' });
-            mediaOwners.push(m);
-          }
-        }
-      }
-      const dataUrls = new Map();   // message -> [dataUrl,...]
-      if (mediaItems.length) {
-        hint.textContent = `正在从本地缓存取图（${mediaItems.length} 张）…`;
-        try {
-          const r = await api('/api/media-data', {
-            method: 'POST', body: JSON.stringify({ items: mediaItems })
-          });
-          (r.results || []).forEach((res, i) => {
-            if (res?.dataUrl) {
-              const m = mediaOwners[i];
-              if (!dataUrls.has(m)) dataUrls.set(m, []);
-              dataUrls.get(m).push(res.dataUrl);
-            }
-          });
-          hint.textContent = `取到 ${[...dataUrls.values()].flat().length}/${mediaItems.length} 张图，上传中…`;
-        } catch { hint.textContent = '取图失败（按无图上传），上传中…'; }
-      } else {
-        hint.textContent = '上传中…';
-      }
-      const res = await fetch(`${COMMUNITY_API}/holyshits`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          nickname,
-          // 不传 chatKey / chatName：金句墙只展示时间和收录人，群信息不出本机
-          messages: picked.map((m) => {
-            const dus = dataUrls.get(m) || [];
-            let di = 0;
-            return {
-              ts: m.ts, senderName: m.senderName, text: m.text,
-              self: !!m.self,
-              media: (Array.isArray(m.media) ? m.media : [])
-                .filter((x) => x && (x.url || x.file))
-                .map((x) => ({
-                  kind: 'image',
-                  url: x.url || '',
-                  file: x.file || '',
-                  // 取到就带上（服务器直接落盘）；取不到服务器再尝试 URL 下载
-                  ...(dus[di] ? { dataUrl: dus[di++] } : {})
-                }))
-            };
-          })
-        })
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || data.ok === false) throw new Error(data.error || `HTTP ${res.status}`);
-      localStorage.setItem('qqa-quote-nickname', nickname);
-      closeModelModal(overlay);
-      exitQuoteMode();
-      showUploadToast('金句已收录！', 'https://kondius.cn/qq-agent/holyshits');
-    } catch (err) {
-      hint.textContent = `上传失败：${err.message}`;
-      overlay.querySelector('#q-submit').disabled = false;
-    }
-  });
-}
-
-// 顶栏按钮绑定
-$('#feedback-btn')?.addEventListener('click', () => openFeedbackModal());
-$('#open-site-btn')?.addEventListener('click', () => openSite());
-$('#quote-btn')?.addEventListener('click', () => {
-  if (state.quoteMode) exitQuoteMode(); else enterQuoteMode();
-});
-$('#quote-confirm-btn')?.addEventListener('click', () => openQuoteConfirmModal());
 
 // ── 标签页切换 ──
 // ⚠️ 必须统一走 switchTab：曾经这里把切换逻辑 inline 复制了一份，
@@ -5326,8 +4627,6 @@ $$('.tab').forEach((tab) => {
   // 启动 loading：先等 HTTP 服务可用（页面可能先于服务打开）
   setLoadingStatus('正在启动 QQ Agent 服务…');
   await bootLoop();
-  runUpdateCheck();                                 // 启动时静默查一次（失败不打扰）
-  setInterval(() => runUpdateCheck(), 3600_000);    // 之后每小时查一次
 
   // 主题：以后端配置为准（跨设备同步），仅当后端确实存过才覆盖本地
   try {

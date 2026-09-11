@@ -1,116 +1,5 @@
-// 多提供商模型目录：从 DSH 的 settings.yaml 导入模型列表，统一成 OpenAI 兼容调用。
-// 说明：DSH 里 api: anthropic-messages 的提供商，本程序按 OpenAI 兼容模式调用
-// （A6API 这类中转站两种协议都支持；baseURL 缺 /v1 时自动补上）。
-// 密钥来源优先级：DSH .credentials.yaml 的 refs > 环境变量（含别名）。
-import fs from 'node:fs';
-import path from 'node:path';
-import { load as loadYaml } from 'js-yaml';
+// 多提供商模型目录：统一使用 OpenAI 兼容接口，由控制台维护。
 import { getConfig, updateConfig } from './config.js';
-
-// DSH 未写 baseURL 的提供商，按官方默认端点补全（可在 UI 修改）。
-// 来源：
-// - mimo.mi.com/docs Token Plan 快速接入（tp- 密钥专用网关，与 sk- 开放平台相互独立不可混用）
-// - help.aliyun.com/zh/model-studio/token-plan-personal-quick-start（sk-sp- 密钥专用网关，与按量付费 sk- 不可混用）
-// - opencode.ai/docs/go（OpenCode Go 订阅网关）
-const PROVIDER_URL_DEFAULTS = {
-  openrouter: 'https://openrouter.ai/api/v1',
-  nvidia: 'https://integrate.api.nvidia.com/v1',
-  'qwen-token-plan-cn': 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
-  xiaomi: 'https://api.xiaomimimo.com/v1',
-  'xiaomi-token-plan-cn': 'https://token-plan-cn.xiaomimimo.com/v1',
-  'opencode-go': 'https://opencode.ai/zen/go/v1'
-};
-
-// 密钥环境变量的常见别名（如 DSH 写 A6API_API_KEY，本机实际是 A6API_APIKEY）
-const KEY_ENV_ALIASES = {
-  A6API_API_KEY: ['A6API_API_KEY', 'A6API_APIKEY']
-};
-
-function envApiKey(envName) {
-  for (const name of KEY_ENV_ALIASES[envName] || [envName]) {
-    const value = process.env[name];
-    if (value) return { key: String(value), from: `环境变量 ${name}` };
-  }
-  return { key: '', from: '' };
-}
-
-/** 读取 DSH 的 .credentials.yaml（refs.<环境变量名> = 密钥）。 */
-export function readDshCredentials(yamlPath) {
-  const credPath = path.join(path.dirname(yamlPath), '.credentials.yaml');
-  try {
-    const doc = loadYaml(fs.readFileSync(credPath, 'utf8'));
-    const refs = doc?.refs;
-    return refs && typeof refs === 'object' ? refs : {};
-  } catch {
-    return {};
-  }
-}
-
-function normalizeBaseURL(raw, { wasAnthropic, providerId }) {
-  let url = String(raw || '').trim();
-  if (!url) url = PROVIDER_URL_DEFAULTS[providerId] || '';
-  if (!url) return '';
-  if (wasAnthropic && !/\/v1\/?$/.test(url)) url = url.replace(/\/+$/, '') + '/v1';
-  return url.replace(/\/+$/, '');
-}
-
-/** 解析 DSH settings.yaml，返回规范化的提供商数组。 */
-export function parseDshSettings(yamlPath) {
-  const text = fs.readFileSync(yamlPath, 'utf8');
-  const doc = loadYaml(text);
-  const providers = doc?.['llm-pi-ai']?.providers ?? {};
-  const creds = readDshCredentials(yamlPath);
-  const out = [];
-  for (const [id, p] of Object.entries(providers)) {
-    const rawModels = Array.isArray(p?.models) ? p.models : [];
-    const models = rawModels
-      .map((m) => (typeof m === 'string' ? m : String(m?.id || m?.model || '')))
-      .filter(Boolean);
-    if (!models.length) continue;
-    const wasAnthropic = String(p?.api || '').includes('anthropic');
-    const envName = String(p?.apiKeyEnv || '');
-    // 密钥优先级：DSH 凭据文件 > 环境变量
-    let key = '';
-    let keyFrom = '';
-    if (creds[envName]) {
-      key = String(creds[envName]);
-      keyFrom = 'DSH 凭据文件';
-    } else {
-      ({ key, from: keyFrom } = envApiKey(envName));
-    }
-    const entry = {
-      id,
-      displayName: String(p?.displayName || id),
-      api: 'openai',
-      anthropicOrigin: wasAnthropic,
-      baseURL: normalizeBaseURL(p?.baseURL, { wasAnthropic, providerId: id }),
-      apiKey: key,
-      apiKeyFrom: keyFrom,
-      models,
-      needsBaseUrl: false
-    };
-    if (!entry.baseURL) entry.needsBaseUrl = true;
-    out.push(entry);  }
-  return out;
-}
-
-/** 从 DSH 导入并写入配置（整体替换 providers，并把密钥拆到 dshProviderKeys）。返回导入摘要。 */
-export function importFromDsh(yamlPath) {
-  const providers = parseDshSettings(yamlPath);
-  const dshProviderKeys = {};
-  const providersWithoutKeys = providers.map((p) => {
-    if (p.apiKey) dshProviderKeys[p.id] = p.apiKey;
-    const { apiKey, ...rest } = p;
-    return rest;
-  });
-  updateConfig({ providers: providersWithoutKeys, dshProviderKeys });
-  return {
-    imported: providersWithoutKeys.length,
-    models: providersWithoutKeys.reduce((n, p) => n + p.models.length, 0),
-    withKeys: Object.keys(dshProviderKeys).length,
-    providers: providersWithoutKeys.map((p) => ({ id: p.id, models: p.models.length, hasKey: !!dshProviderKeys[p.id], baseURL: p.baseURL }))
-  };
-}
 
 /** 当前生效的提供商目录（配置里的 providers）。 */
 export function currentProviders() {
@@ -118,13 +7,13 @@ export function currentProviders() {
   return (cfg.providers || []).map((p) => withResolvedKey(p, cfg));
 }
 
-/** 给指定提供商设置 API Key（存进配置的 dshProviderKeys，不动 providers 数组）。 */
+/** 给指定提供商设置 API Key（密钥与公开目录元数据分开存储）。 */
 export function setProviderKey(providerId, apiKey) {
   const key = String(apiKey ?? '').trim();
-  const keys = { ...(getConfig().dshProviderKeys || {}) };
+  const keys = { ...(getConfig().providerKeys || {}) };
   if (key) keys[providerId] = key;
   else delete keys[providerId];
-  updateConfig({ dshProviderKeys: keys });
+  updateConfig({ providerKeys: keys });
   return currentProviders().find((p) => p.id === providerId) || null;
 }
 
@@ -163,8 +52,8 @@ function providerKeyValue(provider, cfg) {
   if (provider && typeof provider === 'object') {
     const top = String(provider.apiKey ?? '').trim();
     if (top && top !== '******') return top;
-    const dshKey = String(cfg?.dshProviderKeys?.[provider.id] ?? '').trim();
-    if (dshKey && dshKey !== '******') return dshKey;
+    const catalogKey = String(cfg?.providerKeys?.[provider.id] ?? '').trim();
+    if (catalogKey && catalogKey !== '******') return catalogKey;
   }
   return '';
 }
@@ -262,9 +151,9 @@ export function upsertProvider({ baseUrl, apiKey, models = [] }) {
       if (!existing.models.includes(m.id)) existing.models.push(m.id);
     }
     if (apiKey) {
-      const keys = { ...(getConfig().dshProviderKeys || {}) };
+      const keys = { ...(getConfig().providerKeys || {}) };
       keys[existing.id] = String(apiKey).trim();
-      updateConfig({ providers, dshProviderKeys: keys });
+      updateConfig({ providers, providerKeys: keys });
     } else {
       updateConfig({ providers });
     }
@@ -288,9 +177,9 @@ export function upsertProvider({ baseUrl, apiKey, models = [] }) {
     needsBaseUrl: false
   };
   providers.push(provider);
-  const keys = { ...(getConfig().dshProviderKeys || {}) };
+  const keys = { ...(getConfig().providerKeys || {}) };
   if (apiKey) keys[id] = String(apiKey).trim();
-  updateConfig({ providers, ...(apiKey ? { dshProviderKeys: keys } : {}) });
+  updateConfig({ providers, ...(apiKey ? { providerKeys: keys } : {}) });
   return { provider: withResolvedKey(provider), created: true };
 }
 

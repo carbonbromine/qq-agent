@@ -15,7 +15,7 @@ exclusive-use confirmation; it does not automatically stop the old instance.
 
 ## Requirements
 
-- Linux with systemd user services, Node.js >=22.13, npm, curl and rsync.
+- Linux with systemd user services, curl, tar, sha256sum and rsync.
 - A mounted local filesystem for SQLite (not NFS/SMB).
 - A separately managed OneBot v11 HTTP/forward WebSocket service.
 - An OpenAI Chat Completions compatible model with function calling.
@@ -26,7 +26,6 @@ exclusive-use confirmation; it does not automatically stop the old instance.
 bash deploy.sh \
   --install-dir /mnt/data/qq-agent/app \
   --data-dir /mnt/data/qq-agent/data \
-  --node /home/sourcecode/.local/bin/node \
   --host 192.168.31.109 --port 3210 \
   --service qq-agent-linux
 ```
@@ -35,22 +34,24 @@ Create the parent directory with appropriate ownership first. Run deployment as
 the service user, not root. The installer uses sudo only for linger if required.
 Dependencies are installed with `--omit=dev --ignore-scripts`: Linux needs no
 Electron, GUI, X11, browser, compiler or native SQLite add-on.
+If no compatible Node.js is found, the script downloads Node.js 22 into
+`INSTALL_DIR/.runtime` and verifies it against the official SHA-256 manifest.
+`--node /absolute/path/to/node` remains available to use an existing runtime.
 
 Optional import on FIRST install only:
 
 ```bash
 bash deploy.sh --install-dir /mnt/data/qq-agent/app \
   --data-dir /mnt/data/qq-agent/data --host 192.168.31.109 --port 3210 \
-  --node /home/sourcecode/.local/bin/node \
   --import-bridge /home/sourcecode/apps/qq-bridge/config.json \
   --credential-file /home/sourcecode/.config/dsh/credentials.env
 ```
 
 Every deployment enters observe mode. It does not activate replies automatically.
 Model/API settings for non-DeepSeek providers must be configured in the new console.
-Linux intentionally disables Windows SnowLuma launching and Explorer actions.
-Existing Electron sources are retained with a Node-compatible Electron major;
-Windows installer packaging is not part of Linux validation.
+The repository contains no Electron shell, Windows installer, bundled protocol
+launcher, community upload client, telemetry client, or online updater. Manage the
+external OneBot implementation as its own Linux service.
 
 ## Control Panel
 

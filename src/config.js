@@ -31,7 +31,7 @@ export const DEFAULT_CONFIG = {
     priceOutputPerM: 0,     // 输出单价
     priceCachedPerM: 0,     // 输入且命中缓存的单价；留 0 时按 priceInputPerM 计
     useOfficialPrice: true, // true = 优先用内置官方价格表（按模型 id 匹配）
-    // 远程价格表 URL（可选）：指向一个自托管的 JSON（格式见 scripts/export-prices.mjs 产物）。
+    // 远程价格表 URL（可选）：指向与 prices.json 相同结构的自托管 JSON。
     // 启动时拉取一次，之后每 24 小时自动刷新（失败过 3 小时重试）；
     // 拉取全程异步、失败不清表 —— 对正常使用零影响。
     // 远程条目按模型 id 覆盖内置表，内置表其余条目仍是兜底。
@@ -43,11 +43,7 @@ export const DEFAULT_CONFIG = {
   },
   // 多提供商模型目录（设置页手动维护）
   providers: [],
-  // 多提供商模型目录（设置页手动维护）
-  providers: [],
-  dshProviderKeys: {},   // providerId -> 真实 API Key（providers[] 里不再存明文 Key）
-  providersSourceYaml: '',
-  providersImported: true,
+  providerKeys: {},      // providerId -> 真实 API Key（providers[] 里不存明文 Key）
   // 联网搜索（默认 Bing 网页解析，无需 key；可选 DeepSeek/智谱/博查/百度/秘塔）
   webSearch: {
     enabled: true,
@@ -106,10 +102,8 @@ export const DEFAULT_CONFIG = {
   security: {
     allowPrivateImageHosts: false           // true 时图片下载允许内网地址（仅本地测试/自建图床）
   },
-  // SnowLuma / OneBot v11
-  snowluma: {
-    dir: '',                   // SnowLuma 程序目录；留空 = 自动探测项目内 ./snowluma
-    autoLaunch: false,         // 应用启动时自动拉起 SnowLuma（未运行时）
+  // 外部 OneBot v11 服务
+  onebot: {
     wsUrl: 'ws://127.0.0.1:3001',
     httpUrl: 'http://127.0.0.1:3000',
     accessToken: '',           // WebSocket 令牌
@@ -134,7 +128,6 @@ export const DEFAULT_CONFIG = {
   drainDelayMs: 10000,
   maxBatchWaitMs: 20000,
   runtime: { mode: 'observe', paused: false },
-  telemetry: { enabled: false },
   maxConcurrentRuns: 2,     // 全局同时进行的 agent 运行数
   // 发送保护
   send: {
@@ -202,14 +195,12 @@ export const DEFAULT_CONFIG = {
     provider: '',                         // 专用模型所属提供商 id（useChatModel=false 时生效）
     model: ''                             // 专用模型 id（useChatModel=false 时生效）
   },
-  // 桌面端/控制台
+  // Linux Web 控制台
   server: {
     port: 3210,
     host: '127.0.0.1',
     strictPort: true,
-    token: '',                // 留空 = 只监听 127.0.0.1
-    autoStart: false,         // 开机自启（仅 Electron 桌面端生效）
-    closeToTray: true         // 点关闭 = 最小化到托盘
+    token: ''                 // 留空 = 只监听 127.0.0.1
   },
   ui: {
     // 主题：'dark' | 'light' | 'system'（system = 跟随系统偏好）。
@@ -219,6 +210,30 @@ export const DEFAULT_CONFIG = {
     refreshMs: 15000          // 界面轮询间隔
   }
 };
+
+function migrateConfig(parsed) {
+  const out = structuredClone(parsed);
+  if (!out.onebot && out.snowluma) {
+    out.onebot = {
+      wsUrl: out.snowluma.wsUrl,
+      httpUrl: out.snowluma.httpUrl,
+      accessToken: out.snowluma.accessToken,
+      httpAccessToken: out.snowluma.httpAccessToken
+    };
+  }
+  if (!out.providerKeys && out.dshProviderKeys) out.providerKeys = out.dshProviderKeys;
+  delete out.snowluma;
+  delete out.dshProviderKeys;
+  delete out.providersSourceYaml;
+  delete out.providersImported;
+  delete out.telemetry;
+  if (out.server) {
+    delete out.server.autoStart;
+    delete out.server.closeToTray;
+  }
+  if (out.ui?.theme === '?') out.ui.theme = 'dark';
+  return out;
+}
 
 function deepMerge(base, override) {
   if (override === null || override === undefined) return structuredClone(base);
@@ -245,7 +260,7 @@ export function loadConfig() {
   try {
     let text = fs.readFileSync(CONFIG_FILE, 'utf8');
     if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
-    const parsed = JSON.parse(text);
+    const parsed = migrateConfig(JSON.parse(text));
     return deepMerge(DEFAULT_CONFIG, parsed);
   } catch {
     return structuredClone(DEFAULT_CONFIG);
@@ -263,7 +278,7 @@ export function getConfig() {
 
 /** 更新并持久化配置（浅合并到当前值；patch 里传对象字段则整体替换该字段）。 */
 export function updateConfig(patch) {
-  const next = deepMerge(getConfig(), patch);
+  const next = migrateConfig(deepMerge(getConfig(), patch));
   if (!['observe', 'active'].includes(next.runtime?.mode)) throw new Error('Invalid runtime mode');
   if (!Number.isInteger(Number(next.server?.port)) || next.server.port < 1 || next.server.port > 65535) {
     throw new Error('Invalid server port');

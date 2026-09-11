@@ -26,7 +26,9 @@ it('protects console APIs, redacts credentials and blocks all sending in observe
   cfg.server = { ...cfg.server, port, token: 'console-test-secret' };
   cfg.allow.groups = ['123'];
   cfg.api.apiKey = 'provider-test-secret';
-  cfg.snowluma.wsUrl = 'ws://127.0.0.1:1';
+  cfg.onebot.wsUrl = 'ws://127.0.0.1:1';
+  cfg.onebot.accessToken = 'onebot-ws-secret';
+  cfg.onebot.httpAccessToken = 'onebot-http-secret';
   updateConfig(cfg);
   const app = createApp({ log: () => {} });
   t.after(async () => { await app.stop(); });
@@ -44,11 +46,20 @@ it('protects console APIs, redacts credentials and blocks all sending in observe
   const cookie = login.headers.get('set-cookie');
   assert.ok(cookie.includes('HttpOnly') && cookie.includes('SameSite=Strict'));
   const headers = { cookie: cookie.split(';')[0] };
-  const saved = await (await request('/api/config', { runtime: { mode: 'active' }, ui: { theme: 'light' } }, headers)).json();
+  const saved = await (await request('/api/config', {
+    runtime: { mode: 'active' },
+    ui: { theme: 'light' },
+    onebot: { wsUrl: 'ws://127.0.0.1:2' }
+  }, headers)).json();
   assert.equal(saved.config.runtime.mode, 'observe');
   assert.equal(saved.config.server.token, undefined);
   assert.equal(saved.config.api.apiKey, undefined);
+  assert.equal(saved.config.onebot.accessToken, undefined);
+  assert.equal(saved.config.onebot.hasAccessToken, true);
   assert.ok(!JSON.stringify(saved).includes('provider-test-secret'));
+  const savedRaw = JSON.parse(fs.readFileSync(path.join(dir, 'config.json')));
+  assert.equal(savedRaw.onebot.accessToken, 'onebot-ws-secret');
+  assert.equal(savedRaw.onebot.httpAccessToken, 'onebot-http-secret');
   assert.equal((await request('/api/config', {}, { ...headers, origin: 'https://attacker.invalid' })).status, 401);
   assert.equal((await request('/api/runtime', { mode: 'active' }, headers)).status, 409);
   assert.equal((await request('/api/chats/group_123/test-send', { text: 'must not send' }, headers)).status, 502);

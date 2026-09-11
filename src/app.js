@@ -1,13 +1,10 @@
-// 总装：OneBot 事件接入 → 存储 → 编排器；HTTP API + SSE 给 UI。
-// Electron 主进程与 headless 服务器都从这里启动。
+// Linux 服务总装：OneBot 事件接入 → 存储 → 编排器；HTTP API + SSE 给 UI。
 import http from 'node:http';
-import net from 'node:net';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { getConfig, updateConfig, ROOT, DATA_DIR } from './config.js';
+import { getConfig, updateConfig, DATA_DIR } from './config.js';
 import { customSearch } from './web-search.js';
 import { OneBotClient, segmentsToText, extractMediaFromSegments, expandForwardNodes } from './onebot.js';
 import { ChatStore } from './store.js';
@@ -19,8 +16,7 @@ import { Orchestrator } from './orchestrator.js';
 import { listModels, chatCompletion, resolveApiKey, estimateCost, cacheHitRate } from './llm.js';
 import { resolveOfficialPrice, listOfficialPrices, isPeakHour, priceAt, resolveModelPrice, modelLabel, splitModelLabel, UNKNOWN_VENDOR } from './model-prices.js';
 import { initPriceFeed, refreshPriceFeed, priceFeedStatus } from './price-feed.js';
-import { startTelemetryLoop } from './telemetry.js';
-import { importFromDsh, currentProviders, setProviderKey, testAllProviders, testOneProvider, testModelChat, fetchModelsFrom, upsertProvider, addModelsToProvider, removeModelFromProvider } from './providers.js';
+import { currentProviders, setProviderKey, testAllProviders, testOneProvider, testModelChat, fetchModelsFrom, upsertProvider, addModelsToProvider, removeModelFromProvider } from './providers.js';
 import { scanModelsVision, visionResults, modelImageVerdict } from './vision-scan.js';
 import { builtinVisionResults } from './model-vision-docs.js';
 import { createEventBus, todayKey } from './util.js';
@@ -29,7 +25,7 @@ import { assertCanSend } from './access.js';
 // 全局 fetch（undici）默认连接建立超时只有 10 秒，openrouter.ai 这类海外端点
 // 握手慢时会直接报 "Connect Timeout Error ... timeout: 10000ms"（注意这不是
 // 请求超时——那是 llm.js 里 180 秒的 AbortSignal）。这里放宽到 30 秒。
-// 动态导入 + 容错：undici 与 Electron 内置 Node 不兼容时只退回默认超时，绝不崩主进程。
+// 动态导入 + 容错：undici 初始化失败时退回默认连接超时，不阻塞服务启动。
 try {
   const { Agent, setGlobalDispatcher } = await import('undici');
   setGlobalDispatcher(new Agent({ connect: { timeout: 30_000 } }));
@@ -50,29 +46,6 @@ function allowed(kind, id, cfg) {
   return cfg.allowAllWhenEmpty === true;
 }
 
-// ── 版本更新检查 ─────────────────────────────────────────────────────
-// 线上版本信息只有一份：kondius.cn/qq-agent/version.json（发版时手动改）。
-// 由后端代取而不是前端直连：绕过 CORS，且失败信息能统一回给 UI。
-const UPDATE_INFO_URL = 'https://kondius.cn/qq-agent/version.json';
-
-function localVersion() {
-  try {
-    const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
-    return String(pkg.version || '0.0.0');
-  } catch { return '0.0.0'; }
-}
-
-/** x.y.z 三段数字比较；返回 1 / 0 / -1。非数字段按 0 处理，够用。 */
-function compareSemver(a, b) {
-  const pa = String(a).split('.').map((x) => parseInt(x, 10) || 0);
-  const pb = String(b).split('.').map((x) => parseInt(x, 10) || 0);
-  for (let i = 0; i < 3; i++) {
-    if ((pa[i] || 0) > (pb[i] || 0)) return 1;
-    if ((pa[i] || 0) < (pb[i] || 0)) return -1;
-  }
-  return 0;
-}
-
 function sameSecret(a, b) {
   const left = Buffer.from(String(a ?? ''));
   const right = Buffer.from(String(b ?? ''));
@@ -81,164 +54,8 @@ function sameSecret(a, b) {
 
 export function createApp({ log = console.log } = {}) {
   const cfg = getConfig();
-  let stopping = false;
   const bus = createEventBus();
   const sseClients = new Set();
-
-  // ── SnowLuma 程序目录与进程管理 ──
-  function snowlumaDir() {
-    const configured = String(getConfig().snowluma?.dir || '').trim();
-    if (configured) return configured;
-    const bundled = path.join(ROOT, 'snowluma');
-    if (fs.existsSync(bundled)) return bundled;
-    // 安装版：asar 里的文件不可执行，electron-builder 会把 snowluma/ 解包到
-    // resources/app.asar.unpacked/snowluma（见 package.json asarUnpack）
-    const unpacked = bundled.replace('app.asar', 'app.asar.unpacked');
-    if (unpacked !== bundled && fs.existsSync(unpacked)) return unpacked;
-    return '';
-  }
-
-  function snowlumaWsPort() {
-    try {
-      const wsUrl = String(getConfig().snowluma?.wsUrl || 'ws://127.0.0.1:3001');
-      const u = new URL(wsUrl);
-      if (u.port) return Number(u.port);
-    } catch { /* ignore */ }
-    return 3001;
-  }
-
-  /** 从 SnowLuma 的 runtime.json 读取 WebUI 地址（http(s)://host:port/）。拿不到就返回空串。 */
-  function snowlumaWebuiUrl() {
-    try {
-      const dir = snowlumaDir();
-      if (!dir) return '';
-      const rtPath = path.join(dir, 'config', 'runtime.json');
-      if (!fs.existsSync(rtPath)) return '';
-      const rt = JSON.parse(fs.readFileSync(rtPath, 'utf8'));
-      const host = String(rt.webuiHost || '127.0.0.1');
-      const port = Number(rt.webuiPort) || 5099;
-      const tls = !!(rt.webuiTls && rt.webuiTls.enabled);
-      return `${tls ? 'https' : 'http'}://${host}:${port}/`;
-    } catch {
-      // 配置读不到时，从最近日志里找 "listening http(s)://…" 兜底
-      for (const line of [...snowlumaLogs].reverse()) {
-        const m = /listening\s+(https?:\/\/[\w.:-]+)/i.exec(line.text || '');
-        if (m) return m[1];
-      }
-      return '';
-    }
-  }
-
-  function isPortOpen(host, port, timeoutMs = 800) {
-    return new Promise((resolve) => {
-      const socket = new net.Socket();
-      const done = (result) => { try { socket.destroy(); } catch { /* ignore */ } resolve(result); };
-      socket.setTimeout(timeoutMs);
-      socket.once('connect', () => done(true));
-      socket.once('timeout', () => done(false));
-      socket.once('error', () => done(false));
-      socket.connect(port, host);
-    });
-  }
-
-  // SnowLuma 内置控制台日志（环形缓冲，最近 500 行）
-  // 内置 SnowLuma 状态与日志。未采用多进程方案：由 Electron 主进程提供 IPC 控制与日志转发，
-  // 确保 SnowLuma 随 QQ Agent 退出、无需单独管理窗口。
-  const snowlumaLogs = [];
-  let snowlumaProc = null;
-  let snowlumaStopping = false;
-
-  function pushSnowlumaLog(text, stream = 'stdout') {
-    const line = { at: Date.now(), stream, text: String(text ?? '').replace(/\r?\n$/, '') };
-    if (!line.text) return;
-    snowlumaLogs.push(line);
-    if (snowlumaLogs.length > 500) snowlumaLogs.splice(0, snowlumaLogs.length - 500);
-    emit('snowluma-log', line);
-  }
-
-  function snowlumaStatus() {
-    return { embedded: !!snowlumaProc, pid: snowlumaProc?.pid ?? null };
-  }
-
-  /** 关闭内置启动的 SnowLuma。返回是否执行了关闭动作。 */
-  function stopSnowluma() {
-    const proc = snowlumaProc;
-    if (!proc) return false;
-    try {
-      proc.kill();
-      pushSnowlumaLog('已请求关闭 SnowLuma。', 'stdout');
-    } catch (error) {
-      pushSnowlumaLog(`关闭 SnowLuma 失败：${error?.message ?? error}`, 'stderr');
-      throw error;
-    }
-    return true;
-  }
-
-  /** 拉起 SnowLuma。优先用项目内置 node.exe 直接运行（日志进内置控制台）；失败再回退到独立窗口 launcher.bat。 */
-  async function launchSnowluma() {
-    if (process.platform !== 'win32') {
-      return { ok: false, error: 'Linux uses an external OneBot service; configure its HTTP/WS addresses.' };
-    }
-    const dir = snowlumaDir();
-    if (!dir) return { ok: false, error: '找不到 SnowLuma 目录：请确认项目内 snowluma/ 文件夹存在，或在设置里填写 SnowLuma 目录' };
-    const wsPort = snowlumaWsPort();
-    if (await isPortOpen('127.0.0.1', wsPort)) {
-      pushSnowlumaLog(`SnowLuma 已在运行（端口 ${wsPort} 已就绪），无需重复启动`, 'stdout');
-      return { ok: true, alreadyRunning: true };
-    }
-    const indexMjs = path.join(dir, 'index.mjs');
-    const nodeExe = path.join(dir, 'node.exe');
-    if (fs.existsSync(indexMjs) && fs.existsSync(nodeExe)) {
-      try {
-        // 用 Windows 的 CREATE_NEW_PROCESS_GROUP + 独立进程方式启动，
-        // 让 SnowLuma 真正独立于 Electron 主进程（Electron 退出时不会拖垮它）。
-        const child = spawn(nodeExe, [indexMjs], {
-          cwd: dir,
-          stdio: ['ignore', 'pipe', 'pipe'],
-          windowsHide: true,
-          detached: false
-        });
-        snowlumaProc = child;
-        child.unref();
-        pushSnowlumaLog(`SnowLuma 启动中（内置模式，pid=${child.pid}）…`, 'stdout');
-        child.stdout.on('data', (d) => {
-          for (const line of String(d).split(/\r?\n/)) {
-            if (line.trim()) pushSnowlumaLog(line, 'stdout');
-          }
-        });
-        child.stderr.on('data', (d) => {
-          for (const line of String(d).split(/\r?\n/)) {
-            if (line.trim()) pushSnowlumaLog(line, 'stderr');
-          }
-        });
-        child.on('exit', (code, signal) => {
-          snowlumaProc = null;
-          pushSnowlumaLog(`SnowLuma 进程已退出（code=${code ?? ''} signal=${signal ?? ''}）`, 'stderr');
-          emit('snowluma-status', { running: false, embedded: false, pid: null });
-        });
-        child.on('error', (error) => {
-          pushSnowlumaLog(`SnowLuma 启动失败：${error?.message ?? error}`, 'stderr');
-        });
-        emit('snowluma-status', { running: true, embedded: true, pid: child.pid });
-        return { ok: true, launched: true, embedded: true, pid: child.pid };
-      } catch (error) {
-        pushSnowlumaLog(`内置模式启动失败，尝试回退独立窗口：${error?.message ?? error}`, 'stderr');
-        snowlumaProc = null;
-      }
-    }
-    // 回退：launcher.bat 独立控制台窗口（老行为，日志无法内置）
-    const launcher = path.join(dir, 'launcher.bat');
-    if (!fs.existsSync(launcher)) return { ok: false, error: `目录里没有 index.mjs / node.exe，也没有 launcher.bat：${dir}` };
-    const child = spawn('cmd.exe', ['/c', launcher], {
-      cwd: dir,
-      detached: true,
-      stdio: 'ignore',
-      windowsHide: false // 保留 SnowLuma 自己的控制台窗口
-    });
-    child.unref();
-    pushSnowlumaLog('SnowLuma 已用独立控制台窗口启动（此模式下日志不进内置控制台）', 'stdout');
-    return { ok: true, launched: true, embedded: false };
-  }
 
   const emit = (type, payload) => {
     bus.emit(type, payload);
@@ -286,10 +103,10 @@ export function createApp({ log = console.log } = {}) {
   const memory = new MemoryStore();
   const sessions = new SessionRegistry(cfg.store?.keepSessionFiles ?? 0);   // 0 = 不限
   const onebot = new OneBotClient({
-    wsUrl: cfg.snowluma?.wsUrl,
-    httpUrl: cfg.snowluma?.httpUrl,
-    accessToken: cfg.snowluma?.accessToken,
-    httpToken: cfg.snowluma?.httpAccessToken || cfg.snowluma?.accessToken,
+    wsUrl: cfg.onebot?.wsUrl,
+    httpUrl: cfg.onebot?.httpUrl,
+    accessToken: cfg.onebot?.accessToken,
+    httpToken: cfg.onebot?.httpAccessToken || cfg.onebot?.accessToken,
     onEvent: (event) => handleOneBotEvent(event).catch((error) => log('[ingest] 处理事件出错:', error?.message ?? error))
   });
   const stickers = new StickerManager(onebot);
@@ -304,111 +121,6 @@ export function createApp({ log = console.log } = {}) {
 
   // OneBot 连接状态推送
   onebot.onStatus((status) => emit('onebot-status', status));
-
-  // ── 从 SnowLuma 配置自动同步 OneBot 令牌 ──
-  // SnowLuma 给每个登录过的账号生成独立随机 token（config/onebot_<uin>.json），
-  // 且**永久保留**——不表示"当前在线"。多账号场景下"取第一个文件"会拿错 token
-  // （WS 401 无限重试）。策略改为：收集所有 per-uin 文件的 token 作为候选，
-  // 401 时轮换下一个重连，连上后记住生效的那个（天然支持 SnowLuma 里切账号）。
-  let lastSyncTokenSig = '';
-
-  /** 从单个配置对象里提取 ws/http token（找不到网络段时返回 null）。 */
-  function extractTokens(data) {
-    const http = (data?.networks?.httpServers || []).find((s) => (s.port === 3000) || (s.name === 'http-default')) || (data?.networks?.httpServers || [])[0];
-    const ws = (data?.networks?.wsServers || []).find((s) => (s.port === 3001) || (s.name === 'ws-default')) || (data?.networks?.wsServers || [])[0];
-    return { wsToken: String(ws?.accessToken ?? ''), httpToken: String(http?.accessToken ?? '') };
-  }
-
-  /** 收集所有候选 token（含 onebot_0.json 的空令牌兜底），按"当前配置优先"排序。 */
-  function readSnowlumaTokenCandidates() {
-    const out = [];
-    try {
-      const dir = snowlumaDir();
-      if (!dir) return out;
-      const cfgDir = path.join(dir, 'config');
-      let files = [];
-      try {
-        files = fs.readdirSync(cfgDir).filter((f) => /^onebot_\d+\.json$/.test(f) && !/^onebot_0\.json$/.test(f)).sort();
-      } catch { /* ignore */ }
-      for (const f of files) {
-        try {
-          const data = JSON.parse(fs.readFileSync(path.join(cfgDir, f), 'utf8'));
-          out.push(extractTokens(data));
-        } catch { /* 单个文件坏了跳过，不影响其他候选 */ }
-      }
-      // 空令牌兜底：SnowLuma 允许无 token 连接（onebot_0.json 模板就是空）
-      out.push({ wsToken: '', httpToken: '' });
-    } catch (error) {
-      log('[onebot] 读取 SnowLuma OneBot 配置失败:', error?.message ?? error);
-    }
-    return out;
-  }
-
-  /** 候选游标：401 时递增轮换。连上后会钉住当前生效下标。 */
-  let tokenCandidateIndex = 0;
-
-  function applyTokens({ wsToken, httpToken }) {
-    onebot.accessToken = wsToken;
-    onebot.httpToken = httpToken || wsToken;
-    const cur = getConfig();
-    if (cur.snowluma?.accessToken !== wsToken || cur.snowluma?.httpAccessToken !== (httpToken || wsToken)) {
-      updateConfig({ snowluma: { ...cur.snowluma, accessToken: wsToken, httpAccessToken: httpToken || wsToken } });
-      log(`[onebot] 应用 OneBot 访问令牌（WS ${wsToken ? '有' : '无'} / HTTP ${httpToken ? '有' : '无'}）`);
-    }
-  }
-
-  /** 把候选列表同步进配置 + 挂到 onebot 实例（不立即连接）。返回是否有变化。 */
-  function syncSnowlumaTokens() {
-    try {
-      const candidates = readSnowlumaTokenCandidates();
-      if (!candidates.length) return false;
-      const sig = candidates.map((c) => `${c.wsToken}|${c.httpToken}`).join(';');
-      if (sig === lastSyncTokenSig) return false;
-      // 游标重置：候选集变化了，从头开始试
-      tokenCandidateIndex = 0;
-      applyTokens(candidates[0]);
-      onebot.tokenCandidates = candidates;   // 401 轮换用
-      lastSyncTokenSig = sig;
-      log(`[onebot] 已收集 ${candidates.length} 个 OneBot 令牌候选（SnowLuma 多账号场景 401 时自动轮换）`);
-      return true;
-    } catch (error) {
-      log('[onebot] 同步 SnowLuma 令牌失败:', error?.message ?? error);
-      return false;
-    }
-  }
-
-  // 401 / 未连接时：轮换下一个候选 token 重连（3 秒重连循环已有，轮换成本为零）
-  let tokenSyncRetryAt = 0;
-  function maybeRecoverOnebot() {
-    if (stopping) return;
-    const now = Date.now();
-    if (now - tokenSyncRetryAt < 5000) return;   // 限频
-    tokenSyncRetryAt = now;
-    // ⚠️ 先重读磁盘：全新安装是"先启动后登录"，候选集是启动时的 [空令牌]；
-    // 登录后 per-uin 文件才带着真令牌落盘。不回读就会拿空令牌 401 到天荒地老。
-    const refreshed = syncSnowlumaTokens();
-    const candidates = onebot.tokenCandidates || [];
-    if (!candidates.length) return;
-    if (refreshed) {
-      // 候选集变了（sig 变化时内部已重置游标并应用候选[0]）→ 直接拿新集合的第一个试
-      onebot.reconnect();
-      return;
-    }
-    // 磁盘没变化：指向下一个候选（首次触发也从 0→1 开始换：刚被 401 拒的就是当前这个）
-    tokenCandidateIndex = (tokenCandidateIndex + 1) % candidates.length;
-    const c = candidates[tokenCandidateIndex];
-    applyTokens(c);
-    onebot.reconnect();
-  }
-  onebot.onStatus((status) => {
-    if (status.connected) {
-      // 连上了：钉住当前候选。下次 401（比如 SnowLuma 里切了账号）再从下一个开始轮
-      const cands = onebot.tokenCandidates || [];
-      if (cands.length > 1) log('[onebot] 连接成功，当前令牌候选已生效');
-      return;
-    }
-    if (String(status.error || '').includes('401')) maybeRecoverOnebot();
-  });
 
   // ── 入站事件处理 ──
   let atNameCache = new Map(); // groupId:userId -> name
@@ -661,17 +373,17 @@ export function createApp({ log = console.log } = {}) {
     walk(out);
 
     // 密钥集合整体清空（不逐 key 暴露存在性）
-    if (out.dshProviderKeys && typeof out.dshProviderKeys === 'object') {
+    if (out.providerKeys && typeof out.providerKeys === 'object') {
       const has = {};
-      for (const [k, v] of Object.entries(out.dshProviderKeys)) has[k] = Boolean(String(v ?? '').trim());
-      out.dshProviderKeys = {};
-      out.dshProviderKeyPresence = has;
+      for (const [k, v] of Object.entries(out.providerKeys)) has[k] = Boolean(String(v ?? '').trim());
+      out.providerKeys = {};
+      out.providerKeyPresence = has;
     }
 
     // 提供商列表：删掉 key 字段（同样不能置空串，否则回传时覆盖真实 Key），补 hasKey
     if (Array.isArray(out.providers)) {
       for (const p of out.providers) {
-        const real = (cfg?.dshProviderKeys || {})[p.id] || p.apiKey;
+        const real = (cfg?.providerKeys || {})[p.id] || p.apiKey;
         delete p.apiKey;
         p.hasKey = Boolean(String(real ?? '').trim());
       }
@@ -822,12 +534,6 @@ export function createApp({ log = console.log } = {}) {
             error: onebot.lastConnectError,
             self: onebot.selfInfo ? { userId: onebot.selfId, nickname: onebot.selfNickname } : null
           },
-          snowluma: {
-            dir: snowlumaDir(),
-            running: await isPortOpen('127.0.0.1', snowlumaWsPort()),
-            webuiUrl: snowlumaWebuiUrl(),
-            ...snowlumaStatus()
-          },
           orchestrator: orchestrator.statusSummary(),
           usage,
           cost,
@@ -883,44 +589,6 @@ export function createApp({ log = console.log } = {}) {
           prices: listOfficialPrices(),
           current: resolveOfficialPrice(getConfig().api?.model || '')
         });
-      }
-
-      // ── SnowLuma 进程管理 ──
-      if (pathname === '/api/snowluma/launch' && method === 'POST') {
-        try {
-          const result = await launchSnowluma();
-          return json(res, result.ok ? 200 : 400, result);
-        } catch (error) {
-          return json(res, 500, { ok: false, error: String(error?.message ?? error) });
-        }
-      }
-
-      if (pathname === '/api/snowluma/logs' && method === 'GET') {
-        return json(res, 200, { logs: snowlumaLogs.slice(-200) });
-      }
-
-      if (pathname === '/api/snowluma/stop' && method === 'POST') {
-        try {
-          const stopped = stopSnowluma();
-          return json(res, 200, { ok: true, stopped, embedded: snowlumaStatus().embedded, pid: snowlumaStatus().pid });
-        } catch (error) {
-          return json(res, 500, { ok: false, error: String(error?.message ?? error) });
-        }
-      }
-
-      if (pathname === '/api/snowluma/open-folder' && method === 'POST') {
-        if (process.platform !== 'win32') return json(res, 400, { error: 'Folder opening is desktop-only' });
-        const dir = snowlumaDir();
-        if (!dir) return json(res, 400, { ok: false, error: '找不到 SnowLuma 目录' });
-        spawn('explorer.exe', [dir], { detached: true, stdio: 'ignore' }).unref();
-        return json(res, 200, { ok: true });
-      }
-
-      if (pathname === '/api/snowluma/open-webui' && method === 'POST') {
-        const webuiUrl = snowlumaWebuiUrl();
-        if (!webuiUrl) return json(res, 400, { ok: false, error: '没有找到 SnowLuma WebUI 地址（等日志出现 listening 后再试）' });
-        spawn('cmd.exe', ['/c', 'start', '', webuiUrl], { detached: true, stdio: 'ignore' }).unref();
-        return json(res, 200, { ok: true, webuiUrl });
       }
 
       // ── 体检/引导相关 ──
@@ -995,7 +663,7 @@ export function createApp({ log = console.log } = {}) {
           models: p.models,
           modelNames: p.modelNames || {}
         }));
-        return json(res, 200, { providers, source: getConfig().providersSourceYaml });
+        return json(res, 200, { providers });
       }
 
       // 显示目录提供商的真实 Key（本地 UI 点击“显示”用）
@@ -1296,30 +964,6 @@ export function createApp({ log = console.log } = {}) {
         return json(res, 200, { ok: true, config: sanitizeConfig(next) });
       }
 
-      if (pathname === '/api/version' && method === 'GET') {
-        // 纯本地读取，无网络依赖：设置页"当前版本"展示用
-        return json(res, 200, { version: localVersion() });
-      }
-
-      if (pathname === '/api/update-check' && method === 'GET') {
-        const current = localVersion();
-        try {
-          const r = await fetch(UPDATE_INFO_URL, { signal: AbortSignal.timeout(8000), cache: 'no-store' });
-          if (!r.ok) throw new Error(`HTTP ${r.status}`);
-          const info = await r.json();
-          const latest = String(info.version || '');
-          if (!latest) throw new Error('version.json 缺少 version 字段');
-          return json(res, 200, {
-            ok: true, current, latest,
-            hasUpdate: compareSemver(latest, current) > 0,
-            url: String(info.url || 'https://kondius.cn/qq-agent'),
-            notes: String(info.notes || '')
-          });
-        } catch (error) {
-          return json(res, 200, { ok: false, current, error: String(error?.message ?? error) });
-        }
-      }
-
       if (pathname === '/api/models' && method === 'GET') {
         try {
           const models = await listModels();
@@ -1474,65 +1118,9 @@ export function createApp({ log = console.log } = {}) {
         const messages = store.recent(chatKey, { limit }).map((m) => ({
           id: m.id, mid: m.mid, ts: m.ts, senderId: m.senderId, senderName: m.senderName,
           text: m.text, self: m.self, read: m.read, reply: m.reply,
-          // media 必须带：金句上传要靠它把图片 URL 传给服务器转存
-          // （曾经漏了这个字段，前端收到的 media 永远是 undefined → 图片全丢）
           media: m.media || []
         }));
         return json(res, 200, { chatKey, messages });
-      }
-
-      // ── 金句上传取图：把存档消息里的图片转成 dataURL ──
-      // 背景：存档只存图片 URL，而 QQ 图床的 rkey 会过期（失效后全网 400 invalid url，
-      // 服务器转存必败、原图也救不回）。NapCat/SnowLuma 收到图时有本地缓存，
-      // 走 OneBot get_image 拿缓存文件读出来，彻底不依赖 URL 时效。
-      // POST { items: [{ file, url }] } → { results: [{ dataUrl } | null, ...] }
-      const mediaDataMatch = pathname === '/api/media-data';
-      if (mediaDataMatch && method === 'POST') {
-        try {
-          const body = await readBody(req);
-          const items = Array.isArray(body?.items) ? body.items.slice(0, 20) : [];
-          const mimeOf = (p) => /\.png$/i.test(p) ? 'image/png' : /\.gif$/i.test(p) ? 'image/gif' : /\.webp$/i.test(p) ? 'image/webp' : 'image/jpeg';
-          const fileToDataUrl = (fp) => {
-            const st = fs.statSync(fp);   // 不存在直接抛
-            if (st.size > 15 * 1024 * 1024) return null;
-            return `data:${mimeOf(fp)};base64,${fs.readFileSync(fp).toString('base64')}`;
-          };
-          const results = [];
-          for (const it of items) {
-            let dataUrl = null;
-            // 路径 1：OneBot get_image → NapCat 本地缓存文件
-            try {
-              const ret = await onebot.call('get_image', { file: String(it?.file || '') });
-              if (ret?.file && fs.existsSync(String(ret.file))) dataUrl = fileToDataUrl(String(ret.file));
-              // 有的实现返回的是可下载的 url
-              if (!dataUrl && ret?.url) {
-                const r = await fetch(String(ret.url), { signal: AbortSignal.timeout(10000) });
-                if (r.ok) {
-                  const buf = Buffer.from(await r.arrayBuffer());
-                  if (buf.length && buf.length <= 15 * 1024 * 1024) {
-                    dataUrl = `data:${r.headers.get('content-type') || 'image/jpeg'};base64,${buf.toString('base64')}`;
-                  }
-                }
-              }
-            } catch { /* 缓存没有就走下一条 */ }
-            // 路径 2：直接拉存档里的 URL（新消息 URL 还没过期时有效）
-            if (!dataUrl && it?.url) {
-              try {
-                const r = await fetch(String(it.url), { signal: AbortSignal.timeout(10000) });
-                if (r.ok && (r.headers.get('content-type') || '').startsWith('image/')) {
-                  const buf = Buffer.from(await r.arrayBuffer());
-                  if (buf.length && buf.length <= 15 * 1024 * 1024) {
-                    dataUrl = `data:${r.headers.get('content-type')};base64,${buf.toString('base64')}`;
-                  }
-                }
-              } catch { /* 过期就放弃，返回 null 让前端保留原 URL */ }
-            }
-            results.push(dataUrl ? { dataUrl } : null);
-          }
-          return json(res, 200, { ok: true, results });
-        } catch (error) {
-          return json(res, 200, { ok: false, error: String(error?.message ?? error), results: [] });
-        }
       }
 
       // 群成员列表（OneBot get_group_member_list），用于备注与记忆页成员展示
@@ -1663,15 +1251,13 @@ export function createApp({ log = console.log } = {}) {
   }
 
   // ── 启停 ──
-  // DSH 自动导入已移除：模型目录改为在设置页手动维护（见 /api/providers 相关接口）。
-
   // ── 启停 ──
   async function listenOn(port) {
     return new Promise((resolve, reject) => {
       server.once('error', reject);
       server.listen(port, getConfig().server?.host || '127.0.0.1', () => {
         server.off('error', reject);
-        resolve(port); // 必须把实际端口传回去，Electron 壳要用它加载页面
+        resolve(port);
       });
     });
   }
@@ -1696,43 +1282,16 @@ export function createApp({ log = console.log } = {}) {
     }
     if (port == null) throw lastError ?? new Error('无法监听端口');
 
-    // 匿名用量遥测：启动 90 秒后发第一次，之后每 6 小时一次；失败静默不影响使用
-    if (getConfig().telemetry?.enabled === true) startTelemetryLoop(log);
-
-    // 拉起 SnowLuma（如配置了自动启动）、连 OneBot。
-    if (getConfig().snowluma?.autoLaunch) {
-      try {
-        const wsPort = snowlumaWsPort();
-        if (!(await isPortOpen('127.0.0.1', wsPort))) {
-          const r = await launchSnowluma();
-          if (r.ok && r.launched) {
-            for (let i = 0; i < 20 && !(await isPortOpen('127.0.0.1', wsPort)); i++) {
-              await new Promise((resolve) => setTimeout(resolve, 1000));
-            }
-          }
-        }
-      } catch (error) {
-        log('[snowluma] 自动启动失败:', error?.message ?? error);
-      }
-    }
-    // OneBot 连接前先尝试从 SnowLuma 配置同步令牌（脱敏副本/首次登录场景尤其重要）
-    if (syncSnowlumaTokens()) {
-      const c = getConfig();
-      onebot.wsUrl = String(c.snowluma?.wsUrl || onebot.wsUrl);
-      onebot.httpUrl = String(c.snowluma?.httpUrl || onebot.httpUrl).replace(/\/+$/, '');
-      // accessToken/httpToken 已由 applyTokens 直接挂到实例（候选[0]）
-    }
     await onebot.connect();
     orchestrator.startRecoveryLoop();
     if (getConfig().proactive?.enabled) orchestrator.startProactiveLoop();
     log(`控制台已就绪：http://${serverCfg.host}:${port} (${getConfig().runtime.mode})`);
-    log(`OneBot（SnowLuma）: ws=${getConfig().snowluma?.wsUrl} http=${getConfig().snowluma?.httpUrl}`);
+    log(`OneBot: ws=${getConfig().onebot?.wsUrl} http=${getConfig().onebot?.httpUrl}`);
     log(`模型: ${getConfig().api.model || '（未设置，请在设置里选择）'} @ ${getConfig().api.baseUrl}`);
     return port;
   }
 
   async function stop() {
-    stopping = true;
     onebot.close();
     await orchestrator.abortAll();
     await Promise.allSettled([...ingress.values()]);
@@ -1753,13 +1312,9 @@ export function createApp({ log = console.log } = {}) {
       server.closeIdleConnections?.();
     });
     store.close();
-    // 内置启动的 SnowLuma：QQ Agent 退出时一并关掉，避免留一个无窗口的后台进程。
-    // 注意：SnowLuma 退出时不一定能立刻把 config 落盘，但我们的 stop 不会再去读它，
-    // 下次启动会读到完整文件。
-    try { snowlumaProc?.kill(); } catch { /* ignore */ }
   }
 
-  return { server, onebot, store, memory, stickers, sender, sessions, orchestrator, start, stop, emit, getConfig, updateConfig, launchSnowluma, stopSnowluma, snowlumaStatus };
+  return { server, onebot, store, memory, stickers, sender, sessions, orchestrator, start, stop, emit, getConfig, updateConfig };
 }
 
 /**

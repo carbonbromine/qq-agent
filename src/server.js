@@ -1,4 +1,4 @@
-// headless 入口：node src/server.js（不带 Electron 窗口，浏览器访问控制台）
+// Linux 服务入口：node src/server.js
 import { createApp } from './app.js';
 
 process.on('unhandledRejection', (error) => console.error('[未处理异常]', error));

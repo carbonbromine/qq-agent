@@ -47,7 +47,7 @@ const byId = new Map();
 // 页签与视图桩：让 app.js 加载时能真实绑定点击事件。
 // 曾经点击处理器漏了 usage 分支，而旧桩 querySelectorAll 恒返 []，
 // 测试里根本没绑过点击事件 —— 于是"点页签空白"这个 bug 测试完全覆盖不到。
-const TAB_NAMES = ['sessions', 'chats', 'memory', 'usage', 'snowluma', 'settings'];
+const TAB_NAMES = ['sessions', 'chats', 'memory', 'usage', 'settings'];
 const tabStubs = TAB_NAMES.map((n) => { const el = makeEl(); el.dataset.tab = n; return el; });
 const viewStubs = TAB_NAMES.map((n) => makeEl('view-' + n));
 const document = {
