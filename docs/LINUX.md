@@ -133,22 +133,28 @@ unmatched messages before calling the model.
 - History <=300 messages and <=24000 characters; each message excerpt <=2000 characters.
 - Full messages remain on disk and can be inspected via detail/history tools.
 - Member memory is limited to related members and <=6000 prompt characters.
+- Per-chat handoff state stores confirmed facts, decisions, open questions, the
+  next step and last actual reply. It expires after 24 hours by default, is
+  capped at 4000 prompt characters, and can be edited or cleared in Memory.
 - API request timeout defaults to 60 seconds including the response body.
 - Run deadline defaults to 180 seconds, at most 12 rounds and 120000 recorded tokens.
 - Token budget is checked between calls, not a guarantee against a single oversized
   response or unknown provider-side billing. Usage of failed attempts is retained.
 - LLM transient requests retry twice with backoff; persisted batch attempts cap at three.
 
-LLM sessions do not carry prior tool traces into future runs. Each run still has
-multiple API rounds; total cost depends on batch size, outputs, images, tool use
-and provider caching. This is bounded context, not a constant-price guarantee.
-General DSH Skills/workspace/approval capabilities are intentionally not included.
-Old owner friend-approval commands continue to belong to the old Bridge.
+LLM sessions do not carry prior tool traces or hidden reasoning into future runs.
+Only the structured handoff summary is injected into the next run, with newer
+messages taking precedence. Each run still has multiple API rounds; total cost
+depends on batch size, outputs, images, tool use and provider caching. This is
+bounded context, not a constant-price guarantee. General DSH
+Skills/workspace/approval capabilities are intentionally not included. Old owner
+friend-approval commands continue to belong to the old Bridge.
 
 ## Data And Backup
 
 The data directory contains `config.json` (0600), `messages.sqlite` plus WAL/SHM,
-member `memory/`, `sessions/` and sticker metadata. systemd uses UMask=0077.
+member memory files, per-chat `memory/*/_handoff.json`, `sessions/` and sticker
+metadata. systemd uses UMask=0077.
 Legacy `messages/group_123.json` files migrate once transactionally and are left
 unchanged. Corrupt archives abort migration rather than being treated as empty.
 Keep messages on a disk with sufficient free space; completed session logs default

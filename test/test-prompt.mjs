@@ -63,6 +63,18 @@ for (const banned of ['沉睡前观察', 'qq_wait_for_messages', 'qq_set_wake_co
 const store = makeStore();
 const memory = new MemoryStore();
 memory.append('group:123', 'memberImpression', '喜欢猫', { userId: 'u1', target: '群友1' });
+memory.setHandoff('group:123', {
+  topic: '继续确认周末安排',
+  summary: '群友1已经说明周六有空',
+  facts: ['聚会地点还没有确定'],
+  decisions: ['优先考虑周六下午'],
+  openQuestions: ['具体在哪见面'],
+  nextStep: '等待群友2确认时间',
+  ttlMinutes: 60
+}, {
+  sourceSessionId: 'prompt-test',
+  participantIds: ['u1']
+});
 
 const unreadBefore = store.unreadCount('group:123');
 assert.strictEqual(unreadBefore, 3, '应有 3 条未读');
@@ -89,9 +101,15 @@ const userPrompt = buildUserPrompt({
   proactive: false
 });
 
-for (const section of ['【当前时间】', '【角色设定', '【此刻状态】', '【过去状态】', '【本次唤醒】', '【记忆】', '【引导说明】']) {
+for (const section of ['【当前时间】', '【角色设定', '【此刻状态】', '【上次会话交接】', '【过去状态】', '【本次唤醒】', '【记忆】', '【引导说明】']) {
   assert.ok(userPrompt.includes(section), `用户提示缺少段落：${section}`);
 }
+assert.ok(userPrompt.includes('继续确认周末安排'), '交接话题应注入提示词');
+assert.ok(userPrompt.includes('具体在哪见面'), '未解决问题应注入提示词');
+assert.ok(
+  userPrompt.indexOf('【上次会话交接】') < userPrompt.indexOf('【过去状态】'),
+  '交接状态应位于历史消息之前'
+);
 for (const banned of ['沉睡前观察', 'qq_', '[SILENT]']) {
   assert.ok(!userPrompt.includes(banned), `用户提示不应包含：${banned}`);
 }

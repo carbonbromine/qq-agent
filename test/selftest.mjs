@@ -720,6 +720,40 @@ async function main() {
   assert.ok((await uiRes.text()).includes('QQ Agent'), 'UI 首页可访问');
   pass('HTTP API：status/models/sessions/chats/UI 全部可用', `今日 ${statusRes.usage.totalTokens} tok`);
 
+  // ── 场景 25：会话交接状态管理 API ──
+  const handoffPath = `http://127.0.0.1:${cfg.server.port}/api/memory-files/group_456/handoff`;
+  const handoffPut = await (await fetch(handoffPath, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      topic: '继续核对测试结果',
+      summary: '前一轮已经完成基础链路验证',
+      facts: ['OneBot 已连接'],
+      decisions: ['继续使用当前测试群'],
+      openQuestions: ['交接状态能否被下一轮读取'],
+      nextStep: '读取记忆详情',
+      ttlMinutes: 60
+    })
+  })).json();
+  assert.strictEqual(handoffPut.ok, true, '交接状态可保存');
+  const handoffDetail = await (await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/memory-files/group_456`
+  )).json();
+  assert.strictEqual(handoffDetail.handoff.topic, '继续核对测试结果');
+  assert.deepStrictEqual(handoffDetail.handoff.openQuestions, ['交接状态能否被下一轮读取']);
+  const memoryFilesWithHandoff = await (await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/memory-files`
+  )).json();
+  assert.strictEqual(
+    memoryFilesWithHandoff.files.find((f) => f.chatKey === 'group:456')?.hasHandoff,
+    true,
+    '记忆列表标记有交接状态'
+  );
+  const handoffDelete = await (await fetch(handoffPath, { method: 'DELETE' })).json();
+  assert.strictEqual(handoffDelete.ok, true, '交接状态可清除');
+  assert.strictEqual(app.memory.getHandoff('group:456'), null);
+  pass('会话交接状态 API：保存 + 查询 + 列表标记 + 清除');
+
   // ── 场景 26：群友印象手动整理（逐成员整理 + 按聊天记录过滤 + 备份）──
   let i = 0;
   while (app.memory.consolidationState('group:456').counts.memberImpression <= 8) {

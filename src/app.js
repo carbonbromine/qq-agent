@@ -1010,12 +1010,19 @@ export function createApp({ log = console.log } = {}) {
       if (pathname === '/api/memory-files' && method === 'GET') {
         const files = memory.listChats().map((chatKey) => {
           const members = memory.members(chatKey);
+          const handoff = memory.getHandoff(chatKey);
           const impressionCount = members.reduce((n, m) => n + m.impressions.length, 0);
           return {
             chatKey,
             impressionCount,
             memberCount: members.length,
-            updatedAt: Math.max(0, ...members.map((m) => Number(m.updatedAt) || 0))
+            hasHandoff: Boolean(handoff),
+            handoffExpiresAt: handoff?.expiresAt || 0,
+            updatedAt: Math.max(
+              Number(handoff?.updatedAt) || 0,
+              0,
+              ...members.map((m) => Number(m.updatedAt) || 0)
+            )
           };
         });
         // 白名单里的群没有记忆也要显示
@@ -1024,13 +1031,19 @@ export function createApp({ log = console.log } = {}) {
         for (const gid of (getConfig().allow?.groups || [])) {
           const key = `group:${String(gid)}`;
           if (!seen.has(key)) {
-            files.push({ chatKey: key, impressionCount: 0, memberCount: 0, updatedAt: 0, consolidating: false });
+            files.push({
+              chatKey: key, impressionCount: 0, memberCount: 0,
+              hasHandoff: false, handoffExpiresAt: 0, updatedAt: 0, consolidating: false
+            });
           }
         }
         for (const uid of (getConfig().allow?.private || [])) {
           const key = `private:${String(uid)}`;
           if (!seen.has(key)) {
-            files.push({ chatKey: key, impressionCount: 0, memberCount: 0, updatedAt: 0, consolidating: false });
+            files.push({
+              chatKey: key, impressionCount: 0, memberCount: 0,
+              hasHandoff: false, handoffExpiresAt: 0, updatedAt: 0, consolidating: false
+            });
           }
         }
         // 带上"正在整理"状态：切页签后前端靠它恢复提示，
@@ -1046,8 +1059,28 @@ export function createApp({ log = console.log } = {}) {
         const chatKey = `${memoryFileMatch[1]}:${memoryFileMatch[2]}`;
         return json(res, 200, {
           ...memory.query(chatKey),
-          members: memory.members(chatKey)
+          members: memory.members(chatKey),
+          handoff: memory.getHandoff(chatKey)
         });
+      }
+
+      const memoryHandoffMatch = /^\/api\/memory-files\/(group|private)_(\d+)\/handoff$/.exec(pathname);
+      if (memoryHandoffMatch && method === 'PUT') {
+        const chatKey = `${memoryHandoffMatch[1]}:${memoryHandoffMatch[2]}`;
+        const body = await readBody(req).catch(() => ({}));
+        try {
+          const handoff = memory.setHandoff(chatKey, body, { sourceSessionId: 'console' });
+          emit('memory-update', { chatKey, phase: handoff ? 'handoff-update' : 'handoff-clear' });
+          return json(res, 200, { ok: true, handoff });
+        } catch (error) {
+          return json(res, 400, { ok: false, error: String(error?.message ?? error) });
+        }
+      }
+      if (memoryHandoffMatch && method === 'DELETE') {
+        const chatKey = `${memoryHandoffMatch[1]}:${memoryHandoffMatch[2]}`;
+        memory.clearHandoff(chatKey);
+        emit('memory-update', { chatKey, phase: 'handoff-clear' });
+        return json(res, 200, { ok: true });
       }
 
       // 手动编辑某个群友的印象（PUT 编辑：QQ号必填，备注可同步保存 / DELETE 删除成员文件）

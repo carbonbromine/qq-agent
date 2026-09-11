@@ -86,8 +86,12 @@ bash manage.sh backup /path/to/new-backup-dir
 - `config.json`：配置和凭据，权限 `0600`
 - `messages.sqlite`：消息、租约和出站状态
 - `sessions/`：每次 Agent 运行记录
-- `memory/`：群友长期记忆
+- `memory/`：群友长期印象和跨 Session 会话交接状态
 - `console-access.txt`：控制台地址和 Token，权限 `0600`
+
+每次运行仍是独立的模型会话，但 `finish` 会把已确认事实、决定、
+未决问题和下一步写入结构化交接文件，并在同一 QQ 会话的下次运行自动注入。
+默认有效期为 24 小时，可在记忆页检查、编辑或清除。原始隐藏思维链不会持久化。
 
 聊天、密钥、Token 和运行数据均被 Git 忽略。
 

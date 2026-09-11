@@ -27,14 +27,41 @@ describe('Orchestrator', () => {
     const dir = fs.mkdtempSync(path.join(root, 'store-'));
     const store = new ChatStore(0, { dataDir: dir });
     const sessions = new SessionRegistry();
+    const handoffs = [];
+    let currentHandoff = null;
+    const memory = {
+      formatForPrompt: () => '',
+      formatHandoffForPrompt: () => currentHandoff
+        ? `【上次会话交接】\n- 当前话题：${currentHandoff.topic || ''}\n- 已知上下文：${currentHandoff.summary || ''}`
+        : '',
+      getHandoff: () => currentHandoff,
+      setHandoff: (chatKey, state, meta) => {
+        if (state.clearHandoff === true) {
+          currentHandoff = null;
+          handoffs.push({ chatKey, state: structuredClone(state), meta: structuredClone(meta) });
+          return null;
+        }
+        const value = { ...state, ...meta, updatedAt: Date.now() };
+        currentHandoff = { ...(currentHandoff || {}), ...value };
+        handoffs.push({ chatKey, state: structuredClone(state), meta: structuredClone(meta) });
+        return currentHandoff;
+      },
+      clearHandoff: () => { currentHandoff = null; }
+    };
+    const sender = {
+      sendTextBatch: async (_chatKey, messages) => ({
+        sent: messages.map((text, i) => ({ text, at: Date.now(), messageId: i + 1 })),
+        failed: []
+      })
+    };
     const runner = new Orchestrator({
-      store, sessions, memory: { formatForPrompt: () => '' },
-      stickers: {}, sender: {}, onebot: { getGroupInfo: async () => ({ group_name: 'test' }) }
+      store, sessions, memory,
+      stickers: {}, sender, onebot: { getGroupInfo: async () => ({ group_name: 'test' }) }
     });
     const original = globalThis.fetch;
     t.after(async () => { await runner.abortAll(); store.close(); globalThis.fetch = original; });
     const append = (mid) => store.appendIncoming('group:1', { mid, text: 'hi', senderId: '42' });
-    return { cfg, runner, store, sessions, append };
+    return { cfg, runner, store, sessions, memory, handoffs, append };
   }
 
   it('only acknowledges the claimed batch after successful model processing', async (t) => {
@@ -110,6 +137,123 @@ describe('Orchestrator', () => {
     await task;
     assert.equal(store.findByMid('group:1', 1).state, 'pending');
     assert.equal(runner.runningChats.size, 0);
+  });
+
+  it('commits an explicit finish handoff after a successful batch', async (t) => {
+    const { runner, store, handoffs, append } = fixture(t);
+    append(1);
+    globalThis.fetch = async () => Response.json({
+      choices: [{
+        message: {
+          tool_calls: [{
+            id: 'finish-1',
+            type: 'function',
+            function: {
+              name: 'finish',
+              arguments: JSON.stringify({
+                summary: '已经确认第一项',
+                topic: '继续排查',
+                facts: ['第一项正常'],
+                openQuestions: ['第二项是否正常'],
+                nextStep: '等待下一条结果'
+              })
+            }
+          }]
+        }
+      }],
+      usage: { total_tokens: 10 }
+    });
+
+    await runner.wake('group:1');
+
+    assert.equal(store.findByMid('group:1', 1).read, true);
+    assert.equal(handoffs.length, 1);
+    assert.equal(handoffs[0].state.topic, '继续排查');
+    assert.deepEqual(handoffs[0].state.openQuestions, ['第二项是否正常']);
+    assert.deepEqual(handoffs[0].meta.participantIds, ['42']);
+    assert.ok(handoffs[0].meta.sourceSessionId);
+  });
+
+  it('creates a conservative handoff when a successful reply ends without finish', async (t) => {
+    const { runner, handoffs, append } = fixture(t);
+    append(1);
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls += 1;
+      if (calls === 1) {
+        return Response.json({
+          choices: [{
+            message: {
+              tool_calls: [{
+                id: 'send-1',
+                type: 'function',
+                function: {
+                  name: 'send_message',
+                  arguments: JSON.stringify({ messages: ['请继续发结果'] })
+                }
+              }]
+            }
+          }],
+          usage: { total_tokens: 10 }
+        });
+      }
+      return Response.json({
+        choices: [{ message: { content: 'done' } }],
+        usage: { total_tokens: 10 }
+      });
+    };
+
+    await runner.wake('group:1');
+
+    assert.equal(handoffs.length, 1);
+    assert.match(handoffs[0].state.summary, /本轮收到/);
+    assert.match(handoffs[0].state.summary, /请继续发结果/);
+  });
+
+  it('injects the previous run handoff into the next stateless session', async (t) => {
+    const { runner, append } = fixture(t);
+    const requests = [];
+    globalThis.fetch = async (_url, options) => {
+      const body = JSON.parse(options.body);
+      requests.push(body);
+      if (requests.length === 1) {
+        return Response.json({
+          choices: [{
+            message: {
+              tool_calls: [{
+                id: 'finish-1',
+                type: 'function',
+                function: {
+                  name: 'finish',
+                  arguments: JSON.stringify({
+                    summary: '第一轮确认了连接正常',
+                    topic: '继续检查附件',
+                    openQuestions: ['附件是否成功落盘'],
+                    nextStep: '等待第二轮结果'
+                  })
+                }
+              }]
+            }
+          }],
+          usage: { total_tokens: 10 }
+        });
+      }
+      return Response.json({
+        choices: [{ message: { content: 'done' } }],
+        usage: { total_tokens: 10 }
+      });
+    };
+
+    append(1);
+    await runner.wake('group:1');
+    append(2);
+    await runner.wake('group:1');
+
+    assert.equal(requests.length, 2);
+    const secondPrompt = String(requests[1].messages?.[1]?.content || '');
+    assert.match(secondPrompt, /【上次会话交接】/);
+    assert.match(secondPrompt, /继续检查附件/);
+    assert.match(secondPrompt, /第一轮确认了连接正常/);
   });
 });
 

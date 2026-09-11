@@ -503,15 +503,54 @@ export function buildToolDefs() {
     },
     {
       name: 'finish',
-      description: '明确结束本次处理（表示你看完了、决定了下一步）。看完不打算说话时调用它（summary 写一句给自己看的理由）；说完话想收尾时也可以调用。不调用也可以——直接结束文本输出同样代表结束。',
+      description: '明确结束本次处理，并把下一次新会话需要的工作状态交接下去。summary 写本轮结论；话题还会继续时补充 topic/facts/decisions/openQuestions/nextStep，只写可验证结论和待办，不写隐含推理过程。话题已经完成且旧交接不再有用时设 clearHandoff=true。不调用也可以，直接结束文本输出同样代表结束。',
       parameters: {
         type: 'object',
-        properties: { summary: { type: 'string', description: '一句话说明你这次的决定（只记录给管理端看，不会发送）' } },
+        properties: {
+          summary: { type: 'string', description: '本轮结论或不回复的原因（不会发送到 QQ）' },
+          topic: { type: 'string', description: '仍在继续的当前话题；没有持续话题可省略' },
+          facts: {
+            type: 'array',
+            items: { type: 'string' },
+            maxItems: 8,
+            description: '后续处理必须知道的已确认事实，不要写猜测'
+          },
+          decisions: {
+            type: 'array',
+            items: { type: 'string' },
+            maxItems: 6,
+            description: '已经作出的决定或已排除的方向'
+          },
+          openQuestions: {
+            type: 'array',
+            items: { type: 'string' },
+            maxItems: 6,
+            description: '仍未解决、需要后续消息确认的问题'
+          },
+          nextStep: { type: 'string', description: '下次继续时准备做什么或等待什么' },
+          ttlMinutes: {
+            type: 'integer',
+            minimum: 5,
+            maximum: 10080,
+            description: '交接状态有效分钟数，默认使用管理端配置'
+          },
+          clearHandoff: {
+            type: 'boolean',
+            description: '当前话题已完成时设为 true，清除旧交接状态'
+          }
+        },
         required: ['summary']
       },
       async execute(ctx, args) {
-        ctx.session.finishReason = String(args.summary ?? '').slice(0, 300);
-        return ok({ finished: true });
+        const summary = String(args.summary ?? '').replace(/\s+/g, ' ').trim().slice(0, 300);
+        if (!summary) return err('summary 不能为空');
+        const draft = { summary };
+        for (const key of ['topic', 'facts', 'decisions', 'openQuestions', 'nextStep', 'ttlMinutes', 'clearHandoff']) {
+          if (Object.hasOwn(args, key)) draft[key] = args[key];
+        }
+        ctx.session.finishReason = summary;
+        ctx.session.handoffDraft = draft;
+        return ok({ finished: true, handoffPending: true });
       }
     }
   ];

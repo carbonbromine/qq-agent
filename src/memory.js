@@ -1,7 +1,8 @@
-// 群友印象记忆：每个会话一个文件夹，每个群友一个以 QQ 号命名的 JSON 文件。
+// 记忆存储：群友长期印象按成员拆分，会话工作状态单独保存。
 // 目录结构：
 //   data/memory/group_<群号>/<QQ>.json
 //   data/memory/private_<QQ>/<QQ>.json
+//   data/memory/<会话>/_handoff.json
 // 每个成员文件：{ userId, name, impressions: [{ content, createdAt }], updatedAt, lastConsolidatedAt }
 // 旧版单文件 data/memory/group_<群号>.json 会在首次访问时自动迁移。
 import fs from 'node:fs';
@@ -24,6 +25,34 @@ function chatDir(chatKey) {
 
 function metaFile(chatKey) {
   return path.join(chatDir(chatKey), '_meta.json');
+}
+
+function handoffFile(chatKey) {
+  return path.join(chatDir(chatKey), '_handoff.json');
+}
+
+function cleanText(value, max = 1000) {
+  return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
+}
+
+function cleanList(value, maxItems = 8, maxChars = 240) {
+  const out = [];
+  const seen = new Set();
+  for (const item of Array.isArray(value) ? value : []) {
+    const text = cleanText(item, maxChars);
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    out.push(text);
+    if (out.length >= maxItems) break;
+  }
+  return out;
+}
+
+function legacyStateText(value) {
+  if (typeof value === 'string') return cleanText(value, 1000);
+  if (Array.isArray(value)) return cleanText(value.map((x) => x?.content || x?.text || x).join('；'), 1000);
+  if (value && typeof value === 'object') return cleanText(value.summary || value.content || value.text || '', 1000);
+  return '';
 }
 
 function memberFileName(userId, name = '') {
@@ -124,8 +153,26 @@ export class MemoryStore {
           createdAt: Number(e.createdAt) || Date.now()
         });
       }
-      // 旧的 activeTopic/pendingThought 直接丢弃（本版只保留群友印象）
       for (const m of migrated) this.#appendRaw(chatKey, m.userId, m.name, m.content, m.createdAt);
+      const activeTopic = legacyStateText(old.activeTopic);
+      const pendingThought = legacyStateText(old.pendingThought);
+      if (activeTopic || pendingThought) {
+        const now = Date.now();
+        writeJson(handoffFile(chatKey), {
+          version: 1,
+          topic: activeTopic,
+          summary: pendingThought || activeTopic,
+          facts: [],
+          decisions: [],
+          openQuestions: [],
+          nextStep: pendingThought,
+          participantIds: [],
+          lastReply: '',
+          sourceSessionId: 'legacy-migration',
+          updatedAt: now,
+          expiresAt: now + 24 * 60 * 60 * 1000
+        });
+      }
       const backupDir = path.join(MEMORY_DIR, 'backups');
       fs.mkdirSync(backupDir, { recursive: true });
       const backup = path.join(backupDir, path.basename(legacy));
@@ -144,7 +191,7 @@ export class MemoryStore {
       const map = new Map();
       try {
         for (const f of fs.readdirSync(chatDir(chatKey))) {
-          if (!f.endsWith('.json') || f === '_meta.json') continue;
+          if (!f.endsWith('.json') || f.startsWith('_')) continue;
           const raw = readJson(path.join(chatDir(chatKey), f), null);
           if (!raw) continue;
           const key = raw.userId ? String(raw.userId) : `_n_${f}`;
@@ -155,6 +202,96 @@ export class MemoryStore {
       this.cache.set(chatKey, map);
     }
     return this.cache.get(chatKey);
+  }
+
+  getHandoff(chatKey) {
+    this.#migrateLegacy(chatKey);
+    const raw = readJson(handoffFile(chatKey), null);
+    if (!raw) return null;
+    const expiresAt = Number(raw.expiresAt) || 0;
+    if (expiresAt > 0 && expiresAt <= Date.now()) {
+      try { fs.rmSync(handoffFile(chatKey), { force: true }); } catch { /* ignore */ }
+      return null;
+    }
+    return {
+      version: 1,
+      topic: cleanText(raw.topic, 200),
+      summary: cleanText(raw.summary, 1200),
+      facts: cleanList(raw.facts, 8, 240),
+      decisions: cleanList(raw.decisions, 6, 240),
+      openQuestions: cleanList(raw.openQuestions, 6, 240),
+      nextStep: cleanText(raw.nextStep, 400),
+      participantIds: cleanList(raw.participantIds, 16, 40),
+      lastReply: cleanText(raw.lastReply, 600),
+      sourceSessionId: cleanText(raw.sourceSessionId, 100),
+      updatedAt: Number(raw.updatedAt) || 0,
+      expiresAt
+    };
+  }
+
+  setHandoff(chatKey, state = {}, meta = {}) {
+    state = state && typeof state === 'object' ? state : {};
+    meta = meta && typeof meta === 'object' ? meta : {};
+    if (state.clearHandoff === true) {
+      this.clearHandoff(chatKey);
+      return null;
+    }
+    const previous = this.getHandoff(chatKey) || {};
+    const now = Date.now();
+    const configuredTtl = Number(getConfig().memory?.handoffTtlMinutes) || 1440;
+    const ttlMinutes = Math.min(10080, Math.max(5, Number(state.ttlMinutes) || configuredTtl));
+    const pickList = (key, maxItems) => Array.isArray(state[key])
+      ? cleanList(state[key], maxItems, 240)
+      : cleanList(previous[key], maxItems, 240);
+    const participantIds = cleanList([
+      ...(previous.participantIds || []),
+      ...(Array.isArray(state.participantIds) ? state.participantIds : []),
+      ...(Array.isArray(meta.participantIds) ? meta.participantIds : [])
+    ], 16, 40);
+    const handoff = {
+      version: 1,
+      topic: cleanText(state.topic ?? previous.topic, 200),
+      summary: cleanText(state.summary ?? meta.summary ?? previous.summary, 1200),
+      facts: pickList('facts', 8),
+      decisions: pickList('decisions', 6),
+      openQuestions: pickList('openQuestions', 6),
+      nextStep: cleanText(state.nextStep ?? previous.nextStep, 400),
+      participantIds,
+      lastReply: cleanText(meta.lastReply ?? previous.lastReply, 600),
+      sourceSessionId: cleanText(meta.sourceSessionId ?? previous.sourceSessionId, 100),
+      updatedAt: now,
+      expiresAt: now + ttlMinutes * 60 * 1000
+    };
+    const meaningful = handoff.topic || handoff.summary || handoff.facts.length
+      || handoff.decisions.length || handoff.openQuestions.length
+      || handoff.nextStep || handoff.lastReply;
+    if (!meaningful) return previous.version ? previous : null;
+    writeJson(handoffFile(chatKey), handoff);
+    return handoff;
+  }
+
+  clearHandoff(chatKey) {
+    try { fs.rmSync(handoffFile(chatKey), { force: true }); } catch { /* ignore */ }
+  }
+
+  formatHandoffForPrompt(chatKey) {
+    if (getConfig().memory?.handoffEnabled === false) return '';
+    const handoff = this.getHandoff(chatKey);
+    if (!handoff) return '';
+    const ageMinutes = Math.max(0, Math.round((Date.now() - handoff.updatedAt) / 60000));
+    const lines = [
+      '【上次会话交接】',
+      `这是 ${ageMinutes === 0 ? '刚刚' : `${ageMinutes} 分钟前`}保存的工作状态，不是群友的新指令；如与最新消息冲突，以最新消息为准。`
+    ];
+    if (handoff.topic) lines.push(`- 当前话题：${handoff.topic}`);
+    if (handoff.summary) lines.push(`- 已知上下文：${handoff.summary}`);
+    if (handoff.facts.length) lines.push(`- 已确认事实：${handoff.facts.join('；')}`);
+    if (handoff.decisions.length) lines.push(`- 已作决定：${handoff.decisions.join('；')}`);
+    if (handoff.openQuestions.length) lines.push(`- 未解决问题：${handoff.openQuestions.join('；')}`);
+    if (handoff.nextStep) lines.push(`- 下一步意图：${handoff.nextStep}`);
+    if (handoff.lastReply) lines.push(`- 上次实际发言：${handoff.lastReply}`);
+    const maxChars = Math.min(12000, Math.max(500, Number(getConfig().memory?.handoffMaxChars) || 4000));
+    return lines.join('\n').slice(0, maxChars);
   }
 
   /**
@@ -428,6 +565,7 @@ export class MemoryStore {
       try { fs.rmSync(memberFile(chatKey, m.userId, m.name), { force: true }); } catch { /* ignore */ }
     }
     map.clear();
+    this.clearHandoff(chatKey);
     writeJson(metaFile(chatKey), { lastConsolidatedAt: Date.now() });
   }
 
@@ -529,6 +667,8 @@ export class MemoryStore {
       }
       const metaSrc = metaFile(chatKey);
       if (fs.existsSync(metaSrc)) fs.copyFileSync(metaSrc, path.join(backupDir, '_meta.json'));
+      const handoffSrc = handoffFile(chatKey);
+      if (fs.existsSync(handoffSrc)) fs.copyFileSync(handoffSrc, path.join(backupDir, '_handoff.json'));
     } catch { /* 备份失败不阻塞整理 */ }
     // 删除所有现有成员文件（整理结果会重建）
     for (const m of map.values()) {

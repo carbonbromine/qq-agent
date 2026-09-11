@@ -191,6 +191,9 @@ export const DEFAULT_CONFIG = {
   memory: {
     consolidateEnabled: true,
     consolidateMinIntervalMs: 21600000,  // 默认 6 小时
+    handoffEnabled: true,
+    handoffTtlMinutes: 1440,
+    handoffMaxChars: 4000,
     useChatModel: true,                   // true = 整理模型跟随聊天模型；false = 使用下方专用模型
     provider: '',                         // 专用模型所属提供商 id（useChatModel=false 时生效）
     model: ''                             // 专用模型 id（useChatModel=false 时生效）

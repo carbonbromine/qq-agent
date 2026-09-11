@@ -18,6 +18,21 @@ import { buildToolDefs, toOpenAiTools, executeTool } from './tools.js';
 import { modelImageVerdict } from './vision-scan.js';
 import { currentProviders } from './providers.js';
 
+function handoffParticipantIds(triggerEntries) {
+  return [...new Set((triggerEntries || [])
+    .filter((m) => !m?.self && m?.senderId !== null && m?.senderId !== undefined)
+    .map((m) => String(m.senderId).trim())
+    .filter(Boolean))];
+}
+
+function lastSentText(session) {
+  return (session?.sent || [])
+    .map((entry) => String(entry?.text || '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .join('；')
+    .slice(0, 600);
+}
+
 export class Orchestrator {
   constructor({ store, memory, stickers, sender, sessions, onebot, emit = null }) {
     this.store = store;
@@ -350,6 +365,7 @@ export class Orchestrator {
       controller.signal.throwIfAborted();
       if (lease) this.store.ackLease(lease.id);
       else this.store.completeRun(session.leaseId);
+      this.#commitSessionHandoff(session, { chatKey, triggerEntries });
       const status = session.sent.length > 0 ? 'done' : 'noreply';
       this.sessions.finish(session.id, status);
       this.emit('session-end', { sessionId: session.id, chatKey, status,
@@ -380,6 +396,53 @@ export class Orchestrator {
 
     // 记忆自动整理（后台静默，绝不阻塞/影响聊天主流程）
     this.#maybeConsolidateMemory(chatKey);
+  }
+
+  #commitSessionHandoff(session, { chatKey, triggerEntries }) {
+    const cfg = getConfig();
+    if (cfg.memory?.handoffEnabled === false || typeof this.memory?.setHandoff !== 'function') return;
+
+    let draft = session.handoffDraft;
+    if (!draft && session.sent.length > 0) {
+      const previous = typeof this.memory.getHandoff === 'function'
+        ? this.memory.getHandoff(chatKey)
+        : null;
+      const incoming = (triggerEntries || [])
+        .slice(-4)
+        .map((m) => `${m.senderName || m.senderId || '群友'}：${String(m.text || '').replace(/\s+/g, ' ').trim()}`)
+        .filter((line) => !line.endsWith('：'))
+        .join('；')
+        .slice(0, 500);
+      const reply = lastSentText(session);
+      const turnSummary = [
+        incoming ? `本轮收到：${incoming}` : '',
+        reply ? `本轮回复：${reply}` : ''
+      ].filter(Boolean).join('；');
+      draft = {
+        topic: previous?.topic || String(triggerEntries?.[0]?.text || reply).slice(0, 200),
+        summary: [previous?.summary, turnSummary].filter(Boolean).join('；').slice(-1200)
+      };
+      session.handoffFallback = true;
+    }
+    if (!draft) return;
+
+    try {
+      const handoff = this.memory.setHandoff(chatKey, draft, {
+        sourceSessionId: session.id,
+        participantIds: handoffParticipantIds(triggerEntries),
+        lastReply: lastSentText(session)
+      });
+      session.handoffUpdated = draft.clearHandoff !== true && Boolean(handoff);
+      session.handoffCleared = draft.clearHandoff === true;
+      session.handoffUpdatedAt = handoff?.updatedAt || Date.now();
+      this.emit('memory-update', {
+        chatKey,
+        phase: session.handoffCleared ? 'handoff-clear' : 'handoff-update'
+      });
+    } catch (error) {
+      session.handoffError = String(error?.message ?? error);
+      console.warn(`[memory] ${chatKey} 保存会话交接失败:`, session.handoffError);
+    }
   }
 
   async #runAgent(session, { kind, chatId, chatKey, triggerEntries, proactive, seq, contextLimit = null, tierInfo = null, signal }) {
@@ -597,7 +660,7 @@ export class Orchestrator {
         if (this.store.hasUncertainEffects(session.leaseId)) {
           throw new Error('Delivery uncertain; batch held for operator review');
         }
-        if (name === 'finish') { finish = true; break; }
+        if (name === 'finish' && !result.isError) { finish = true; break; }
       }
       messages.push(...toolResults.map(({ role, tool_call_id, name, content }) => ({ role, tool_call_id, content, name })));
       // 图片消息跟随在全部 tool 结果之后（OpenAI 校验要求每个 tool_call 都有对应 tool 消息）

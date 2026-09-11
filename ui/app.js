@@ -1679,9 +1679,10 @@ function renderMemoryList() {
       : '';
     const sub = busy
       ? '正在整理本群记忆'
-      : (f.memberCount
-        ? `${f.memberCount} 位群友 · ${f.impressionCount} 条印象`
-        : '暂无群友印象');
+      : [
+          f.hasHandoff ? '有会话交接' : '',
+          f.memberCount ? `${f.memberCount} 位群友 · ${f.impressionCount} 条印象` : '暂无群友印象'
+        ].filter(Boolean).join(' · ');
     return `
       <div class="chat-item ${key === state.currentMemoryChatKey ? 'selected' : ''}" data-key="${esc(key)}">
         <div class="chat-item-title">
@@ -1713,6 +1714,38 @@ async function loadMemoryDetail(chatKey) {
     const kind = chatKey.startsWith('group') ? 'group' : 'private';
     const chatId = chatKey.split(':')[1] || '';
     const members = Array.isArray(mem.members) ? mem.members : [];
+    const handoff = mem.handoff || null;
+    const listText = (value) => (Array.isArray(value) ? value : []).join('\n');
+    const ttlMinutes = handoff
+      ? Math.max(5, Math.round(((Number(handoff.expiresAt) || 0) - (Number(handoff.updatedAt) || Date.now())) / 60000))
+      : Number(cfg.memory?.handoffTtlMinutes) || 1440;
+    const handoffMeta = handoff
+      ? `更新于 ${fmtTime(handoff.updatedAt)} · 过期于 ${fmtTime(handoff.expiresAt)}${handoff.sourceSessionId ? ` · 来源 ${esc(handoff.sourceSessionId)}` : ''}`
+      : '当前没有会话交接状态';
+    const handoffHtml = `
+      <details class="collapsible memory-handoff" open>
+        <summary>会话交接状态</summary>
+        <div class="coll-body">
+          <div class="field-row">
+            <div class="field"><label>当前话题</label><input type="text" id="mh-topic" maxlength="200" value="${esc(handoff?.topic || '')}" /></div>
+            <div class="field"><label>有效时间（分钟）</label><input type="number" id="mh-ttl" min="5" max="10080" value="${esc(ttlMinutes)}" /></div>
+          </div>
+          <div class="field"><label>已知上下文</label><textarea id="mh-summary" maxlength="1200">${esc(handoff?.summary || '')}</textarea></div>
+          <div class="field-row">
+            <div class="field"><label>已确认事实（一行一条）</label><textarea id="mh-facts">${esc(listText(handoff?.facts))}</textarea></div>
+            <div class="field"><label>已作决定（一行一条）</label><textarea id="mh-decisions">${esc(listText(handoff?.decisions))}</textarea></div>
+          </div>
+          <div class="field-row">
+            <div class="field"><label>未解决问题（一行一条）</label><textarea id="mh-questions">${esc(listText(handoff?.openQuestions))}</textarea></div>
+            <div class="field"><label>下一步意图</label><textarea id="mh-next-step" maxlength="400">${esc(handoff?.nextStep || '')}</textarea></div>
+          </div>
+          <div class="memory-handoff-actions">
+            <span id="mh-status" class="muted">${handoffMeta}</span>
+            <button class="btn btn-danger" id="mh-clear" ${handoff ? '' : 'disabled'}>清除</button>
+            <button class="btn btn-primary" id="mh-save">保存交接</button>
+          </div>
+        </div>
+      </details>`;
     const membersHtml = kind === 'group'
       ? `<div class="field" style="margin:8px 0"><button class="btn btn-small" id="mem-load-members-btn">拉取群成员列表（编辑备注）</button><span id="mem-members-status" class="muted"></span></div><div id="mem-members"></div>`
       : '';
@@ -1753,9 +1786,49 @@ async function loadMemoryDetail(chatKey) {
           ${consolidateStatusHtml}
         </div>
       </div>
+      ${handoffHtml}
       ${membersHtml}
       ${rows || '<div class="muted" style="padding:10px">还没有任何群友印象（可点右上角「＋ 添加印象」手动记，或点「整理本群记忆」让模型从聊天记录里提炼）。</div>'}
     `;
+    const handoffPath = `/api/memory-files/${chatKey.replace(':', '_')}/handoff`;
+    const lines = (id) => ($(id)?.value || '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    $('#mh-save')?.addEventListener('click', async () => {
+      const btn = $('#mh-save');
+      const status = $('#mh-status');
+      btn.disabled = true;
+      if (status) status.textContent = '保存中…';
+      try {
+        await api(handoffPath, {
+          method: 'PUT',
+          body: JSON.stringify({
+            topic: ($('#mh-topic')?.value || '').trim(),
+            summary: ($('#mh-summary')?.value || '').trim(),
+            facts: lines('#mh-facts'),
+            decisions: lines('#mh-decisions'),
+            openQuestions: lines('#mh-questions'),
+            nextStep: ($('#mh-next-step')?.value || '').trim(),
+            ttlMinutes: Number($('#mh-ttl')?.value) || 1440
+          })
+        });
+        await loadMemoryView();
+      } catch (e) {
+        btn.disabled = false;
+        if (status) status.textContent = `保存失败：${e.message}`;
+      }
+    });
+    $('#mh-clear')?.addEventListener('click', async () => {
+      if (!confirm('确定清除这个会话的交接状态？')) return;
+      const btn = $('#mh-clear');
+      btn.disabled = true;
+      try {
+        await api(handoffPath, { method: 'DELETE', body: '{}' });
+        await loadMemoryView();
+      } catch (e) {
+        btn.disabled = false;
+        const status = $('#mh-status');
+        if (status) status.textContent = `清除失败：${e.message}`;
+      }
+    });
     const loadMembersBtn = $('#mem-load-members-btn');
     if (loadMembersBtn) loadMembersBtn.addEventListener('click', () => loadGroupMembers(chatId, chatKey));
     $$('.mem-edit-imp', detail).forEach((el) => {
