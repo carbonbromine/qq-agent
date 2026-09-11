@@ -144,6 +144,18 @@ try {
       results.push({ name, err: e && e.message });
     }
   }
+  const desktopHtml = ctx.renderDesktopSection(cfg);
+  const tokenControls = [
+    'cfg-console-token-current', 'cfg-console-token-new',
+    'cfg-console-token-confirm', 'change-console-token-btn'
+  ].every((id) => desktopHtml.includes(`id="${id}"`));
+  if (tokenControls && !desktopHtml.includes('value="console-test-secret"')) {
+    pass++;
+    console.log('  OK    控制台 Token 更新控件完整且不回显密钥');
+  } else {
+    fail++;
+    console.log('  FAIL  控制台 Token 更新控件缺失或回显了密钥');
+  }
 
   // 滑条换算函数
   console.log('\n=== 滑条换算（UI 侧）===');

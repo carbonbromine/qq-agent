@@ -4,6 +4,7 @@ import http from 'node:http';
 import net from 'node:net';
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { getConfig, updateConfig, ROOT, DATA_DIR } from './config.js';
@@ -70,6 +71,12 @@ function compareSemver(a, b) {
     if ((pa[i] || 0) < (pb[i] || 0)) return -1;
   }
   return 0;
+}
+
+function sameSecret(a, b) {
+  const left = Buffer.from(String(a ?? ''));
+  const right = Buffer.from(String(b ?? ''));
+  return left.length === right.length && crypto.timingSafeEqual(left, right);
 }
 
 export function createApp({ log = console.log } = {}) {
@@ -603,6 +610,21 @@ export function createApp({ log = console.log } = {}) {
       || cookie?.slice('qq_agent_token='.length) === encodeURIComponent(token);
   }
 
+  function setConsoleCookie(res, token) {
+    res.setHeader('set-cookie',
+      `qq_agent_token=${encodeURIComponent(token)}; HttpOnly; SameSite=Strict; Path=/`);
+  }
+
+  function writeConsoleAccess(token) {
+    const file = path.join(DATA_DIR, 'console-access.txt');
+    const tmp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp,
+      `QQ Agent Linux\nURL: http://${getConfig().server.host}:${getConfig().server.port}\nToken: ${token}\nMode: ${getConfig().runtime.mode}\n`,
+      { mode: 0o600 });
+    fs.renameSync(tmp, file);
+    fs.chmodSync(file, 0o600);
+  }
+
   // ── 配置脱敏 ────────────────────────────────────────────────────────────
   // 凡是字段名命中这些模式的，值一律替换为空串（保留"有/无"的 hasXxx 标记）。
   // 覆盖：apiKey / api_key / accessToken / httpAccessToken / token / secret / password …
@@ -713,7 +735,7 @@ export function createApp({ log = console.log } = {}) {
       const body = await readBody(req);
       const token = getConfig().server.token;
       if (!token || body.token !== token) return json(res, 401, { error: 'Token 不正确' });
-      res.setHeader('set-cookie', `qq_agent_token=${encodeURIComponent(token)}; HttpOnly; SameSite=Strict; Path=/`);
+      setConsoleCookie(res, token);
       return json(res, 200, { ok: true });
     }
 
@@ -735,6 +757,32 @@ export function createApp({ log = console.log } = {}) {
       if (!authorize(req)) return json(res, 401, { error: '未授权' });
       const method = req.method;
       const cfgNow = getConfig();
+
+      if (pathname === '/api/console-token' && method === 'POST') {
+        const body = await readBody(req);
+        const current = String(body.currentToken ?? '');
+        const next = String(body.newToken ?? '').trim();
+        const confirm = String(body.confirmToken ?? '').trim();
+        if (!sameSecret(current, cfgNow.server.token)) {
+          return json(res, 403, { error: '当前 Token 不正确' });
+        }
+        if (!/^[A-Za-z0-9._~-]{16,128}$/.test(next)) {
+          return json(res, 400, { error: '新 Token 必须为 16~128 位字母、数字或 . _ ~ -' });
+        }
+        if (next !== confirm) return json(res, 400, { error: '两次输入的新 Token 不一致' });
+        if (sameSecret(next, cfgNow.server.token)) return json(res, 400, { error: '新 Token 不能与当前 Token 相同' });
+        updateConfig({ server: { token: next } });
+        let accessFileUpdated = true;
+        try { writeConsoleAccess(next); }
+        catch (error) {
+          accessFileUpdated = false;
+          log('[console] Token 已更新，但 console-access.txt 写入失败:', error?.message ?? error);
+        }
+        setConsoleCookie(res, next);
+        for (const client of sseClients) client.end();
+        sseClients.clear();
+        return json(res, 200, { ok: true, accessFileUpdated });
+      }
 
       if (pathname === '/api/runtime' && method === 'POST') {
         const body = await readBody(req);
@@ -1236,7 +1284,10 @@ export function createApp({ log = console.log } = {}) {
       if (pathname === '/api/config' && method === 'POST') {
         const patch = await readBody(req);
         delete patch.runtime;
-        if (patch.server?.token === '') delete patch.server.token;
+        if (patch.server) {
+          delete patch.server.token;
+          delete patch.server.hasToken;
+        }
         const next = updateConfig(patch);
         store.setMaxPerChat(next.store?.maxMessagesPerChat ?? 0);
         if (next.proactive?.enabled) orchestrator.startProactiveLoop(); else orchestrator.stopProactiveLoop();

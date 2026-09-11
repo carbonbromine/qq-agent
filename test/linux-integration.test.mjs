@@ -55,6 +55,30 @@ it('protects console APIs, redacts credentials and blocks all sending in observe
   assert.equal(sends, 0);
   const state = await (await request('/api/status', null, headers)).json();
   assert.equal(state.orchestrator.mode, 'observe');
+  await request('/api/config', { server: { token: 'bypass-token-123456' } }, headers);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'config.json'))).server.token, cfg.server.token);
+  assert.equal((await request('/api/console-token', {
+    currentToken: 'wrong-token', newToken: 'new-console-token-1234', confirmToken: 'new-console-token-1234'
+  }, headers)).status, 403);
+  assert.equal((await request('/api/console-token', {
+    currentToken: cfg.server.token, newToken: 'short', confirmToken: 'short'
+  }, headers)).status, 400);
+  assert.equal((await request('/api/console-token', {
+    currentToken: cfg.server.token, newToken: 'new-console-token-1234', confirmToken: 'different-console-token'
+  }, headers)).status, 400);
+  const rotated = await request('/api/console-token', {
+    currentToken: cfg.server.token,
+    newToken: 'new-console-token-1234',
+    confirmToken: 'new-console-token-1234'
+  }, headers);
+  assert.equal(rotated.status, 200);
+  const newCookie = rotated.headers.get('set-cookie').split(';')[0];
+  assert.equal((await request('/api/status', null, headers)).status, 401);
+  assert.equal((await request('/api/status', null, { cookie: newCookie })).status, 200);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'config.json'))).server.token, 'new-console-token-1234');
+  const accessFile = path.join(dir, 'console-access.txt');
+  assert.ok(fs.readFileSync(accessFile, 'utf8').includes('Token: new-console-token-1234'));
+  assert.equal(fs.statSync(accessFile).mode & 0o777, 0o600);
 });
 
 it('persists mode, starts headless and exits cleanly on SIGTERM', async (t) => {

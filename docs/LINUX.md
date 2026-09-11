@@ -65,6 +65,12 @@ no automatic model calls and blocks text, stickers, pokes and test sends.
 Explicit administrator actions such as model testing or memory consolidation
 may still use the API. Activation skips the observe backlog by default.
 
+The console Token can be rotated under **Settings → Desktop → Console Security**.
+Enter the current Token and the new Token twice. A successful rotation updates
+the HttpOnly cookie and `data/console-access.txt` atomically from the user's
+perspective; the old Token and other browser sessions stop authenticating
+immediately. The general “Save Settings” action cannot change the Token.
+
 ```bash
 bash manage.sh status
 bash manage.sh logs

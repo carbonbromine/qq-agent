@@ -3233,6 +3233,22 @@ return `
 
 function renderDesktopSection(c) {
   return `
+    <h3>控制台安全</h3>
+    <div class="field-row">
+      <div class="field"><label>当前 Token</label>
+        <input type="password" id="cfg-console-token-current" autocomplete="current-password"
+          placeholder="${c.server?.hasToken ? '输入当前 Token' : '当前未设置 Token'}" /></div>
+      <div class="field"><label>新 Token</label>
+        <input type="password" id="cfg-console-token-new" autocomplete="new-password"
+          placeholder="16~128 位字母、数字或 . _ ~ -" /></div>
+      <div class="field"><label>确认新 Token</label>
+        <input type="password" id="cfg-console-token-confirm" autocomplete="new-password"
+          placeholder="再次输入新 Token" /></div>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center;margin-bottom:18px">
+      <button class="btn btn-small" id="change-console-token-btn">更新控制台 Token</button>
+      <span class="hint" id="console-token-result">更新后旧 Token 和其他已登录会话立即失效。</span>
+    </div>
     <h3>桌面端</h3>
     <div class="checkbox-row"><input type="checkbox" id="cfg-autostart" ${c.server?.autoStart ? 'checked' : ''} />
       <label for="cfg-autostart">开机自启</label></div>
@@ -3295,6 +3311,38 @@ function bindSettingsEvents(c) {
       startListPoller();   // 刷新间隔可能刚被改过，用新值重启轮询
     } catch (e) {
       $('#cfg-save-result').textContent = `保存失败：${e.message}`;
+    }
+  });
+
+  $('#change-console-token-btn')?.addEventListener('click', async () => {
+    const button = $('#change-console-token-btn');
+    const result = $('#console-token-result');
+    const currentToken = $('#cfg-console-token-current')?.value || '';
+    const newToken = ($('#cfg-console-token-new')?.value || '').trim();
+    const confirmToken = ($('#cfg-console-token-confirm')?.value || '').trim();
+    if (newToken !== confirmToken) {
+      result.textContent = '两次输入的新 Token 不一致';
+      return;
+    }
+    button.disabled = true;
+    result.textContent = '更新中…';
+    try {
+      const response = await api('/api/console-token', {
+        method: 'POST',
+        body: JSON.stringify({ currentToken, newToken, confirmToken })
+      });
+      for (const id of ['#cfg-console-token-current', '#cfg-console-token-new', '#cfg-console-token-confirm']) {
+        const input = $(id);
+        if (input) input.value = '';
+      }
+      if (state.config?.server) state.config.server.hasToken = true;
+      result.textContent = response.accessFileUpdated === false
+        ? 'Token 已更新；服务器凭据提示文件更新失败，请使用 manage.sh token 查看。'
+        : 'Token 已更新，当前浏览器已自动使用新 Token。';
+    } catch (error) {
+      result.textContent = `更新失败：${error.message}`;
+    } finally {
+      button.disabled = false;
     }
   });
 
