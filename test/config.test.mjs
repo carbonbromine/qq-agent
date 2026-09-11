@@ -34,9 +34,20 @@ test('migrates legacy desktop and DSH keys into the Linux configuration', async 
   assert.equal('autoStart' in config.server, false);
   assert.equal('closeToTray' in config.server, false);
   assert.equal(config.ui.theme, 'dark');
-  updateConfig({ ui: { refreshMs: 5000 } });
+  assert.equal(config.conversation.mode, 'legacy');
+  updateConfig({
+    ui: { refreshMs: 5000 },
+    conversation: {
+      mode: 'threaded',
+      continuationWindowMs: 120000,
+      threadTtlMs: 900000,
+      continuationContextCount: 80
+    }
+  });
   const saved = JSON.parse(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'));
   assert.equal(saved.onebot.wsUrl, 'ws://127.0.0.1:13001');
   assert.equal(saved.providerKeys.provider, 'model-secret');
   assert.equal('snowluma' in saved, false);
+  assert.equal(saved.conversation.mode, 'threaded');
+  assert.throws(() => updateConfig({ conversation: { mode: 'invalid' } }), /conversation mode/);
 });

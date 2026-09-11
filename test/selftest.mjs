@@ -63,7 +63,10 @@ function createMockOneBotHttp() {
     if (action === 'get_group_member_info') return reply({ card: `名片${body.user_id}`, nickname: `昵称${body.user_id}` });
     if (action === 'get_group_list') return reply([{ group_id: 456, group_name: '审计群456' }, { group_id: 789, group_name: '备用群789' }]);
     if (action === 'get_friend_list') return reply([{ user_id: 777, nickname: '好友777', remark: '老友' }]);
-    if (action === 'get_msg') return reply({ sender: { card: '被引用者', nickname: '被引用者' }, message: [{ type: 'text', data: { text: '被引用的原话' } }] });
+    if (action === 'get_msg') return reply({
+      sender: { user_id: 111, card: '被引用者', nickname: '被引用者' },
+      message: [{ type: 'text', data: { text: '被引用的原话' } }]
+    });
     // 合并转发：按消息 id 返回两段记录（一段文字、一段带图）——测展开链路
     if (action === 'get_forward_msg') {
       return reply({
@@ -373,6 +376,7 @@ async function main() {
   assert.strictEqual(send3.body.message[1].data.text, '收到');
   const replyRunReq = llm.state.requests.at(-2);
   assert.ok(replyRunReq.messages[1].content.includes('[引用 被引用者：被引用的原话]'), '引用原文被解析进上下文');
+  assert.strictEqual(app.store.findByMid('group:456', 9003).reply.senderId, '111', '引用对象 QQ 号已结构化存储');
   pass('引用解析与 reply 段发送正确');
 
   // ── 场景 5：群友印象跨运行持久（无状态但记忆保留，且按相关成员注入） ──
@@ -716,6 +720,23 @@ async function main() {
   assert.ok(oneSession.messages && oneSession.systemPrompt);
   const chatsRes = await (await fetch(`http://127.0.0.1:${cfg.server.port}/api/chats`)).json();
   assert.ok(chatsRes.chats.some((c) => c.key === 'group:456'));
+  app.store.upsertConversationThread('group:456', {
+    participantIds: ['111'],
+    topic: '控制台线程测试',
+    continuationWindowMs: 60000,
+    ttlMs: 600000
+  });
+  const chatsWithThread = await (await fetch(`http://127.0.0.1:${cfg.server.port}/api/chats`)).json();
+  assert.strictEqual(
+    chatsWithThread.chats.find((c) => c.key === 'group:456')?.thread?.topic,
+    '控制台线程测试',
+    '会话列表返回线程摘要'
+  );
+  const closeThread = await (await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/chats/group_456/thread`,
+    { method: 'DELETE' }
+  )).json();
+  assert.strictEqual(closeThread.closed, true, '控制台可结束线程');
   const uiRes = await fetch(`http://127.0.0.1:${cfg.server.port}/`);
   assert.ok((await uiRes.text()).includes('QQ Agent'), 'UI 首页可访问');
   pass('HTTP API：status/models/sessions/chats/UI 全部可用', `今日 ${statusRes.usage.totalTokens} tok`);
@@ -728,8 +749,11 @@ async function main() {
     body: JSON.stringify({
       topic: '继续核对测试结果',
       summary: '前一轮已经完成基础链路验证',
+      hypotheses: ['下一轮应该读取到交接状态'],
+      evidence: ['基础链路测试已经通过'],
       facts: ['OneBot 已连接'],
       decisions: ['继续使用当前测试群'],
+      rejectedDirections: ['不再重复初始化 OneBot'],
       openQuestions: ['交接状态能否被下一轮读取'],
       nextStep: '读取记忆详情',
       ttlMinutes: 60
@@ -740,6 +764,8 @@ async function main() {
     `http://127.0.0.1:${cfg.server.port}/api/memory-files/group_456`
   )).json();
   assert.strictEqual(handoffDetail.handoff.topic, '继续核对测试结果');
+  assert.deepStrictEqual(handoffDetail.handoff.hypotheses, ['下一轮应该读取到交接状态']);
+  assert.deepStrictEqual(handoffDetail.handoff.rejectedDirections, ['不再重复初始化 OneBot']);
   assert.deepStrictEqual(handoffDetail.handoff.openQuestions, ['交接状态能否被下一轮读取']);
   const memoryFilesWithHandoff = await (await fetch(
     `http://127.0.0.1:${cfg.server.port}/api/memory-files`

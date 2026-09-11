@@ -55,6 +55,9 @@ const sys = buildSystemPrompt();
 for (const keyword of ['安全规则', '工作方式', '反 AI 味', '保持主体性', '该说/不该说', '群聊不是客服队列', '像真人一样', '引用与点名', '记忆', '表情包策略', '发送与汇报禁令']) {
   assert.ok(sys.includes(keyword), `系统提示缺少模块：${keyword}`);
 }
+assert.ok(sys.includes('【角色设定'), '角色卡应进入稳定系统前缀');
+assert.ok(sys.includes(cfg.persona.roleText), '系统提示应包含完整角色卡');
+assert.ok(sys.includes('【每次运行的决策顺序】'), '固定运行引导应进入稳定系统前缀');
 for (const banned of ['沉睡前观察', 'qq_wait_for_messages', 'qq_set_wake_config', 'qq_mark_read', '[SILENT]', '会话令牌']) {
   assert.ok(!sys.includes(banned), `系统提示不应包含已废弃概念：${banned}`);
 }
@@ -66,8 +69,11 @@ memory.append('group:123', 'memberImpression', '喜欢猫', { userId: 'u1', targ
 memory.setHandoff('group:123', {
   topic: '继续确认周末安排',
   summary: '群友1已经说明周六有空',
+  hypotheses: ['群友2可能也能参加'],
+  evidence: ['群友2尚未明确拒绝'],
   facts: ['聚会地点还没有确定'],
   decisions: ['优先考虑周六下午'],
+  rejectedDirections: ['不考虑周五晚上'],
   openQuestions: ['具体在哪见面'],
   nextStep: '等待群友2确认时间',
   ttlMinutes: 60
@@ -101,14 +107,19 @@ const userPrompt = buildUserPrompt({
   proactive: false
 });
 
-for (const section of ['【当前时间】', '【角色设定', '【此刻状态】', '【上次会话交接】', '【过去状态】', '【本次唤醒】', '【记忆】', '【引导说明】']) {
+for (const section of ['【当前时间】', '【此刻状态】', '【上次会话交接】', '【过去状态】', '【本次唤醒】', '【记忆】']) {
   assert.ok(userPrompt.includes(section), `用户提示缺少段落：${section}`);
 }
+assert.ok(!userPrompt.includes('【角色设定'), '动态用户提示不应重复角色卡');
+assert.ok(!userPrompt.includes('【引导说明】'), '固定引导不应留在动态用户提示');
 assert.ok(userPrompt.includes('继续确认周末安排'), '交接话题应注入提示词');
+assert.ok(userPrompt.includes('群友2可能也能参加'), '待验证假设应注入提示词');
+assert.ok(userPrompt.includes('不考虑周五晚上'), '已排除方向应注入提示词');
 assert.ok(userPrompt.includes('具体在哪见面'), '未解决问题应注入提示词');
 assert.ok(
-  userPrompt.indexOf('【上次会话交接】') < userPrompt.indexOf('【过去状态】'),
-  '交接状态应位于历史消息之前'
+  userPrompt.indexOf('【上次会话交接】') > userPrompt.indexOf('【过去状态】')
+    && userPrompt.indexOf('【上次会话交接】') < userPrompt.indexOf('【本次唤醒】'),
+  '交接状态应靠近并位于最新消息之前'
 );
 for (const banned of ['沉睡前观察', 'qq_', '[SILENT]']) {
   assert.ok(!userPrompt.includes(banned), `用户提示不应包含：${banned}`);

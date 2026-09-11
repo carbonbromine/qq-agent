@@ -133,13 +133,22 @@ export async function chatCompletionWithRetry(args, retries = 2) {
  * 返回 { message, usage, raw }；usage 形如 { prompt_tokens, completion_tokens, total_tokens }。
  * overrides: { baseUrl, apiKey, model, timeoutMs } 可选，用于记忆整理专用模型等场景。
  */
-export async function chatCompletion({ messages, tools = null, toolChoice = 'auto', temperature = null, signal = null, overrides = null }) {
+export async function chatCompletion({
+  messages,
+  tools = null,
+  toolChoice = 'auto',
+  temperature = null,
+  signal = null,
+  overrides = null,
+  cacheKey = ''
+}) {
   const api = overrides || effectiveApi();
   const body = {
     model: api.model,
-    messages: messages.map(({ role, content, tool_calls, tool_call_id, name }) => ({
+    messages: messages.map(({ role, content, tool_calls, tool_call_id, name, reasoning_content }) => ({
       role, content, ...(tool_calls ? { tool_calls } : {}),
-      ...(tool_call_id ? { tool_call_id } : {}), ...(name ? { name } : {})
+      ...(tool_call_id ? { tool_call_id } : {}), ...(name ? { name } : {}),
+      ...(reasoning_content ? { reasoning_content } : {})
     })),
     stream: false
   };
@@ -149,6 +158,13 @@ export async function chatCompletion({ messages, tools = null, toolChoice = 'aut
   }
   const temp = temperature === null ? (api.temperature ?? 0.8) : temperature;
   if (temp !== null && temp !== undefined && Number.isFinite(Number(temp))) body.temperature = Number(temp);
+  // OpenAI/Azure 可用显式 key 提高相同前缀的路由稳定性。兼容网关不盲传，
+  // 避免它们因未知字段返回 400；DeepSeek 使用自动前缀缓存，无需该字段。
+  if (cacheKey && /(^|\.)openai\.com$|\.openai\.azure\.com$|\.services\.ai\.azure\.com$/i.test((() => {
+    try { return new URL(api.baseUrl).hostname; } catch { return ''; }
+  })())) {
+    body.prompt_cache_key = String(cacheKey).slice(0, 64);
+  }
 
   const controller = new AbortController();
   const timeoutMs = Math.max(5000, Number(api.timeoutMs) || 180000);

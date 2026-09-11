@@ -116,4 +116,57 @@ describe('ChatStore', () => {
     assert.equal(store.activeMembers('group:1')[0].count, 2);
     assert.equal(store.drainUnread('group:1').length, 1);
   });
+
+  it('persists conversation threads and append-only checkpoints', (t) => {
+    const { store } = fixture(t);
+    const first = store.upsertConversationThread('group:1', {
+      participantIds: ['42'],
+      topic: '部署排查',
+      lastMessageId: 10,
+      continuationWindowMs: 120000,
+      ttlMs: 600000
+    });
+    assert.equal(first.state, 'engaged');
+    assert.deepEqual(first.participantIds, ['42']);
+    assert.ok(first.engagedUntil > Date.now());
+
+    const second = store.upsertConversationThread('group:1', {
+      participantIds: ['43'],
+      lastMessageId: 11,
+      continuationWindowMs: 120000,
+      ttlMs: 600000
+    });
+    assert.equal(second.threadId, first.threadId);
+    assert.equal(second.version, first.version + 1);
+    assert.deepEqual(second.participantIds, ['42', '43']);
+
+    store.appendThreadCheckpoint('group:1', second.threadId, 'run-1', {
+      summary: '服务已恢复',
+      openQuestions: ['是否还会断线']
+    }, [10, 11]);
+    const checkpoint = store.latestThreadCheckpoint('group:1');
+    assert.equal(checkpoint.threadId, first.threadId);
+    assert.equal(checkpoint.state.summary, '服务已恢复');
+    assert.deepEqual(checkpoint.sourceMessageIds, [10, 11]);
+
+    assert.equal(store.closeConversationThread('group:1', 'test-finished'), true);
+    assert.equal(store.getConversationThread('group:1'), null);
+  });
+
+  it('restores active threads after reopening and expires them by deadline', (t) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-thread-reopen-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    let store = new ChatStore(0, { dataDir: dir });
+    const thread = store.upsertConversationThread('group:1', {
+      participantIds: ['42'],
+      continuationWindowMs: 60000,
+      ttlMs: 60000
+    });
+    store.close();
+
+    store = new ChatStore(0, { dataDir: dir });
+    assert.equal(store.getConversationThread('group:1').threadId, thread.threadId);
+    assert.equal(store.getConversationThread('group:1', thread.expiresAt + 1), null);
+    store.close();
+  });
 });

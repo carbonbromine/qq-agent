@@ -21,8 +21,11 @@ test('persists, updates and clears structured session handoff state', (t) => {
   const first = memory.setHandoff('group:123', {
     topic: '排查图片发送问题',
     summary: '已经确认图片成功下载',
+    hypotheses: ['发送段可能被重复组装'],
+    evidence: ['入站事件只有一个 image 段'],
     facts: ['OneBot 在线', '附件路径可写', '附件路径可写'],
     decisions: ['继续检查发送段'],
+    rejectedDirections: ['不是附件下载失败'],
     openQuestions: ['是否重复组装 image 段'],
     nextStep: '发送一张表情复现',
     ttlMinutes: 30
@@ -36,10 +39,15 @@ test('persists, updates and clears structured session handoff state', (t) => {
   assert.deepEqual(first.facts, ['OneBot 在线', '附件路径可写']);
   assert.ok(first.expiresAt > first.updatedAt);
   assert.match(memory.formatHandoffForPrompt('group:123'), /是否重复组装 image 段/);
+  assert.match(memory.formatHandoffForPrompt('group:123'), /发送段可能被重复组装/);
+  assert.match(memory.formatHandoffForPrompt('group:123'), /不是附件下载失败/);
 
   const second = memory.setHandoff('group:123', {
     summary: '复现后确认发送段只出现一次',
+    hypotheses: [],
+    evidence: ['出站观测仅记录一次发送'],
     facts: [],
+    rejectedDirections: [],
     openQuestions: [],
     nextStep: ''
   }, {
@@ -48,7 +56,10 @@ test('persists, updates and clears structured session handoff state', (t) => {
   });
 
   assert.equal(second.topic, first.topic, '未提供的字段应保留');
+  assert.deepEqual(second.hypotheses, [], '显式空数组应清空旧假设');
+  assert.deepEqual(second.evidence, ['出站观测仅记录一次发送']);
   assert.deepEqual(second.facts, [], '显式空数组应清空旧事实');
+  assert.deepEqual(second.rejectedDirections, [], '显式空数组应清空已排除方向');
   assert.deepEqual(second.openQuestions, [], '显式空数组应清空旧问题');
   assert.deepEqual(second.participantIds, ['1001', '1002']);
   assert.equal(second.sourceSessionId, 'session-b');

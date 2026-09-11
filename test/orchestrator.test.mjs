@@ -56,11 +56,17 @@ describe('Orchestrator', () => {
     };
     const runner = new Orchestrator({
       store, sessions, memory,
-      stickers: {}, sender, onebot: { getGroupInfo: async () => ({ group_name: 'test' }) }
+      stickers: {}, sender, onebot: {
+        selfId: '888',
+        selfNickname: 'bot',
+        getGroupInfo: async () => ({ group_name: 'test' })
+      }
     });
     const original = globalThis.fetch;
     t.after(async () => { await runner.abortAll(); store.close(); globalThis.fetch = original; });
-    const append = (mid) => store.appendIncoming('group:1', { mid, text: 'hi', senderId: '42' });
+    const append = (mid, text = 'hi', senderId = '42', reply = null) => store.appendIncoming('group:1', {
+      mid, text, senderId, senderName: `member-${senderId}`, reply
+    });
     return { cfg, runner, store, sessions, memory, handoffs, append };
   }
 
@@ -153,7 +159,10 @@ describe('Orchestrator', () => {
               arguments: JSON.stringify({
                 summary: '已经确认第一项',
                 topic: '继续排查',
+                hypotheses: ['第二项可能异常'],
+                evidence: ['第一项检查结果正常'],
                 facts: ['第一项正常'],
+                rejectedDirections: ['不是第一项导致'],
                 openQuestions: ['第二项是否正常'],
                 nextStep: '等待下一条结果'
               })
@@ -169,6 +178,8 @@ describe('Orchestrator', () => {
     assert.equal(store.findByMid('group:1', 1).read, true);
     assert.equal(handoffs.length, 1);
     assert.equal(handoffs[0].state.topic, '继续排查');
+    assert.deepEqual(handoffs[0].state.hypotheses, ['第二项可能异常']);
+    assert.deepEqual(handoffs[0].state.rejectedDirections, ['不是第一项导致']);
     assert.deepEqual(handoffs[0].state.openQuestions, ['第二项是否正常']);
     assert.deepEqual(handoffs[0].meta.participantIds, ['42']);
     assert.ok(handoffs[0].meta.sourceSessionId);
@@ -254,6 +265,123 @@ describe('Orchestrator', () => {
     assert.match(secondPrompt, /【上次会话交接】/);
     assert.match(secondPrompt, /继续检查附件/);
     assert.match(secondPrompt, /第一轮确认了连接正常/);
+  });
+
+  it('passes provider reasoning content into the next tool round', async (t) => {
+    const { runner, append } = fixture(t);
+    const requests = [];
+    globalThis.fetch = async (_url, options) => {
+      const body = JSON.parse(options.body);
+      requests.push(body);
+      if (requests.length === 1) {
+        return Response.json({
+          choices: [{
+            message: {
+              reasoning_content: '先读取成员再决定',
+              tool_calls: [{
+                id: 'members-1',
+                type: 'function',
+                function: { name: 'get_active_members', arguments: '{}' }
+              }]
+            }
+          }],
+          usage: { prompt_tokens: 100, prompt_cache_hit_tokens: 40, total_tokens: 110 }
+        });
+      }
+      return Response.json({
+        choices: [{ message: { content: 'done' } }],
+        usage: { prompt_tokens: 120, prompt_cache_hit_tokens: 100, total_tokens: 130 }
+      });
+    };
+
+    append(1);
+    await runner.wake('group:1');
+
+    assert.equal(requests.length, 2);
+    const assistant = requests[1].messages.find((m) => m.role === 'assistant');
+    assert.equal(assistant.reasoning_content, '先读取成员再决定');
+    const session = runner.sessions.get(runner.sessions.listSummaries(1)[0].id);
+    assert.equal(session.callUsage.length, 2);
+    assert.equal(session.callUsage[0].cacheHitRate, 0.4);
+  });
+
+  it('deterministically wakes the same participant inside the threaded continuation window', async (t) => {
+    const { cfg, runner, store, append } = fixture(t);
+    cfg.conversation.mode = 'threaded';
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls += 1;
+      if (calls === 1) {
+        return Response.json({
+          choices: [{
+            message: {
+              tool_calls: [{
+                id: 'send-1',
+                type: 'function',
+                function: {
+                  name: 'send_message',
+                  arguments: JSON.stringify({ messages: ['继续说'], replyToMessageId: 1 })
+                }
+              }]
+            }
+          }],
+          usage: { total_tokens: 10 }
+        });
+      }
+      return Response.json({
+        choices: [{ message: { content: 'done' } }],
+        usage: { total_tokens: 10 }
+      });
+    };
+
+    append(1, '@bot 先聊这个', '42');
+    append(2, '我在旁边说一句', '43');
+    await runner.wake('group:1');
+    const thread = store.getConversationThread('group:1');
+    assert.ok(thread);
+    assert.deepEqual(thread.participantIds, ['42']);
+    assert.ok(store.latestThreadCheckpoint('group:1'));
+
+    cfg.store.contextTier = 1;
+    cfg.store.randomPercent = 0;
+    append(3, '旁观者继续说', '43');
+    await runner.wake('group:1');
+    assert.equal(calls, 2, '未被回复的旁观者不应获得续接资格');
+    append(4, '那接下来呢', '42');
+    await runner.wake('group:1');
+
+    assert.equal(calls, 3, '普通跟话应绕过低概率门控并进入第二次模型调用');
+    const latest = runner.sessions.listSummaries(1)[0];
+    const latestDetail = runner.sessions.get(latest.id);
+    assert.equal(latestDetail.contextTier, 5);
+    assert.match(latestDetail.contextReason, /续接/);
+  });
+
+  it('deterministically wakes a reply to the bot without an existing thread', async (t) => {
+    const { cfg, runner, append } = fixture(t);
+    cfg.conversation.mode = 'threaded';
+    cfg.store.contextTier = 1;
+    cfg.store.randomPercent = 0;
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls += 1;
+      return Response.json({
+        choices: [{ message: { content: 'done' } }],
+        usage: { total_tokens: 10 }
+      });
+    };
+
+    append(1, '你刚才那句什么意思', '43', {
+      senderId: '888',
+      sender: 'bot',
+      text: '上一条机器人消息'
+    });
+    await runner.wake('group:1');
+
+    assert.equal(calls, 1);
+    const latest = runner.sessions.get(runner.sessions.listSummaries(1)[0].id);
+    assert.equal(latest.contextTier, 5);
+    assert.equal(latest.contextReason, '续接：引用机器人');
   });
 });
 

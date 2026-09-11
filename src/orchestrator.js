@@ -8,6 +8,7 @@
 //
 // 同一会话（群/私聊）同时最多一个运行；运行期间新消息只写 JSON（未读），不叠加触发。
 // 不同会话之间并行，受 maxConcurrentRuns 全局限流。
+import crypto from 'node:crypto';
 import { getConfig, storeConfigForChat, updateConfig } from './config.js';
 import { canRun } from './access.js';
 import { vendorOfConfig } from './model-prices.js';
@@ -23,6 +24,27 @@ function handoffParticipantIds(triggerEntries) {
     .filter((m) => !m?.self && m?.senderId !== null && m?.senderId !== undefined)
     .map((m) => String(m.senderId).trim())
     .filter(Boolean))];
+}
+
+function continuationParticipantIds(session, triggerEntries, store, chatKey) {
+  const ids = [];
+  for (const item of session?.messages || []) {
+    const call = item?.toolCall;
+    if (!call || !['send_message', 'send_sticker', 'send_poke'].includes(call.name)) continue;
+    const atUserId = String(call.args?.atUserId ?? call.args?.targetUserId ?? '').trim();
+    if (atUserId) ids.push(atUserId);
+    const replyId = call.args?.replyToMessageId;
+    if (replyId !== undefined && replyId !== null && String(replyId).trim()) {
+      const replied = store.findByMid?.(chatKey, replyId);
+      if (replied?.senderId && !replied.self) ids.push(String(replied.senderId));
+    }
+  }
+  if (!ids.length) {
+    const last = [...(triggerEntries || [])].reverse()
+      .find((m) => !m?.self && String(m?.senderId || '').trim());
+    if (last) ids.push(String(last.senderId));
+  }
+  return [...new Set(ids)].slice(0, 8);
 }
 
 function lastSentText(session) {
@@ -115,7 +137,7 @@ export class Orchestrator {
     if (chatKey.startsWith('private:')) {
       return { shouldRespond: entries.length > 0, tier: 4, count: getConfig().store.atCount, reason: '私聊' };
     }
-    const r = resolveContextTier({
+    const result = resolveContextTier({
       triggerEntries: entries,
       selfNickname: cfg.persona?.selfNickname || this.onebot.selfNickname || '',
       botName: cfg.persona?.botName || '',
@@ -123,8 +145,40 @@ export class Orchestrator {
       cfg: storeConfigForChat(chatKey)   // 按会话取档位：统一开关关闭时各群可以有独立滑条
     });
     // 没有未读就不算"需要响应"（防抖窗口刚建立时的空转）
-    if (entries.length === 0) return { ...r, shouldRespond: false, reason: '无未读' };
-    return r;
+    if (entries.length === 0) return { ...result, shouldRespond: false, reason: '无未读' };
+    if (result.shouldRespond || cfg.conversation?.mode !== 'threaded') return result;
+    return this.#continuationTier(chatKey, entries, result);
+  }
+
+  #continuationTier(chatKey, entries, fallback) {
+    const cfg = getConfig();
+    const selfId = String(cfg.onebot?.selfId || this.onebot.selfId || '');
+    const names = new Set([
+      cfg.persona?.selfNickname,
+      this.onebot.selfNickname,
+      cfg.persona?.botName
+    ].map((v) => String(v || '').trim()).filter(Boolean));
+    const replyToSelf = entries.some((m) => {
+      if (selfId && String(m.reply?.senderId || '') === selfId) return true;
+      return names.has(String(m.reply?.sender || '').trim());
+    });
+    const count = Math.max(1, Number(cfg.conversation?.continuationContextCount) || 100);
+    if (replyToSelf) {
+      return { tier: 5, count, reason: '续接：引用机器人', shouldRespond: true };
+    }
+
+    const thread = this.store.getConversationThread?.(chatKey);
+    if (!thread || thread.engagedUntil <= Date.now()) return fallback;
+    const participants = new Set((thread.participantIds || []).map(String));
+    const sameParticipant = entries.some((m) => participants.has(String(m.senderId || '')));
+    if (!sameParticipant) return fallback;
+    return {
+      tier: 5,
+      count,
+      reason: '续接：参与者在活跃窗口内继续发言',
+      shouldRespond: true,
+      threadId: thread.threadId
+    };
   }
 
   scheduleWake(chatKey, delay = null) {
@@ -365,7 +419,8 @@ export class Orchestrator {
       controller.signal.throwIfAborted();
       if (lease) this.store.ackLease(lease.id);
       else this.store.completeRun(session.leaseId);
-      this.#commitSessionHandoff(session, { chatKey, triggerEntries });
+      const handoff = this.#commitSessionHandoff(session, { chatKey, triggerEntries });
+      this.#commitConversationThread(session, { chatKey, triggerEntries, handoff });
       const status = session.sent.length > 0 ? 'done' : 'noreply';
       this.sessions.finish(session.id, status);
       this.emit('session-end', { sessionId: session.id, chatKey, status,
@@ -400,7 +455,7 @@ export class Orchestrator {
 
   #commitSessionHandoff(session, { chatKey, triggerEntries }) {
     const cfg = getConfig();
-    if (cfg.memory?.handoffEnabled === false || typeof this.memory?.setHandoff !== 'function') return;
+    if (cfg.memory?.handoffEnabled === false || typeof this.memory?.setHandoff !== 'function') return null;
 
     let draft = session.handoffDraft;
     if (!draft && session.sent.length > 0) {
@@ -424,7 +479,7 @@ export class Orchestrator {
       };
       session.handoffFallback = true;
     }
-    if (!draft) return;
+    if (!draft) return null;
 
     try {
       const handoff = this.memory.setHandoff(chatKey, draft, {
@@ -439,9 +494,51 @@ export class Orchestrator {
         chatKey,
         phase: session.handoffCleared ? 'handoff-clear' : 'handoff-update'
       });
+      return handoff;
     } catch (error) {
       session.handoffError = String(error?.message ?? error);
       console.warn(`[memory] ${chatKey} 保存会话交接失败:`, session.handoffError);
+      return null;
+    }
+  }
+
+  #commitConversationThread(session, { chatKey, triggerEntries, handoff }) {
+    const cfg = getConfig();
+    if (cfg.conversation?.mode !== 'threaded') return;
+    if (session.handoffDraft?.clearHandoff === true) {
+      this.store.closeConversationThread?.(chatKey, 'handoff-cleared');
+      return;
+    }
+    if (!session.sent.length || typeof this.store.upsertConversationThread !== 'function') return;
+    try {
+      const lastMessageId = Math.max(0, ...(triggerEntries || []).map((m) => Number(m.id) || 0));
+      const lastHumanAt = Math.max(0, ...(triggerEntries || []).map((m) => Number(m.ts) || 0));
+      const thread = this.store.upsertConversationThread(chatKey, {
+        participantIds: continuationParticipantIds(session, triggerEntries, this.store, chatKey),
+        topic: handoff?.topic || session.handoffDraft?.topic || '',
+        lastMessageId,
+        lastHumanAt,
+        lastAgentAt: Date.now(),
+        continuationWindowMs: cfg.conversation?.continuationWindowMs,
+        ttlMs: cfg.conversation?.threadTtlMs
+      });
+      session.threadId = thread.threadId;
+      session.threadState = thread.state;
+      if (typeof this.store.appendThreadCheckpoint === 'function') {
+        this.store.appendThreadCheckpoint(
+          chatKey,
+          thread.threadId,
+          session.id,
+          handoff || session.handoffDraft || {
+            summary: `本轮已发送 ${session.sent.length} 条消息`,
+            lastReply: lastSentText(session)
+          },
+          (triggerEntries || []).map((m) => m.id)
+        );
+      }
+    } catch (error) {
+      session.threadError = String(error?.message ?? error);
+      console.warn(`[thread] ${chatKey} 保存线程状态失败:`, session.threadError);
     }
   }
 
@@ -449,6 +546,9 @@ export class Orchestrator {
     const cfg = getConfig();
     const chatName = kind === 'group' ? await this.#chatName(chatId) : '';
     const selfNickname = kind === 'group' ? (cfg.persona.selfNickname || this.onebot.selfNickname || cfg.persona.botName) : cfg.persona.botName;
+    const thread = cfg.conversation?.mode === 'threaded'
+      ? this.store.getConversationThread?.(chatKey)
+      : null;
 
     // 上下文统计
     const tenMinAgo = Date.now() - 600000;
@@ -483,6 +583,7 @@ export class Orchestrator {
       proactive,
       contextLimit,
       tierInfo,
+      thread,
       session
     });
 
@@ -524,6 +625,13 @@ export class Orchestrator {
       return true;
     });
     const openAiTools = toOpenAiTools(toolDefs);
+    const promptPrefixHash = crypto.createHash('sha256')
+      .update(systemPrompt)
+      .update('\0')
+      .update(JSON.stringify(openAiTools))
+      .digest('hex');
+    session.promptLayout = 'stable-prefix-v2';
+    session.promptPrefixHash = promptPrefixHash;
 
     const ctx = {
       chatKey, kind, chatId,
@@ -559,18 +667,40 @@ export class Orchestrator {
       }
       markActivity('正在思考…');
       // 网络抖动/5xx/429 会自动重试（同一轮请求，messages 不变，幂等不重复发言）
-      const response = await chatCompletionWithRetry({ messages, tools: openAiTools, signal });
+      const response = await chatCompletionWithRetry({
+        messages,
+        tools: openAiTools,
+        signal,
+        cacheKey: `qq-agent:${promptPrefixHash.slice(0, 32)}`
+      });
       signal.throwIfAborted();
       session.model = response.model || session.model;
       addUsage(session.usage, response.usage);
       session.usage.calls += 1;
+      const promptTokens = Number(response.usage?.prompt_tokens) || 0;
+      const cachedTokens = Number(
+        response.usage?.prompt_tokens_details?.cached_tokens
+        ?? response.usage?.prompt_cache_hit_tokens
+        ?? response.usage?.cached_tokens
+      ) || 0;
+      session.callUsage ||= [];
+      session.callUsage.push({
+        round: round + 1,
+        promptTokens,
+        cachedTokens: Math.min(promptTokens, cachedTokens),
+        cacheHitRate: promptTokens ? Math.min(1, cachedTokens / promptTokens) : 0
+      });
 
       const msg = response.message;
       const finalContent = typeof msg.content === 'string' ? msg.content : (msg.content ?? null);
+      const reasoningContent = typeof msg.reasoning_content === 'string'
+        ? msg.reasoning_content
+        : null;
       const finalToolCalls = Array.isArray(msg.tool_calls) && msg.tool_calls.length ? msg.tool_calls : undefined;
       const assistantEntry = {
         role: 'assistant',
         content: finalContent,
+        ...(reasoningContent ? { reasoning_content: reasoningContent } : {}),
         tool_calls: finalToolCalls,
         raw: response.raw ?? null
       };

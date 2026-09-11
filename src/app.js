@@ -143,13 +143,19 @@ export function createApp({ log = console.log } = {}) {
     try {
       const msg = await onebot.getMsg(messageId);
       const senderName = msg?.sender?.card || msg?.sender?.nickname || '';
+      const senderId = String(msg?.sender?.user_id ?? msg?.user_id ?? '');
       let text = '';
       if (Array.isArray(msg?.message)) {
         text = msg.message.map((s) => (s.type === 'text' ? s.data?.text ?? '' : `[${s.type}]`)).join('').trim();
       } else if (typeof msg?.message === 'string') {
         text = msg.message;
       }
-      return { sender: String(senderName), text: String(text).slice(0, 120) };
+      return {
+        messageId: String(messageId),
+        sender: String(senderName),
+        senderId,
+        text: String(text).slice(0, 120)
+      };
     } catch {
       return null;
     }
@@ -170,9 +176,16 @@ export function createApp({ log = console.log } = {}) {
     const media = segments ? extractMediaFromSegments(segments) : [];
 
     let text;
+    let reply = null;
     if (segments) {
+      const replySegment = segments.find((segment) => segment?.type === 'reply' && segment?.data?.id != null);
+      if (replySegment) reply = await resolveReply(replySegment.data.id);
       text = await segmentsToText(segments, {
-        resolveReply: (mid) => resolveReply(mid),
+        resolveReply: (mid) => (
+          reply && String(reply.messageId) === String(mid)
+            ? reply
+            : resolveReply(mid)
+        ),
         resolveAtName: (qq) => kind === 'group' ? resolveAtName(id, qq) : null
       });
     } else {
@@ -205,6 +218,7 @@ export function createApp({ log = console.log } = {}) {
       senderId,
       senderName,
       text: text || '[图片]' ,
+      reply,
       media
     };
     const stored = isSelf ? store.appendSelf(`${kind}:${id}`, message) : store.appendIncoming(`${kind}:${id}`, message);
@@ -1175,6 +1189,14 @@ export function createApp({ log = console.log } = {}) {
         const chatKey = `${chatWakeMatch[1]}:${chatWakeMatch[2]}`;
         const ok = orchestrator.forceWake(chatKey);
         return json(res, 200, { ok });
+      }
+
+      const chatThreadMatch = /^\/api\/chats\/(group|private)_(\d+)\/thread$/.exec(pathname);
+      if (chatThreadMatch && method === 'DELETE') {
+        const chatKey = `${chatThreadMatch[1]}:${chatThreadMatch[2]}`;
+        const closed = store.closeConversationThread(chatKey, 'operator');
+        emit('chat-update', chatKey);
+        return json(res, 200, { ok: true, closed });
       }
 
       // 手动发一条测试消息（不走模型，直接经 OneBot 发出，用于配置后验证链路）

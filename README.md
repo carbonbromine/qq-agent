@@ -105,6 +105,8 @@ bash -n deploy.sh manage.sh
 ```
 
 详细说明见 [Linux 运维手册](docs/LINUX.md)。
+试验分支的持久化对话线程见
+[Threaded Conversation Pilot](docs/THREADED_PILOT.md)。
 
 ## 许可
 

@@ -129,6 +129,13 @@ export const DEFAULT_CONFIG = {
   maxBatchWaitMs: 20000,
   runtime: { mode: 'observe', paused: false },
   maxConcurrentRuns: 2,     // 全局同时进行的 agent 运行数
+  // 对话线程试点：默认关闭，可从控制台动态切换，不影响旧触发模式。
+  conversation: {
+    mode: 'legacy',                  // legacy | threaded
+    continuationWindowMs: 180000,    // 机器人发言后，同一参与者确定性续接窗口
+    threadTtlMs: 1800000,            // 线程空闲多久后关闭
+    continuationContextCount: 100    // 续接唤醒时携带的历史消息条数
+  },
   // 发送保护
   send: {
     minGapMs: 1000,         // 相邻两条消息最小间隔
@@ -283,6 +290,9 @@ export function getConfig() {
 export function updateConfig(patch) {
   const next = migrateConfig(deepMerge(getConfig(), patch));
   if (!['observe', 'active'].includes(next.runtime?.mode)) throw new Error('Invalid runtime mode');
+  if (!['legacy', 'threaded'].includes(next.conversation?.mode)) {
+    throw new Error('Invalid conversation mode');
+  }
   if (!Number.isInteger(Number(next.server?.port)) || next.server.port < 1 || next.server.port > 65535) {
     throw new Error('Invalid server port');
   }

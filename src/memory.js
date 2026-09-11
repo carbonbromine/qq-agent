@@ -162,8 +162,11 @@ export class MemoryStore {
           version: 1,
           topic: activeTopic,
           summary: pendingThought || activeTopic,
+          hypotheses: [],
+          evidence: [],
           facts: [],
           decisions: [],
+          rejectedDirections: [],
           openQuestions: [],
           nextStep: pendingThought,
           participantIds: [],
@@ -217,8 +220,11 @@ export class MemoryStore {
       version: 1,
       topic: cleanText(raw.topic, 200),
       summary: cleanText(raw.summary, 1200),
+      hypotheses: cleanList(raw.hypotheses, 6, 300),
+      evidence: cleanList(raw.evidence, 8, 300),
       facts: cleanList(raw.facts, 8, 240),
       decisions: cleanList(raw.decisions, 6, 240),
+      rejectedDirections: cleanList(raw.rejectedDirections, 6, 240),
       openQuestions: cleanList(raw.openQuestions, 6, 240),
       nextStep: cleanText(raw.nextStep, 400),
       participantIds: cleanList(raw.participantIds, 16, 40),
@@ -240,9 +246,9 @@ export class MemoryStore {
     const now = Date.now();
     const configuredTtl = Number(getConfig().memory?.handoffTtlMinutes) || 1440;
     const ttlMinutes = Math.min(10080, Math.max(5, Number(state.ttlMinutes) || configuredTtl));
-    const pickList = (key, maxItems) => Array.isArray(state[key])
-      ? cleanList(state[key], maxItems, 240)
-      : cleanList(previous[key], maxItems, 240);
+    const pickList = (key, maxItems, maxChars = 240) => Array.isArray(state[key])
+      ? cleanList(state[key], maxItems, maxChars)
+      : cleanList(previous[key], maxItems, maxChars);
     const participantIds = cleanList([
       ...(previous.participantIds || []),
       ...(Array.isArray(state.participantIds) ? state.participantIds : []),
@@ -252,8 +258,11 @@ export class MemoryStore {
       version: 1,
       topic: cleanText(state.topic ?? previous.topic, 200),
       summary: cleanText(state.summary ?? meta.summary ?? previous.summary, 1200),
+      hypotheses: pickList('hypotheses', 6, 300),
+      evidence: pickList('evidence', 8, 300),
       facts: pickList('facts', 8),
       decisions: pickList('decisions', 6),
+      rejectedDirections: pickList('rejectedDirections', 6),
       openQuestions: pickList('openQuestions', 6),
       nextStep: cleanText(state.nextStep ?? previous.nextStep, 400),
       participantIds,
@@ -262,8 +271,9 @@ export class MemoryStore {
       updatedAt: now,
       expiresAt: now + ttlMinutes * 60 * 1000
     };
-    const meaningful = handoff.topic || handoff.summary || handoff.facts.length
-      || handoff.decisions.length || handoff.openQuestions.length
+    const meaningful = handoff.topic || handoff.summary || handoff.hypotheses.length
+      || handoff.evidence.length || handoff.facts.length || handoff.decisions.length
+      || handoff.rejectedDirections.length || handoff.openQuestions.length
       || handoff.nextStep || handoff.lastReply;
     if (!meaningful) return previous.version ? previous : null;
     writeJson(handoffFile(chatKey), handoff);
@@ -285,8 +295,11 @@ export class MemoryStore {
     ];
     if (handoff.topic) lines.push(`- 当前话题：${handoff.topic}`);
     if (handoff.summary) lines.push(`- 已知上下文：${handoff.summary}`);
+    if (handoff.hypotheses.length) lines.push(`- 待验证假设：${handoff.hypotheses.join('；')}`);
+    if (handoff.evidence.length) lines.push(`- 关键证据：${handoff.evidence.join('；')}`);
     if (handoff.facts.length) lines.push(`- 已确认事实：${handoff.facts.join('；')}`);
     if (handoff.decisions.length) lines.push(`- 已作决定：${handoff.decisions.join('；')}`);
+    if (handoff.rejectedDirections.length) lines.push(`- 已排除方向：${handoff.rejectedDirections.join('；')}`);
     if (handoff.openQuestions.length) lines.push(`- 未解决问题：${handoff.openQuestions.join('；')}`);
     if (handoff.nextStep) lines.push(`- 下一步意图：${handoff.nextStep}`);
     if (handoff.lastReply) lines.push(`- 上次实际发言：${handoff.lastReply}`);

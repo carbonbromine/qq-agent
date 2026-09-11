@@ -950,14 +950,17 @@ function renderChatList() {
   box.innerHTML = state.chats.map((c) => {
     const name = formatChatTitle(c.key, chatNameOf(c.key));
     const isNew = !state.seenChatKeys.has(c.key);
+    const threadActive = state.config?.conversation?.mode === 'threaded'
+      && Number(c.thread?.engagedUntil) > Date.now();
     return `
       <div class="chat-item ${c.key === state.currentChatKey ? 'selected' : ''} ${c.unread ? 'unread-row' : ''} ${isNew ? 'new-item' : ''}" data-key="${c.key}">
         <div class="chat-item-title">
           <span class="session-chat">${esc(name)}</span>
+          ${threadActive ? '<span class="unread-pill">续接中</span>' : ''}
           ${c.unread ? `<span class="unread-pill">${c.unread}</span>` : ''}
         </div>
         <div class="chat-item-sub">${esc(c.lastText || '（空）')}</div>
-        <div class="session-meta"><span>${c.total} 条 · 失败 ${c.failed || 0} · 待确认 ${c.held || 0}</span><span>${fmtTime(c.lastTs)}</span></div>
+        <div class="session-meta"><span>${c.total} 条 · 失败 ${c.failed || 0} · 待确认 ${c.held || 0}${c.thread ? ` · 线程 v${c.thread.version}` : ''}</span><span>${fmtTime(c.lastTs)}</span></div>
       </div>`;
   }).join('') || '<div class="list-head muted">还没有消息存档（等白名单里的群/好友来消息）</div>';
   for (const c of state.chats) state.seenChatKeys.add(c.key);
@@ -1040,6 +1043,7 @@ function renderChatMessages() {
       <button class="btn btn-small" id="chat-read-btn">全部标为已读</button>
       <button class="btn btn-small" id="chat-retry-btn">重试失败批次</button>
       <button class="btn btn-small" id="chat-resolve-btn">确认发送结果</button>
+      <button class="btn btn-small" id="chat-thread-close-btn" ${meta.thread ? '' : 'disabled'}>结束对话线程</button>
       <input type="text" id="test-send-text" placeholder="手动发一条测试消息" style="flex:1" />
       <button class="btn btn-small" id="chat-testsend-btn">发送</button>
     </div>
@@ -1066,6 +1070,11 @@ function renderChatMessages() {
     if (!confirm('已核对 QQ 中的实际发送结果？确认后将结束待确认批次，不会重发。')) return;
     await api(`/api/chats/${key.replace(':', '_')}/resolve-held`, { method: 'POST', body: '{"confirm":true}' });
     loadChats();
+  });
+  $('#chat-thread-close-btn')?.addEventListener('click', async () => {
+    if (!confirm('结束当前对话线程？后续普通消息将重新遵循响应档位。')) return;
+    await api(`/api/chats/${key.replace(':', '_')}/thread`, { method: 'DELETE', body: '{}' });
+    await loadChats();
   });
   $('#chat-testsend-btn').addEventListener('click', async () => {
     const input = $('#test-send-text');
@@ -1732,13 +1741,18 @@ async function loadMemoryDetail(chatKey) {
           </div>
           <div class="field"><label>已知上下文</label><textarea id="mh-summary" maxlength="1200">${esc(handoff?.summary || '')}</textarea></div>
           <div class="field-row">
+            <div class="field"><label>待验证假设（一行一条）</label><textarea id="mh-hypotheses">${esc(listText(handoff?.hypotheses))}</textarea></div>
+            <div class="field"><label>关键证据（一行一条）</label><textarea id="mh-evidence">${esc(listText(handoff?.evidence))}</textarea></div>
+          </div>
+          <div class="field-row">
             <div class="field"><label>已确认事实（一行一条）</label><textarea id="mh-facts">${esc(listText(handoff?.facts))}</textarea></div>
             <div class="field"><label>已作决定（一行一条）</label><textarea id="mh-decisions">${esc(listText(handoff?.decisions))}</textarea></div>
           </div>
           <div class="field-row">
+            <div class="field"><label>已排除方向（一行一条）</label><textarea id="mh-rejected">${esc(listText(handoff?.rejectedDirections))}</textarea></div>
             <div class="field"><label>未解决问题（一行一条）</label><textarea id="mh-questions">${esc(listText(handoff?.openQuestions))}</textarea></div>
-            <div class="field"><label>下一步意图</label><textarea id="mh-next-step" maxlength="400">${esc(handoff?.nextStep || '')}</textarea></div>
           </div>
+          <div class="field"><label>下一步意图</label><textarea id="mh-next-step" maxlength="400">${esc(handoff?.nextStep || '')}</textarea></div>
           <div class="memory-handoff-actions">
             <span id="mh-status" class="muted">${handoffMeta}</span>
             <button class="btn btn-danger" id="mh-clear" ${handoff ? '' : 'disabled'}>清除</button>
@@ -1803,8 +1817,11 @@ async function loadMemoryDetail(chatKey) {
           body: JSON.stringify({
             topic: ($('#mh-topic')?.value || '').trim(),
             summary: ($('#mh-summary')?.value || '').trim(),
+            hypotheses: lines('#mh-hypotheses'),
+            evidence: lines('#mh-evidence'),
             facts: lines('#mh-facts'),
             decisions: lines('#mh-decisions'),
+            rejectedDirections: lines('#mh-rejected'),
             openQuestions: lines('#mh-questions'),
             nextStep: ($('#mh-next-step')?.value || '').trim(),
             ttlMinutes: Number($('#mh-ttl')?.value) || 1440
@@ -2959,7 +2976,8 @@ const TIER_HINT = {
 };
 
 function renderChatSection(c) {
-    const st = c.store || {};
+  const st = c.store || {};
+  const conversation = c.conversation || {};
   // 滑条位置是唯一真相；档位与概率都由它派生（与后端 tier-slider.js 同一套规则）
   const sliderPos = sliderToTierUI_tierToSlider(st);
   const { tier: curTier, randomPercent: curPct } = sliderToTierUI(sliderPos);
@@ -2974,6 +2992,16 @@ return `
       <div class="field"><label>批次间隔（毫秒）—— 上轮结束到下轮处理的间隔</label><input type="number" id="cfg-draindelay" min="0" value="${esc(c.drainDelayMs)}" /></div>
       <div class="field"><label>同时处理几个会话</label><input type="number" id="cfg-maxruns" min="1" max="8" value="${esc(c.maxConcurrentRuns)}" /></div>
     </div>
+
+    <h3>对话连续性试点</h3>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-threaded" ${conversation.mode === 'threaded' ? 'checked' : ''} />
+      <label for="cfg-threaded">启用持久化对话线程</label></div>
+    <div class="field-row">
+      <div class="field"><label>确定性续接窗口（秒）</label><input type="number" id="cfg-cont-window" min="10" max="1800" value="${esc(Math.round((conversation.continuationWindowMs ?? 180000) / 1000))}" /></div>
+      <div class="field"><label>线程空闲过期（分钟）</label><input type="number" id="cfg-thread-ttl" min="5" max="1440" value="${esc(Math.round((conversation.threadTtlMs ?? 1800000) / 60000))}" /></div>
+      <div class="field"><label>续接时读取历史条数</label><input type="number" id="cfg-cont-history" min="1" max="500" value="${esc(conversation.continuationContextCount ?? 100)}" /></div>
+    </div>
+    <div class="hint">开启后，机器人发言后的窗口内，同一参与者继续发言或有人引用机器人时会确定性唤醒模型；模型仍可决定不回复。关闭后立即恢复旧的档位/概率逻辑。</div>
 
     <h3>发送保护</h3>
     <div class="field-row">
@@ -4465,6 +4493,22 @@ async function saveConfig({ quiet = false } = {}) {
     patch.wakeDelayMs = Number(val('#cfg-wakedelay', c.wakeDelayMs)) || 2000;
     patch.drainDelayMs = Number(val('#cfg-draindelay', c.drainDelayMs)) || 1200;
     patch.maxConcurrentRuns = Number(val('#cfg-maxruns', c.maxConcurrentRuns)) || 2;
+    patch.conversation = {
+      ...(c.conversation || {}),
+      mode: chk('#cfg-threaded', c.conversation?.mode === 'threaded') ? 'threaded' : 'legacy',
+      continuationWindowMs: clampInt(
+        val('#cfg-cont-window', (c.conversation?.continuationWindowMs ?? 180000) / 1000),
+        10, 1800, 180
+      ) * 1000,
+      threadTtlMs: clampInt(
+        val('#cfg-thread-ttl', (c.conversation?.threadTtlMs ?? 1800000) / 60000),
+        5, 1440, 30
+      ) * 60000,
+      continuationContextCount: clampInt(
+        val('#cfg-cont-history', c.conversation?.continuationContextCount),
+        1, 500, 100
+      )
+    };
     patch.send = {
       ...c.send,
       minGapMs: Number(val('#cfg-mingap', c.send?.minGapMs)) || 1000,

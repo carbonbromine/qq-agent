@@ -503,12 +503,24 @@ export function buildToolDefs() {
     },
     {
       name: 'finish',
-      description: '明确结束本次处理，并把下一次新会话需要的工作状态交接下去。summary 写本轮结论；话题还会继续时补充 topic/facts/decisions/openQuestions/nextStep，只写可验证结论和待办，不写隐含推理过程。话题已经完成且旧交接不再有用时设 clearHandoff=true。不调用也可以，直接结束文本输出同样代表结束。',
+      description: '明确结束本次处理，并把下一次新会话需要的工作状态交接下去。summary 写本轮结论；话题还会继续时补充 topic/hypotheses/evidence/facts/decisions/rejectedDirections/openQuestions/nextStep。只写简洁、可检查的状态，不写逐步隐藏思维。话题已经完成且旧交接不再有用时设 clearHandoff=true。不调用也可以，直接结束文本输出同样代表结束。',
       parameters: {
         type: 'object',
         properties: {
           summary: { type: 'string', description: '本轮结论或不回复的原因（不会发送到 QQ）' },
           topic: { type: 'string', description: '仍在继续的当前话题；没有持续话题可省略' },
+          hypotheses: {
+            type: 'array',
+            items: { type: 'string' },
+            maxItems: 6,
+            description: '尚未确认、下一轮仍需验证的工作假设'
+          },
+          evidence: {
+            type: 'array',
+            items: { type: 'string' },
+            maxItems: 8,
+            description: '支持或反驳假设的关键观察、消息或工具结果'
+          },
           facts: {
             type: 'array',
             items: { type: 'string' },
@@ -519,7 +531,13 @@ export function buildToolDefs() {
             type: 'array',
             items: { type: 'string' },
             maxItems: 6,
-            description: '已经作出的决定或已排除的方向'
+            description: '已经作出的决定'
+          },
+          rejectedDirections: {
+            type: 'array',
+            items: { type: 'string' },
+            maxItems: 6,
+            description: '已经验证无效、不应在下一轮重复尝试的方向'
           },
           openQuestions: {
             type: 'array',
@@ -545,7 +563,10 @@ export function buildToolDefs() {
         const summary = String(args.summary ?? '').replace(/\s+/g, ' ').trim().slice(0, 300);
         if (!summary) return err('summary 不能为空');
         const draft = { summary };
-        for (const key of ['topic', 'facts', 'decisions', 'openQuestions', 'nextStep', 'ttlMinutes', 'clearHandoff']) {
+        for (const key of [
+          'topic', 'hypotheses', 'evidence', 'facts', 'decisions',
+          'rejectedDirections', 'openQuestions', 'nextStep', 'ttlMinutes', 'clearHandoff'
+        ]) {
           if (Object.hasOwn(args, key)) draft[key] = args[key];
         }
         ctx.session.finishReason = summary;

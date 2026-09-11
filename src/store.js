@@ -14,6 +14,30 @@ function entry(row) {
   };
 }
 
+function threadEntry(row) {
+  if (!row) return null;
+  let participantIds = [];
+  try {
+    participantIds = JSON.parse(row.participant_ids || '[]').map(String);
+  } catch { /* keep empty */ }
+  return {
+    chatKey: row.chat_key,
+    threadId: row.thread_id,
+    state: row.state,
+    topic: row.topic || '',
+    participantIds,
+    openedAt: Number(row.opened_at) || 0,
+    updatedAt: Number(row.updated_at) || 0,
+    lastHumanAt: Number(row.last_human_at) || 0,
+    lastAgentAt: Number(row.last_agent_at) || 0,
+    engagedUntil: Number(row.engaged_until) || 0,
+    expiresAt: Number(row.expires_at) || 0,
+    lastMessageId: Number(row.last_message_id) || 0,
+    version: Number(row.version) || 1,
+    closeReason: row.close_reason || ''
+  };
+}
+
 export class ChatStore {
   constructor(maxPerChat = 0, { dataDir = DATA_DIR, filename } = {}) {
     this.maxPerChat = Math.max(0, Number(maxPerChat) || 0);
@@ -42,6 +66,25 @@ export class ChatStore {
         id TEXT PRIMARY KEY, run_id TEXT, chat_key TEXT NOT NULL,
         state TEXT NOT NULL, payload TEXT NOT NULL, message_id TEXT, error TEXT
       );
+      CREATE TABLE IF NOT EXISTS conversation_threads (
+        chat_key TEXT PRIMARY KEY, thread_id TEXT NOT NULL, state TEXT NOT NULL,
+        topic TEXT NOT NULL DEFAULT '', participant_ids TEXT NOT NULL DEFAULT '[]',
+        opened_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        last_human_at INTEGER NOT NULL DEFAULT 0, last_agent_at INTEGER NOT NULL DEFAULT 0,
+        engaged_until INTEGER NOT NULL DEFAULT 0, expires_at INTEGER NOT NULL DEFAULT 0,
+        last_message_id INTEGER NOT NULL DEFAULT 0, version INTEGER NOT NULL DEFAULT 1,
+        close_reason TEXT
+      );
+      CREATE INDEX IF NOT EXISTS conversation_threads_expiry
+        ON conversation_threads(state, expires_at);
+      CREATE TABLE IF NOT EXISTS thread_checkpoints (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, thread_id TEXT NOT NULL,
+        chat_key TEXT NOT NULL, run_id TEXT, version INTEGER NOT NULL,
+        state_json TEXT NOT NULL, source_message_ids TEXT NOT NULL DEFAULT '[]',
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS thread_checkpoints_lookup
+        ON thread_checkpoints(chat_key, thread_id, version DESC);
       CREATE TABLE IF NOT EXISTS migrations (name TEXT PRIMARY KEY);
     `);
     this.#importJson(dataDir);
@@ -124,10 +167,20 @@ export class ChatStore {
     const uncertain = this.db.prepare(`SELECT COUNT(DISTINCT COALESCE(run_id,id)) AS held
       FROM outbox WHERE chat_key=? AND state IN ('sending','unknown')`).get(chatKey).held;
     const last = this.db.prepare('SELECT ts,text FROM messages WHERE chat_key=? ORDER BY id DESC LIMIT 1').get(chatKey);
+    const thread = this.getConversationThread(chatKey);
     const { heldMessages, ...rest } = counts;
     return {
       chatKey, ...rest, held: Math.max(Number(heldMessages) || 0, Number(uncertain) || 0),
-      lastTs: last?.ts || 0, lastText: last?.text || ''
+      lastTs: last?.ts || 0, lastText: last?.text || '',
+      thread: thread ? {
+        threadId: thread.threadId,
+        state: thread.state,
+        topic: thread.topic,
+        participantCount: thread.participantIds.length,
+        engagedUntil: thread.engagedUntil,
+        expiresAt: thread.expiresAt,
+        version: thread.version
+      } : null
     };
   }
 
@@ -251,6 +304,124 @@ export class ChatStore {
     this.db.prepare('UPDATE outbox SET state=?,message_id=?,error=? WHERE id=?')
       .run(error ? 'unknown' : 'sent', messageId == null ? null : String(messageId),
         error ? String(error).slice(0, 1000) : null, id);
+  }
+
+  getConversationThread(chatKey, now = Date.now()) {
+    const row = this.db.prepare('SELECT * FROM conversation_threads WHERE chat_key=?').get(chatKey);
+    if (!row) return null;
+    if (row.state !== 'closed' && Number(row.expires_at) > 0 && Number(row.expires_at) <= now) {
+      this.db.prepare(`UPDATE conversation_threads SET state='closed',close_reason='expired',
+        updated_at=?,version=version+1 WHERE chat_key=?`).run(now, chatKey);
+      return null;
+    }
+    return row.state === 'closed' ? null : threadEntry(row);
+  }
+
+  upsertConversationThread(chatKey, {
+    participantIds = [],
+    topic = '',
+    lastMessageId = 0,
+    lastHumanAt = 0,
+    lastAgentAt = Date.now(),
+    continuationWindowMs = 180000,
+    ttlMs = 1800000
+  } = {}) {
+    return this.#transaction(() => {
+      const now = Date.now();
+      const existing = this.getConversationThread(chatKey, now);
+      const participants = [...new Set([
+        ...(existing?.participantIds || []),
+        ...(Array.isArray(participantIds) ? participantIds : [])
+      ].map((id) => String(id).trim()).filter(Boolean))].slice(0, 32);
+      const thread = {
+        chatKey,
+        threadId: existing?.threadId || crypto.randomUUID(),
+        state: 'engaged',
+        topic: String(topic || existing?.topic || '').replace(/\s+/g, ' ').trim().slice(0, 200),
+        participantIds: participants,
+        openedAt: existing?.openedAt || now,
+        updatedAt: now,
+        lastHumanAt: Math.max(Number(lastHumanAt) || 0, existing?.lastHumanAt || 0),
+        lastAgentAt: Number(lastAgentAt) || now,
+        engagedUntil: now + Math.max(1000, Number(continuationWindowMs) || 180000),
+        expiresAt: now + Math.max(60000, Number(ttlMs) || 1800000),
+        lastMessageId: Math.max(Number(lastMessageId) || 0, existing?.lastMessageId || 0),
+        version: (existing?.version || 0) + 1,
+        closeReason: ''
+      };
+      this.db.prepare(`INSERT INTO conversation_threads
+        (chat_key,thread_id,state,topic,participant_ids,opened_at,updated_at,last_human_at,
+         last_agent_at,engaged_until,expires_at,last_message_id,version,close_reason)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(chat_key) DO UPDATE SET
+          thread_id=excluded.thread_id,state=excluded.state,topic=excluded.topic,
+          participant_ids=excluded.participant_ids,opened_at=excluded.opened_at,
+          updated_at=excluded.updated_at,last_human_at=excluded.last_human_at,
+          last_agent_at=excluded.last_agent_at,engaged_until=excluded.engaged_until,
+          expires_at=excluded.expires_at,last_message_id=excluded.last_message_id,
+          version=excluded.version,close_reason=excluded.close_reason`)
+        .run(
+          thread.chatKey, thread.threadId, thread.state, thread.topic,
+          JSON.stringify(thread.participantIds), thread.openedAt, thread.updatedAt,
+          thread.lastHumanAt, thread.lastAgentAt, thread.engagedUntil,
+          thread.expiresAt, thread.lastMessageId, thread.version, thread.closeReason
+        );
+      return thread;
+    });
+  }
+
+  closeConversationThread(chatKey, reason = 'closed') {
+    return this.db.prepare(`UPDATE conversation_threads SET state='closed',close_reason=?,
+      updated_at=?,version=version+1 WHERE chat_key=? AND state!='closed'`)
+      .run(String(reason).slice(0, 100), Date.now(), chatKey).changes > 0;
+  }
+
+  appendThreadCheckpoint(chatKey, threadId, runId, state, sourceMessageIds = []) {
+    const thread = this.db.prepare(`SELECT version FROM conversation_threads
+      WHERE chat_key=? AND thread_id=? AND state!='closed'`).get(chatKey, threadId);
+    if (!thread) return null;
+    const createdAt = Date.now();
+    const result = this.db.prepare(`INSERT INTO thread_checkpoints
+      (thread_id,chat_key,run_id,version,state_json,source_message_ids,created_at)
+      VALUES (?,?,?,?,?,?,?)`).run(
+        threadId, chatKey, runId || null, Number(thread.version) || 1,
+        JSON.stringify(state || {}),
+        JSON.stringify((sourceMessageIds || []).map(Number).filter(Number.isFinite)),
+        createdAt
+      );
+    this.db.prepare(`DELETE FROM thread_checkpoints WHERE chat_key=? AND id NOT IN (
+      SELECT id FROM thread_checkpoints WHERE chat_key=? ORDER BY id DESC LIMIT 200
+    )`).run(chatKey, chatKey);
+    return {
+      id: Number(result.lastInsertRowid),
+      threadId,
+      chatKey,
+      runId: runId || null,
+      version: Number(thread.version) || 1,
+      state: structuredClone(state || {}),
+      sourceMessageIds: (sourceMessageIds || []).map(Number).filter(Number.isFinite),
+      createdAt
+    };
+  }
+
+  latestThreadCheckpoint(chatKey) {
+    const row = this.db.prepare(`SELECT * FROM thread_checkpoints
+      WHERE chat_key=? ORDER BY id DESC LIMIT 1`).get(chatKey);
+    if (!row) return null;
+    let state = {};
+    let sourceMessageIds = [];
+    try { state = JSON.parse(row.state_json || '{}'); } catch { /* keep empty */ }
+    try { sourceMessageIds = JSON.parse(row.source_message_ids || '[]'); } catch { /* keep empty */ }
+    return {
+      id: Number(row.id),
+      threadId: row.thread_id,
+      chatKey: row.chat_key,
+      runId: row.run_id,
+      version: Number(row.version) || 1,
+      state,
+      sourceMessageIds,
+      createdAt: Number(row.created_at) || 0
+    };
   }
 
   recent(chatKey, { limit = 80, offset = 0, includeSelf = true, readOnly = false } = {}) {

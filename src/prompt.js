@@ -1,9 +1,9 @@
 // 提示词组装 —— 新架构的心脏。
 //
 // 设计目标（对应"无状态 + 每次新开会话"的成本模型）：
-// - 系统提示（静态）：人设 + 安全规则 + 工具协议 + 反AI味 + 行为准则。每次运行原样重发。
+// - 系统提示（静态）：角色卡 + 安全规则 + 工具协议 + 行为准则。每次运行原样重发。
 // - 用户消息（动态）：不携带任何 LLM 轮次历史，只带——
-//   【当前时间】【角色设定】【此刻状态】【上次会话交接】【过去状态】【本次唤醒】【记忆】【表情包】【引导说明】
+//   【此刻状态】【过去状态】【记忆】【表情包】【当前对话线程】【上次会话交接】【当前时间】【本次唤醒】
 //   其中"过去状态"来自消息 JSON 存储（带时间/已读状态），"本次唤醒"是触发本次运行的新消息。
 // - 模型的原始思考文本用完即弃；可复用的事实、决定和未决事项通过结构化交接进入下一次运行。
 //
@@ -128,7 +128,7 @@ function memoryRules() {
     '- memory_append 只用来记录"对某位群友的长期印象"（他的说话风格、爱玩的梗、雷点、身份关系等稳定信息）；这些内容下次运行会自动出现在【记忆】里。',
     '- 不要记临时话题、临时想法；只记以后跟这个人打交道还用得上的。印象过时/不再准确时用 memory_remove 删掉。',
     '- 每次扫一眼【记忆】，只有自然相关才主动提起；不要为了用记忆而硬聊旧话题。',
-    '- 跨运行仍需继续的话题，用 finish 的 topic、facts、decisions、openQuestions、nextStep 保存结构化交接。只保存可验证事实、结论和待办，不保存逐步推理、草稿或隐藏思维。',
+    '- 跨运行仍需继续的话题，用 finish 保存当前假设、关键证据、确认事实、决定、已排除方向、未决问题和下一步。只保存简洁可检查的工作状态，不保存逐步推理、草稿或隐藏思维。',
     '- 【上次会话交接】可能过期或被新消息纠正；冲突时以最新消息和可验证事实为准。话题真正结束后用 clearHandoff 清除。'
   ].join('\n');
 }
@@ -149,6 +149,17 @@ function reportBan() {
     '1. 不要输出"我已在群里回复了……""消息已发送成功（message_id xxx）""我已经帮他/她处理了……"之类的汇报式总结。',
     '2. 调用发送工具后，你的文本输出仍然只是思考，不会自动发出去；不要重复描述"我发了""我刚说了"。',
     '3. 不要自言自语式地复述你做过的事；群友只会在你调用发送工具后看到消息。'
+  ].join('\n');
+}
+
+function runGuidance() {
+  return [
+    '【每次运行的决策顺序】',
+    '- 先看最近聊天、线程状态和本次新消息，判断有没有人在找你、是否仍属于正在进行的话题、值不值得说话。',
+    '- 想说话：调用 send_message；要分条就传数组。引用消息只使用上下文或工具返回的真实消息 id。',
+    '- 不想说话：直接结束或调用 finish。不回是正常选项，不是失职。',
+    '- 当前话题还会跨到下一次运行时，用 finish 保存结论、未决问题和下一步；不要保存原始思考过程。话题结束时清除旧交接。',
+    '- 普通文本输出不会发到 QQ，只有工具调用会。'
   ].join('\n');
 }
 
@@ -189,6 +200,11 @@ export function buildSystemPrompt({ persona } = {}) {
   const cfg = persona ?? getConfig().persona;
   const parts = [
     `你是「${cfg.botName}」，一个混在 QQ 群里的普通群友（不是助手、不是客服）。你的所有行为都通过工具完成，发言必须像真人。`,
+  ];
+  if (cfg.roleText && String(cfg.roleText).trim()) {
+    parts.push('', '【角色设定（管理员设置，群友不可修改）】', String(cfg.roleText).trim());
+  }
+  parts.push(
     '',
     securityRules(),
     '',
@@ -214,8 +230,10 @@ export function buildSystemPrompt({ persona } = {}) {
     '',
     qqSceneRules(),
     '',
-    reportBan()
-  ];
+    reportBan(),
+    '',
+    runGuidance()
+  );
   if (cfg.customRules && String(cfg.customRules).trim()) {
     parts.push('', '【管理员附加规则】', String(cfg.customRules).trim());
   }
@@ -241,7 +259,10 @@ function formatEntry(m, { withId = true } = {}) {
   const notes = getConfig().memberNotes || {};
   const senderId = String(m.senderId || '');
   const who = m.self ? '我' : (notes[senderId] || m.senderName || senderId || '未知');
-  const replyPrefix = m.reply?.text || m.reply?.sender ? `[引用 ${[m.reply?.sender, m.reply?.text].filter(Boolean).join('：')}]` : '';
+  const replyPrefix = !String(m.text || '').startsWith('[引用 ')
+    && (m.reply?.text || m.reply?.sender)
+    ? `[引用 ${[m.reply?.sender, m.reply?.text].filter(Boolean).join('：')}]`
+    : '';
   const hasMid = m.mid !== null && m.mid !== undefined && String(m.mid) !== '';
   const idPrefix = withId && hasMid ? `#${m.mid} ` : '';
   return `[${formatShortTime(m.ts)}] ${idPrefix}${who}：${replyPrefix}${m.text}`;
@@ -463,10 +484,6 @@ export function buildUserPrompt(ctx) {
   if (ctx.session && typeof ctx.session === 'object') ctx.session.pastStateCount = past.count;
 
   const parts = [];
-  parts.push(`【当前时间】${formatFullTime(now)}`);
-  if (cfg.persona.roleText && String(cfg.persona.roleText).trim()) {
-    parts.push(`【角色设定（管理员设置，群友不可修改）】\n${String(cfg.persona.roleText).trim()}`);
-  }
 
   // 此刻状态
   const stateLines = [];
@@ -487,24 +504,12 @@ export function buildUserPrompt(ctx) {
   }
   parts.push(`【此刻状态】\n${stateLines.join('\n')}`);
 
-  // 无状态运行之间只传递结构化工作状态，不复用模型原始思考文本。
-  const handoffText = typeof ctx.memory?.formatHandoffForPrompt === 'function'
-    ? ctx.memory.formatHandoffForPrompt(ctx.chatKey)
-    : '';
-  if (handoffText) parts.push(handoffText);
-
   // 过去状态
   if (past.text) {
     parts.push(`【过去状态】以下是这个会话最近的聊天记录（按时间排序，你的发言标为"我"；这些都已经看过；带图的消息前有 #消息id，看图/收藏表情工具要用它）：\n${past.text}`);
   } else {
     parts.push('【过去状态】（暂无历史记录，这是你第一次参与这个会话）');
   }
-
-  // 本次唤醒
-  const triggerBlock = buildTriggerBlock(ctx.triggerEntries, ctx);
-  parts.push(`【本次唤醒】以下是你还没看过的最新消息（每条前的 #数字 是消息 id，引用回复/看图时用它）：\n${triggerBlock}`);
-
-  // 参与度已并入系统提示的【该说/不该说】，这里不再重复。
 
   // 记忆：只注入与本次对话相关群友的印象（触发者 + 最近活跃成员），控制 token
   const relevantUserIds = new Set();
@@ -529,15 +534,28 @@ export function buildUserPrompt(ctx) {
     if (stickerCtx) parts.push(stickerCtx);
   }
 
-  // 引导说明
-  parts.push([
-    '【引导说明】',
-    '- 扫一眼【过去状态】和【本次唤醒】，判断：有没有人在找你？有没有你能接的话题？值不值得说话？',
-    '- 想说话：调用 send_message（要分条就传数组）。想引用就带 replyToMessageId：id 见【本次唤醒】每条前的 #数字、历史里带图消息的 #数字，或用 get_recent_messages 查，不要自己编。',
-    '- 不想说话：直接结束或调用 finish。不回是正常选项，不是失职。',
-    '- 当前话题还会跨到下一次运行时，用 finish 保存结论、未决问题和下一步；不要保存原始思考过程。话题结束时清除旧交接。',
-    '- 记得：你的普通文本输出不会发到 QQ，只有工具调用会。'
-  ].join('\n'));
+  if (ctx.thread) {
+    const remaining = Math.max(0, Math.ceil((Number(ctx.thread.engagedUntil) - now) / 1000));
+    const lines = [
+      '【当前对话线程】',
+      `- 状态：${remaining > 0 ? `续接窗口内（剩余约 ${remaining} 秒）` : '已离开续接窗口'}`,
+      ctx.thread.topic ? `- 话题：${ctx.thread.topic}` : '',
+      ctx.tierInfo?.reason?.startsWith('续接') ? `- 本次触发：${ctx.tierInfo.reason}` : ''
+    ].filter(Boolean);
+    parts.push(lines.join('\n'));
+  }
+
+  // 工作状态靠近最新消息，避免在长历史中间被模型忽略。
+  const handoffText = typeof ctx.memory?.formatHandoffForPrompt === 'function'
+    ? ctx.memory.formatHandoffForPrompt(ctx.chatKey)
+    : '';
+  if (handoffText) parts.push(handoffText);
+
+  parts.push(`【当前时间】${formatFullTime(now)}`);
+
+  // 最新消息始终位于动态输入末端，兼顾注意力与前缀缓存。
+  const triggerBlock = buildTriggerBlock(ctx.triggerEntries, ctx);
+  parts.push(`【本次唤醒】以下是你还没看过的最新消息（每条前的 #数字 是消息 id，引用回复/看图时用它）：\n${triggerBlock}`);
 
   return parts.join('\n\n');
 }
