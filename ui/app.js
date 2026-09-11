@@ -3246,7 +3246,7 @@ function renderDesktopSection(c) {
           placeholder="再次输入新 Token" /></div>
     </div>
     <div style="display:flex;gap:10px;align-items:center;margin-bottom:18px">
-      <button class="btn btn-small" id="change-console-token-btn">更新控制台 Token</button>
+      <button type="button" class="btn btn-small" id="change-console-token-btn">更新控制台 Token</button>
       <span class="hint" id="console-token-result">更新后旧 Token 和其他已登录会话立即失效。</span>
     </div>
     <h3>桌面端</h3>
