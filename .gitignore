@@ -48,3 +48,8 @@ release/
 # 本地环境变量（若以后用到）
 .env
 .env.local
+.deployment.json
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+coverage/

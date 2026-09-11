@@ -1,8 +1,8 @@
 {
   "name": "qq-agent",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": false,
-  "description": "QQ 群 AI 机器人（桌面版）：事件驱动的无状态 Agent，接 OpenAI 兼容 API，带会话式控制台。",
+  "description": "Linux-ready stateless QQ Agent with SQLite message leases and an isolated console.",
   "type": "module",
   "main": "electron/main.js",
   "build": {
@@ -44,12 +44,13 @@
     }
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.13.0"
   },
   "scripts": {
     "start": "electron .",
     "server": "node src/server.js",
-    "test": "node test/selftest.mjs && node test/render-test.mjs && node test/scroll-test.mjs && node test/usage-e2e.mjs",
+    "test": "node --test test/*.test.mjs && node test/test-prompt.mjs && node test/selftest.mjs && node test/render-test.mjs && node test/scroll-test.mjs && node test/usage-e2e.mjs",
+    "test:unit": "node --test test/*.test.mjs",
     "test:prompt": "node test/test-prompt.mjs",
     "test:render": "node test/render-test.mjs",
     "test:scroll": "node test/scroll-test.mjs",
@@ -61,7 +62,7 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
-    "electron": "^33.2.0",
+    "electron": "^39.0.0",
     "electron-builder": "^26.15.3"
   },
   "license": "MIT",
@@ -78,10 +79,10 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/Kondius/qq-agent.git"
+    "url": "https://github.com/carbonbromine/qq-agent.git"
   },
   "bugs": {
-    "url": "https://github.com/Kondius/qq-agent/issues"
+    "url": "https://github.com/carbonbromine/qq-agent/issues"
   },
-  "homepage": "https://github.com/Kondius/qq-agent#readme"
+  "homepage": "https://github.com/carbonbromine/qq-agent#readme"
 }

@@ -2,7 +2,10 @@
 import { createApp } from './app.js';
 
 process.on('unhandledRejection', (error) => console.error('[未处理异常]', error));
-process.on('uncaughtException', (error) => console.error('[未捕获异常]', error));
+process.on('uncaughtException', (error) => {
+  console.error('[未捕获异常]', error);
+  process.exit(1);
+});
 
 const app = createApp();
 app.start().catch((error) => {
@@ -10,8 +13,14 @@ app.start().catch((error) => {
   process.exit(1);
 });
 
-process.on('SIGINT', async () => {
-  console.log('退出中…');
-  await app.stop();
-  process.exit(0);
-});
+let stopping = false;
+async function shutdown() {
+  if (stopping) return;
+  stopping = true;
+  const deadline = setTimeout(() => process.exit(1), 25000);
+  deadline.unref();
+  try { await app.stop(); process.exit(0); }
+  catch (error) { console.error(error); process.exit(1); }
+}
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);

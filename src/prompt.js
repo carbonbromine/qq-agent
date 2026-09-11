@@ -75,7 +75,8 @@ function speakOrNot(participation) {
     `【该说/不该说】${style}`,
     '- 值得开口：有明确态度、新信息、能接住梗、和进行中话题/某人的记忆自然相关；群友聊到你感兴趣/能接的话题，即使没人 @ 你，也值得主动参与。',
     '- 不值得开口：只会复述/总结/附和；刚说过很多；话题已经翻篇；别人已经答得很好；你确实没兴趣。',
-    '- 被 @ 或直接提问必须回；没被叫但有话题也主动参与，但不要习惯性抢话。',
+    '- 被 @ 或直接提问时优先判断是否需要回应；有话题也可以主动参与，但没有必须发言的要求。',
+    '- 正常、直接、克制地交流，不使用夸张比喻，不无依据夸赞、吹捧或拔高别人。',
     '- 同一件事主动追问/发起最多 2 次；没人接或话题漂移就放下，不要硬拉回来。',
     '- 冷场且有具体生活念头时可以主动开口；没有就安静，不要用"有人吗""大家还在吗"这种气氛组话术。'
   ].join('\n');
@@ -383,10 +384,10 @@ export function resolveContextTier({ triggerEntries = [], selfNickname = '', bot
  */
 export function buildPastState(store, chatKey, { excludeIds = [], limit = null } = {}) {
   const cfg = getConfig().store;
-  const maxLimit = limit === null ? Math.max(1, Number(cfg.allCount) || 80) : Math.max(0, Number(limit) || 0);
+  const maxLimit = Math.min(300, limit === null ? Math.max(1, Number(cfg.allCount) || 300) : Math.max(0, Number(limit) || 0));
   const exclude = new Set(excludeIds);
   if (maxLimit <= 0) return { text: '', count: 0, messages: [] };
-  let messages = store.recent(chatKey, { limit: maxLimit + exclude.size }).filter((m) => !exclude.has(m.id));
+  let messages = store.recent(chatKey, { limit: maxLimit + exclude.size, readOnly: true }).filter((m) => !exclude.has(m.id));
   // 屏蔽名单兜底过滤：屏蔽生效前已存档的历史消息，也不能再进提示词。
   // 入口拦截只管"新消息"，这里管"老库存"。机器人自己的发言（self）不过滤。
   const [pKind, pId] = String(chatKey || '').split(':');
@@ -395,10 +396,20 @@ export function buildPastState(store, chatKey, { excludeIds = [], limit = null }
     if (blocked.size) messages = messages.filter((m) => m.self || !blocked.has(String(m.senderId)));
   }
   messages = messages.slice(-maxLimit);
-  const lines = messages.map((m) => formatEntry(m, { withId: (m.media || []).length > 0 }));
+  const maxChars = Math.min(24000, Math.max(100, Number(cfg.pastStateMaxChars) || 24000));
+  let remaining = maxChars;
+  const selected = [];
+  const lines = [];
+  for (const m of [...messages].reverse()) {
+    const line = formatEntry({ ...m, text: m.text.slice(0, 2000) }, { withId: true });
+    if (line.length + 1 > remaining) break;
+    remaining -= line.length + 1;
+    lines.unshift(line);
+    selected.unshift(m);
+  }
   // 一并把选中的消息返回：调用方要用它判定"记忆该带哪些群友"，
   // 避免模型看到历史里根本没出现的群友印象（那样显得莫名其妙）。
-  return { text: lines.join('\n'), count: lines.length, messages };
+  return { text: lines.join('\n'), count: lines.length, messages: selected };
 }
 
 function triggerLabels(entry, ctx) {

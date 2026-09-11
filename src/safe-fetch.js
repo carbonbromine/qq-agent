@@ -194,7 +194,7 @@ function readBounded(res, maxBytes, asText) {
 }
 
 // 使用已校验的 IP 发起请求（保留 Host/SNI），从根上消除 DNS rebinding。
-function requestOnce(url, ip, { asBinary = false, maxBytes = 50000 } = {}) {  return new Promise((resolve, reject) => {
+function requestOnce(url, ip, { asBinary = false, maxBytes = 50000, signal } = {}) {  return new Promise((resolve, reject) => {
     const mod = url.protocol === 'https:' ? https : http;
     const port = url.port || (url.protocol === 'https:' ? 443 : 80);
     const req = mod.request({
@@ -210,6 +210,7 @@ function requestOnce(url, ip, { asBinary = false, maxBytes = 50000 } = {}) {  re
       },
       servername: url.protocol === 'https:' ? url.hostname : undefined,
       rejectUnauthorized: url.protocol === 'https:',
+      signal,
       timeout: 20000
     }, (res) => {
       const statusCode = res.statusCode || 0;
@@ -248,11 +249,12 @@ export async function safeFetch(urlString) {
 }
 
 /** 下载二进制（图片，≤maxBytes 字节），返回 { buffer, contentType }。 */
-export async function safeFetchBinary(urlString, maxBytes = 12 * 1024 * 1024) {
+export async function safeFetchBinary(urlString, maxBytes = 12 * 1024 * 1024, signal) {
   const allowPrivate = getConfig().security?.allowPrivateImageHosts === true;
   let { url, ip } = await validateFetchUrl(urlString, { allowPrivate });
   for (let i = 0; i <= MAX_REDIRECTS; i++) {
-    const result = await requestOnce(url, ip, { asBinary: true, maxBytes });
+    signal?.throwIfAborted();
+    const result = await requestOnce(url, ip, { asBinary: true, maxBytes, signal });
     if ([301, 302, 303, 307, 308].includes(result.statusCode)) {
       if (!result.redirect) throw new Error(`重定向缺少 Location: ${result.statusCode}`);
       const next = new URL(result.redirect, url).toString();

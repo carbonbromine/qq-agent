@@ -1,9 +1,15 @@
 // 提示词组装的单元自测：验证"零历史"成本模型的关键性质。
 import assert from 'node:assert';
-import { ChatStore } from '../src/store.js';
-import { MemoryStore } from '../src/memory.js';
-import { buildSystemPrompt, buildUserPrompt, buildPastState } from '../src/prompt.js';
-import { setRuntimeConfig, DEFAULT_CONFIG } from '../src/config.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-prompt-'));
+process.env.QQ_AGENT_DATA_DIR = testDir;
+process.on('exit', () => fs.rmSync(testDir, { recursive: true, force: true }));
+const { ChatStore } = await import('../src/store.js');
+const { MemoryStore } = await import('../src/memory.js');
+const { buildSystemPrompt, buildUserPrompt, buildPastState } = await import('../src/prompt.js');
+const { setRuntimeConfig, DEFAULT_CONFIG } = await import('../src/config.js');
 
 // 注入测试配置
 const cfg = structuredClone(DEFAULT_CONFIG);
@@ -83,7 +89,7 @@ const userPrompt = buildUserPrompt({
   proactive: false
 });
 
-for (const section of ['【当前时间】', '【会话标识】', '【角色设定', '【此刻状态】', '【过去状态】', '【本次唤醒】', '【参与度参考】', '【记忆】', '【可用表情包】', '【引导说明】']) {
+for (const section of ['【当前时间】', '【角色设定', '【此刻状态】', '【过去状态】', '【本次唤醒】', '【记忆】', '【引导说明】']) {
   assert.ok(userPrompt.includes(section), `用户提示缺少段落：${section}`);
 }
 for (const banned of ['沉睡前观察', 'qq_', '[SILENT]']) {
@@ -122,3 +128,4 @@ for (const banned of ['[SILENT]', 'mcp__snowluma', 'qq_set_wake_config', 'qq_mar
 }
 
 console.log('✓ 提示词自测全部通过');
+store.close();

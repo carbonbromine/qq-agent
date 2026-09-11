@@ -23,6 +23,7 @@ import { importFromDsh, currentProviders, setProviderKey, testAllProviders, test
 import { scanModelsVision, visionResults, modelImageVerdict } from './vision-scan.js';
 import { builtinVisionResults } from './model-vision-docs.js';
 import { createEventBus, todayKey } from './util.js';
+import { assertCanSend } from './access.js';
 
 // 全局 fetch（undici）默认连接建立超时只有 10 秒，openrouter.ai 这类海外端点
 // 握手慢时会直接报 "Connect Timeout Error ... timeout: 10000ms"（注意这不是
@@ -73,6 +74,7 @@ function compareSemver(a, b) {
 
 export function createApp({ log = console.log } = {}) {
   const cfg = getConfig();
+  let stopping = false;
   const bus = createEventBus();
   const sseClients = new Set();
 
@@ -167,6 +169,9 @@ export function createApp({ log = console.log } = {}) {
 
   /** 拉起 SnowLuma。优先用项目内置 node.exe 直接运行（日志进内置控制台）；失败再回退到独立窗口 launcher.bat。 */
   async function launchSnowluma() {
+    if (process.platform !== 'win32') {
+      return { ok: false, error: 'Linux uses an external OneBot service; configure its HTTP/WS addresses.' };
+    }
     const dir = snowlumaDir();
     if (!dir) return { ok: false, error: '找不到 SnowLuma 目录：请确认项目内 snowluma/ 文件夹存在，或在设置里填写 SnowLuma 目录' };
     const wsPort = snowlumaWsPort();
@@ -368,6 +373,7 @@ export function createApp({ log = console.log } = {}) {
   // 401 / 未连接时：轮换下一个候选 token 重连（3 秒重连循环已有，轮换成本为零）
   let tokenSyncRetryAt = 0;
   function maybeRecoverOnebot() {
+    if (stopping) return;
     const now = Date.now();
     if (now - tokenSyncRetryAt < 5000) return;   // 限频
     tokenSyncRetryAt = now;
@@ -437,6 +443,7 @@ export function createApp({ log = console.log } = {}) {
     const segments = Array.isArray(event.message) ? event.message : null;
     const senderId = String(event.sender?.user_id ?? event.user_id ?? '');
     const senderName = String(event.sender?.card || event.sender?.nickname || senderId || '');
+    const isSelf = senderId === onebot.selfId;
 
     // 屏蔽名单：被屏蔽群员的消息直接丢弃 —— 不存档、不触发会话、不进提示词背景。
     // 放在最前面：连合并转发展开这种网络请求都不值得为它做。
@@ -473,16 +480,18 @@ export function createApp({ log = console.log } = {}) {
     }
 
     if (!text && !media.length) return;
-    store.appendIncoming(`${kind}:${id}`, {
+    const message = {
       mid: event.message_id,
       ts: event.time ? Math.round(Number(event.time) * 1000) : Date.now(),
       senderId,
       senderName,
       text: text || '[图片]' ,
       media
-    });
+    };
+    const stored = isSelf ? store.appendSelf(`${kind}:${id}`, message) : store.appendIncoming(`${kind}:${id}`, message);
+    if (stored.duplicate) return;
     emit('chat-update', `${kind}:${id}`);
-    orchestrator.onIncoming(`${kind}:${id}`);
+    if (!isSelf) orchestrator.onIncoming(`${kind}:${id}`);
   }
 
   async function ingestPoke(event) {
@@ -529,11 +538,21 @@ export function createApp({ log = console.log } = {}) {
     orchestrator.onIncoming(`${isGroup ? 'group' : 'private'}:${id}`);
   }
 
-  async function handleOneBotEvent(event) {
+  const ingress = new Map();
+  function handleOneBotEvent(event) {
+    const key = event?.group_id ? `group:${event.group_id}` : `private:${event?.user_id}`;
+    const task = (ingress.get(key) || Promise.resolve()).then(() => ingestOneBotEvent(event));
+    const tail = task.catch((error) => log('[ingest]', error?.message ?? error)).finally(() => {
+      if (ingress.get(key) === tail) ingress.delete(key);
+    });
+    ingress.set(key, tail);
+    return task;
+  }
+
+  async function ingestOneBotEvent(event) {
     if (!event || typeof event !== 'object') return;
     if (event.post_type === 'message' || event.post_type === 'message_sent') {
-      // 自己发的消息（message_sent / self_id 相同）不触发处理（发送时已自行记录）
-      if (String(event.user_id ?? event.sender?.user_id ?? '') === onebot.selfId) return;
+      // Echoes are deduplicated by message ID; shared-protocol observe mode also records old-instance replies.
       if (event.message_type === 'group' && event.group_id != null) return ingestMessage('group', String(event.group_id), event);
       if (event.message_type === 'private' && event.user_id != null) return ingestMessage('private', String(event.user_id), event);
       return;
@@ -574,15 +593,20 @@ export function createApp({ log = console.log } = {}) {
 
   function authorize(req) {
     const token = String(getConfig().server?.token ?? '');
-    if (!token) return true;
+    const origin = String(req.headers.origin || '');
+    if (origin && origin !== `http://${req.headers.host}` && origin !== `https://${req.headers.host}`) return false;
+    if (!token) return /^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/.test(req.headers.host || '');
     const url = new URL(req.url, 'http://127.0.0.1');
-    return req.headers['x-console-token'] === token || url.searchParams.get('token') === token;
+    const cookie = String(req.headers.cookie || '').split(';').map((v) => v.trim())
+      .find((v) => v.startsWith('qq_agent_token='));
+    return req.headers['x-console-token'] === token || url.searchParams.get('token') === token
+      || cookie?.slice('qq_agent_token='.length) === encodeURIComponent(token);
   }
 
   // ── 配置脱敏 ────────────────────────────────────────────────────────────
   // 凡是字段名命中这些模式的，值一律替换为空串（保留"有/无"的 hasXxx 标记）。
   // 覆盖：apiKey / api_key / accessToken / httpAccessToken / token / secret / password …
-  const SECRET_KEY_PATTERN = /(apikey|api_key|accesstoken|access_token|secret|password|privatekey|private_key)/i;
+  const SECRET_KEY_PATTERN = /(^token$|apikey|api_key|accesstoken|access_token|secret|password|privatekey|private_key)/i;
   // 形如 apiKeyFrom 的字段存的是"密钥来源标识"（如 manual），不是密钥本身，不要脱敏
   const SECRET_KEY_EXCLUDE = /from$/i;
 
@@ -648,6 +672,7 @@ export function createApp({ log = console.log } = {}) {
    */
   function keyEndpointAllowed(req) {
     const token = String(getConfig().server?.token ?? '');
+    if (token && authorize(req)) return true;
     if (token) {
       const url = new URL(req.url, 'http://127.0.0.1');
       if (req.headers['x-console-token'] === token || url.searchParams.get('token') === token) return true;
@@ -679,6 +704,18 @@ export function createApp({ log = console.log } = {}) {
   async function handleHttp(req, res) {
     const url = new URL(req.url, 'http://127.0.0.1');
     const pathname = url.pathname;
+    if (pathname === '/healthz' && req.method === 'GET') return json(res, 200, { ok: true });
+    if (pathname === '/api/login' && req.method === 'POST') {
+      const origin = String(req.headers.origin || '');
+      if (origin && origin !== `http://${req.headers.host}` && origin !== `https://${req.headers.host}`) {
+        return json(res, 403, { error: 'Invalid origin' });
+      }
+      const body = await readBody(req);
+      const token = getConfig().server.token;
+      if (!token || body.token !== token) return json(res, 401, { error: 'Token 不正确' });
+      res.setHeader('set-cookie', `qq_agent_token=${encodeURIComponent(token)}; HttpOnly; SameSite=Strict; Path=/`);
+      return json(res, 200, { ok: true });
+    }
 
     // SSE
     if (pathname === '/api/events' && req.method === 'GET') {
@@ -698,6 +735,31 @@ export function createApp({ log = console.log } = {}) {
       if (!authorize(req)) return json(res, 401, { error: '未授权' });
       const method = req.method;
       const cfgNow = getConfig();
+
+      if (pathname === '/api/runtime' && method === 'POST') {
+        const body = await readBody(req);
+        if (!['observe', 'active'].includes(body.mode)) return json(res, 400, { error: 'Invalid mode' });
+        if (body.mode === 'active' && body.confirmExclusive !== true) {
+          return json(res, 409, { error: 'Confirm that the old instance is disabled for these chats or use a different QQ account.' });
+        }
+        if (body.mode === 'observe') {
+          for (const controller of orchestrator.controllers.values()) controller.abort(new Error('Run cancelled'));
+        }
+        if (body.skipBacklog === true) for (const key of store.listChats()) store.markAllRead(key);
+        updateConfig({ runtime: { mode: body.mode } });
+        emit('status', { mode: body.mode });
+        return json(res, 200, { ok: true, mode: body.mode });
+      }
+
+      const recovery = /^\/api\/chats\/(group|private)_(\d+)\/(retry-failed|resolve-held)$/.exec(pathname);
+      if (recovery && method === 'POST') {
+        const body = await readBody(req);
+        const key = `${recovery[1]}:${recovery[2]}`;
+        if (body.confirm !== true) return json(res, 409, { error: 'Explicit confirmation required' });
+        const count = recovery[3] === 'retry-failed' ? store.retryFailed(key) : store.resolveHeld(key);
+        emit('chat-update', key);
+        return json(res, 200, { ok: true, count });
+      }
 
       if (pathname === '/api/status' && method === 'GET') {
         const dayKey = todayKey();
@@ -799,6 +861,7 @@ export function createApp({ log = console.log } = {}) {
       }
 
       if (pathname === '/api/snowluma/open-folder' && method === 'POST') {
+        if (process.platform !== 'win32') return json(res, 400, { error: 'Folder opening is desktop-only' });
         const dir = snowlumaDir();
         if (!dir) return json(res, 400, { ok: false, error: '找不到 SnowLuma 目录' });
         spawn('explorer.exe', [dir], { detached: true, stdio: 'ignore' }).unref();
@@ -1172,12 +1235,14 @@ export function createApp({ log = console.log } = {}) {
 
       if (pathname === '/api/config' && method === 'POST') {
         const patch = await readBody(req);
+        delete patch.runtime;
+        if (patch.server?.token === '') delete patch.server.token;
         const next = updateConfig(patch);
         store.setMaxPerChat(next.store?.maxMessagesPerChat ?? 0);
         if (next.proactive?.enabled) orchestrator.startProactiveLoop(); else orchestrator.stopProactiveLoop();
         initPriceFeed(next.api?.priceRemoteUrl || '');   // 远程价格表 URL 可能改了（内部幂等）
         emit('status', { configUpdated: true });
-        return json(res, 200, { ok: true, config: next });
+        return json(res, 200, { ok: true, config: sanitizeConfig(next) });
       }
 
       if (pathname === '/api/version' && method === 'GET') {
@@ -1448,10 +1513,10 @@ export function createApp({ log = console.log } = {}) {
         if (!text) return json(res, 400, { error: '消息内容为空' });
         try {
           const chatKey = `${chatTestSendMatch[1]}:${chatTestSendMatch[2]}`;
-          const data = await onebot.sendText(chatTestSendMatch[1], chatTestSendMatch[2], text);
-          store.appendSelf(chatKey, { text, ts: Date.now() });
+          assertCanSend(chatKey);
+          const data = await sender.sendTextBatch(chatKey, [text]);
           emit('chat-update', chatKey);
-          return json(res, 200, { ok: true, messageId: data?.message_id ?? null });
+          return json(res, 200, { ok: true, messageId: data.sent[0]?.messageId ?? null });
         } catch (error) {
           return json(res, 502, { error: String(error?.message ?? error) });
         }
@@ -1553,7 +1618,7 @@ export function createApp({ log = console.log } = {}) {
   async function listenOn(port) {
     return new Promise((resolve, reject) => {
       server.once('error', reject);
-      server.listen(port, '127.0.0.1', () => {
+      server.listen(port, getConfig().server?.host || '127.0.0.1', () => {
         server.off('error', reject);
         resolve(port); // 必须把实际端口传回去，Electron 壳要用它加载页面
       });
@@ -1561,11 +1626,15 @@ export function createApp({ log = console.log } = {}) {
   }
 
   async function start() {
+    const serverCfg = getConfig().server;
+    if (!['127.0.0.1', 'localhost', '::1'].includes(serverCfg.host) && !serverCfg.token) {
+      throw new Error('Console token required for LAN binding');
+    }
     // 先把 HTTP 服务拉起来，让窗口/浏览器立刻能加载页面（loading 壳）
     const basePort = Number(getConfig().server?.port) || 3210;
     let port = null;
     let lastError = null;
-    for (let p = basePort; p < basePort + 10; p++) {
+    for (let p = basePort; p < basePort + (serverCfg.strictPort === false ? 10 : 1); p++) {
       try {
         port = await listenOn(p);
         break;
@@ -1577,7 +1646,7 @@ export function createApp({ log = console.log } = {}) {
     if (port == null) throw lastError ?? new Error('无法监听端口');
 
     // 匿名用量遥测：启动 90 秒后发第一次，之后每 6 小时一次；失败静默不影响使用
-    startTelemetryLoop(log);
+    if (getConfig().telemetry?.enabled === true) startTelemetryLoop(log);
 
     // 拉起 SnowLuma（如配置了自动启动）、连 OneBot。
     if (getConfig().snowluma?.autoLaunch) {
@@ -1603,17 +1672,36 @@ export function createApp({ log = console.log } = {}) {
       // accessToken/httpToken 已由 applyTokens 直接挂到实例（候选[0]）
     }
     await onebot.connect();
+    orchestrator.startRecoveryLoop();
     if (getConfig().proactive?.enabled) orchestrator.startProactiveLoop();
-    log(`控制台已就绪：http://127.0.0.1:${port}`);
+    log(`控制台已就绪：http://${serverCfg.host}:${port} (${getConfig().runtime.mode})`);
     log(`OneBot（SnowLuma）: ws=${getConfig().snowluma?.wsUrl} http=${getConfig().snowluma?.httpUrl}`);
     log(`模型: ${getConfig().api.model || '（未设置，请在设置里选择）'} @ ${getConfig().api.baseUrl}`);
     return port;
   }
 
   async function stop() {
-    await orchestrator.abortAll();
+    stopping = true;
     onebot.close();
-    server.close();
+    await orchestrator.abortAll();
+    await Promise.allSettled([...ingress.values()]);
+    for (const client of sseClients) client.end();
+    await new Promise((resolve) => {
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        server.closeAllConnections?.();
+        done();
+      }, 2000);
+      server.close(done);
+      server.closeIdleConnections?.();
+    });
+    store.close();
     // 内置启动的 SnowLuma：QQ Agent 退出时一并关掉，避免留一个无窗口的后台进程。
     // 注意：SnowLuma 退出时不一定能立刻把 config 落盘，但我们的 stop 不会再去读它，
     // 下次启动会读到完整文件。

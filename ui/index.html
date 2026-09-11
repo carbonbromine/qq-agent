@@ -3,7 +3,7 @@
 <head data-page-node-id="IsCa0pdqCFHN4aOg8ZLqCH">
   <meta charset="UTF-8" data-page-node-id="8xi2lJIfYAgLleFVuOJUJ4" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" data-page-node-id="6HjAQtPOvWz7Elp6uKOeUp" />
-  <title>QQ Agent</title>
+  <title>QQ Agent Linux</title>
   <link rel="stylesheet" href="/style.css" data-page-node-id="x8F6i7W4lVVFQuDLeTBT6x" />
   <script>
     /* 主题预置：在样式生效前就定好 data-theme，避免首屏闪白/闪黑。
@@ -37,6 +37,12 @@
       <span id="search-count-label" class="muted" title="今日联网搜索次数（web_search / web_fetch）" data-page-node-id="OLNka4FykNQRaxEpBoEK6t">搜索：-</span>
       <button id="theme-btn" class="icon-btn" title="切换主题（暗 → 亮 → 跟随系统）" aria-label="切换主题" data-page-node-id="v47iM0LsuM4VppZ5WLh7Qi"></button>
       <button id="pause-btn" class="btn btn-small" data-page-node-id="plyqWsDjnlKP1Td6wSVJaD">暂停</button>
+      <label class="runtime-control" title="新实例运行模式">
+        <select id="runtime-mode" aria-label="运行模式">
+          <option value="observe">观察</option>
+          <option value="active">启用</option>
+        </select>
+      </label>
     </div>
   </header>
 
@@ -118,6 +124,15 @@
     </section>
   </main>
 
+  <dialog id="console-login">
+    <form id="console-login-form">
+      <h2>QQ Agent Linux</h2>
+      <label for="console-token">控制台 Token</label>
+      <input id="console-token" type="password" autocomplete="current-password" required />
+      <p id="console-login-error" role="alert"></p>
+      <button class="btn" type="submit">登录</button>
+    </form>
+  </dialog>
   <script src="/app.js"></script>
 </body>
 </html>

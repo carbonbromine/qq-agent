@@ -205,6 +205,11 @@ async function api(path, options = {}) {
     ...options
   });
   const data = await res.json().catch(() => ({}));
+  if (res.status === 401) {
+    const dialog = $('#console-login');
+    if (dialog && !dialog.open) dialog.showModal();
+    $('#loading-overlay')?.classList.add('hidden');
+  }
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   return data;
 }
@@ -382,6 +387,7 @@ async function refreshStatus() {
     state.paused = s.paused;
     state.pauseReason = s.pauseReason;
     $('#pause-btn').textContent = state.paused ? '恢复' : '暂停';
+    if ($('#runtime-mode')) $('#runtime-mode').value = s.orchestrator.mode || 'observe';
     renderBanner();
   } catch (e) { /* 忽略瞬时错误 */ }
 }
@@ -398,6 +404,29 @@ $('#pause-btn').addEventListener('click', async () => {
     await api('/api/pause', { method: 'POST', body: JSON.stringify({ paused: true }) });
     refreshStatus();
   }
+});
+
+$('#console-login-form')?.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const response = await fetch('/api/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ token: $('#console-token').value })
+  });
+  if (response.ok) { location.reload(); return; }
+  $('#console-login-error').textContent = 'Token 不正确';
+});
+
+$('#runtime-mode')?.addEventListener('change', async (event) => {
+  const mode = event.target.value;
+  if (mode === 'active' && !confirm('确认旧实例已停用这些会话，或新实例使用不同 QQ 账号？启用时将跳过观察期间的积压消息。')) {
+    event.target.value = 'observe';
+    return;
+  }
+  try {
+    await api('/api/runtime', { method: 'POST',
+      body: JSON.stringify({ mode, confirmExclusive: mode === 'active', skipBacklog: mode === 'active' }) });
+  } catch (error) { alert(error.message); }
+  await refreshStatus();
 });
 
 // ── 会话渲染合批 ──
@@ -1115,7 +1144,7 @@ function renderChatList() {
           ${c.unread ? `<span class="unread-pill">${c.unread}</span>` : ''}
         </div>
         <div class="chat-item-sub">${esc(c.lastText || '（空）')}</div>
-        <div class="session-meta"><span>${c.total} 条</span><span>${fmtTime(c.lastTs)}</span></div>
+        <div class="session-meta"><span>${c.total} 条 · 失败 ${c.failed || 0} · 待确认 ${c.held || 0}</span><span>${fmtTime(c.lastTs)}</span></div>
       </div>`;
   }).join('') || '<div class="list-head muted">还没有消息存档（等白名单里的群/好友来消息）</div>';
   for (const c of state.chats) state.seenChatKeys.add(c.key);
@@ -1197,6 +1226,8 @@ function renderChatMessages() {
     <div class="chat-toolbar">
       <button class="btn btn-small" id="chat-wake-btn">唤醒一次处理</button>
       <button class="btn btn-small" id="chat-read-btn">全部标为已读</button>
+      <button class="btn btn-small" id="chat-retry-btn">重试失败批次</button>
+      <button class="btn btn-small" id="chat-resolve-btn">确认发送结果</button>
       <input type="text" id="test-send-text" placeholder="手动发一条测试消息" style="flex:1" />
       <button class="btn btn-small" id="chat-testsend-btn">发送</button>
     </div>
@@ -1213,6 +1244,16 @@ function renderChatMessages() {
     loadChats();
     // 保持视图：用户可能已经滚到中间了，别把他弹回顶部
     loadChatMessages(key, { keepView: true });
+  });
+  $('#chat-retry-btn')?.addEventListener('click', async () => {
+    if (!confirm('重新处理确定未发送成功的失败批次？')) return;
+    await api(`/api/chats/${key.replace(':', '_')}/retry-failed`, { method: 'POST', body: '{"confirm":true}' });
+    loadChats();
+  });
+  $('#chat-resolve-btn')?.addEventListener('click', async () => {
+    if (!confirm('已核对 QQ 中的实际发送结果？确认后将结束待确认批次，不会重发。')) return;
+    await api(`/api/chats/${key.replace(':', '_')}/resolve-held`, { method: 'POST', body: '{"confirm":true}' });
+    loadChats();
   });
   $('#chat-testsend-btn').addEventListener('click', async () => {
     const input = $('#test-send-text');

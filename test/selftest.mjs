@@ -284,6 +284,7 @@ refs:
     allow: { groups: ['456'], private: ['777'] },
     deny: { groups: [], private: [] },
     allowAllWhenEmpty: false,
+    runtime: { mode: 'active', paused: false },
     wakeDelayMs: 300,
     drainDelayMs: 200,
     maxConcurrentRuns: 2,
@@ -1237,13 +1238,15 @@ refs:
     // 后端权威派生：只传滑条位置，后端应算出档位与概率
     const { updateConfig } = await import('../src/config.js');
     const fs2 = await import('node:fs');
-    const backup = fs2.readFileSync('data/config.json', 'utf8');
+    const configPath = path.join(dataDir, 'config.json');
+    const backup = fs2.readFileSync(configPath, 'utf8');
     try {
       const n = updateConfig({ store: { contextSliderPos: 55 } });
       assert.equal(n.store.contextTier, 3, '后端应把 55% 派生为 3 档');
       assert.ok(Math.abs(n.store.randomPercent - 50) < 1, '后端应把 55% 派生为 50% 概率');
     } finally {
-      fs2.writeFileSync('data/config.json', backup, 'utf8');
+      fs2.writeFileSync(configPath, backup, 'utf8');
+      updateConfig({ store: { contextSliderPos: 100 } });
     }
     pass('响应档位滑条：分区 + 概率线性 + 后端权威派生');
   }
@@ -1359,7 +1362,7 @@ refs:
     });
     const msgs = await waitFor(() => {
       const list = app.store.recent('group:456', { limit: 200 });
-      const hit = list.find((m) => m.mid === 9300);
+      const hit = list.find((m) => String(m.mid) === '9300');
       return hit && String(hit.text).includes('合并转发') ? hit : null;
     }, 8000, '合并转发消息入档并展开');
     assert.ok(msgs.text.includes('[合并转发 共2条]'), '应有合并转发头');

@@ -21,6 +21,9 @@ export class OneBotClient {
     this.selfInfo = null;      // { user_id, nickname }
     this.#closedByUs = false;
     this.statusListeners = new Set();
+    this.reconnectTimer = null;
+    this.heartbeatTimer = null;
+    this.reconnectAttempt = 0;
   }
 
   #closedByUs;
@@ -49,8 +52,10 @@ export class OneBotClient {
     // 会误以为需要再次重连，造成两个 WebSocket 同时连着 SnowLuma，所有事件收到两份。
     const old = this.socket;
     this.socket = null;
+    clearTimeout(this.reconnectTimer);
+    clearInterval(this.heartbeatTimer);
     this.#closedByUs = false;
-    try { old?.close(); } catch { /* ignore */ }
+    try { old?.terminate(); } catch { /* ignore */ }
     this.#connectLoop();
   }
 
@@ -61,12 +66,13 @@ export class OneBotClient {
     let socket;
     try {
       socket = new WebSocket(url, {
-        headers: this.accessToken ? { authorization: `Bearer ${this.accessToken}` } : {}
+        headers: this.accessToken ? { authorization: `Bearer ${this.accessToken}` } : {},
+        handshakeTimeout: 15000
       });
     } catch (error) {
       this.lastConnectError = String(error?.message ?? error);
       this.#setStatus(false);
-      setTimeout(() => this.#connectLoop(), RECONNECT_MIN_MS);
+      this.#scheduleReconnect();
       return;
     }
     this.socket = socket;
@@ -77,6 +83,17 @@ export class OneBotClient {
     socket.on('open', async () => {
       if (!isCurrent(socket)) return;
       this.lastConnectError = '';
+      this.reconnectAttempt = 0;
+      let alive = true;
+      socket.on('pong', () => { alive = true; });
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = setInterval(() => {
+        if (!isCurrent(socket)) return;
+        if (!alive) { socket.terminate(); return; }
+        alive = false;
+        socket.ping();
+      }, 30000);
+      this.heartbeatTimer.unref?.();
       this.#setStatus(true);
       try {
         this.selfInfo = await this.call('get_login_info');
@@ -93,8 +110,9 @@ export class OneBotClient {
     });
     socket.on('close', () => {
       if (!isCurrent(socket)) return; // 旧连接的迟到 close：新连接已在处理
+      clearInterval(this.heartbeatTimer);
       this.#setStatus(false);
-      if (!this.#closedByUs) setTimeout(() => this.#connectLoop(), RECONNECT_MIN_MS);
+      if (!this.#closedByUs) this.#scheduleReconnect();
     });
     socket.on('error', (error) => {
       if (!isCurrent(socket)) return;
@@ -108,14 +126,23 @@ export class OneBotClient {
 
   close() {
     this.#closedByUs = true;
+    clearTimeout(this.reconnectTimer);
+    clearInterval(this.heartbeatTimer);
     const old = this.socket;
     this.socket = null;
-    try { old?.close(); } catch { /* ignore */ }
+    try { old?.terminate(); } catch { /* ignore */ }
     this.#setStatus(false);
   }
 
+  #scheduleReconnect() {
+    clearTimeout(this.reconnectTimer);
+    const delay = Math.min(RECONNECT_MAX_MS, RECONNECT_MIN_MS * 2 ** Math.min(this.reconnectAttempt++, 4));
+    this.reconnectTimer = setTimeout(() => this.#connectLoop(), delay);
+    this.reconnectTimer.unref?.();
+  }
+
   /** OneBot HTTP API（发送与查询都走这里）。 */
-  async call(action, params = {}, timeoutMs = 15000) {
+  async call(action, params = {}, timeoutMs = 15000, signal) {
     const res = await fetch(`${this.httpUrl}/${action}`, {
       method: 'POST',
       headers: {
@@ -123,7 +150,7 @@ export class OneBotClient {
         ...(this.httpToken ? { authorization: `Bearer ${this.httpToken}` } : {})
       },
       body: JSON.stringify(params),
-      signal: AbortSignal.timeout(timeoutMs)
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs)
     });
     if (!res.ok) {
       const hint = res.status === 426
@@ -147,15 +174,15 @@ export class OneBotClient {
   }
 
   /** 发送消息段。返回 OneBot 响应 data（含 message_id）。 */
-  async sendSegments(kind, id, segments) {
+  async sendSegments(kind, id, segments, signal) {
     const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
     const params = kind === 'private'
       ? { user_id: Number(id), message: segments }
       : { group_id: Number(id), message: segments };
-    return this.call(action, params);
+    return this.call(action, params, 15000, signal);
   }
 
-  async sendText(kind, id, text, { replyToMessageId = null, atUserId = null } = {}) {
+  async sendText(kind, id, text, { replyToMessageId = null, atUserId = null, signal } = {}) {
     const segments = [];
     if (replyToMessageId !== undefined && replyToMessageId !== null && String(replyToMessageId).trim() !== '') {
       const rid = String(replyToMessageId).trim();
@@ -168,10 +195,10 @@ export class OneBotClient {
       segments.push({ type: 'at', data: { qq: at } });
     }
     segments.push({ type: 'text', data: { text: escapeCqText(String(text ?? '')) } });
-    return this.sendSegments(kind, id, segments);
+    return this.sendSegments(kind, id, segments, signal);
   }
 
-  async sendSticker(kind, id, imageUrl, { replyToMessageId = null, atUserId = null } = {}) {
+  async sendSticker(kind, id, imageUrl, { replyToMessageId = null, atUserId = null, signal } = {}) {
     const segments = [];
     if (replyToMessageId !== undefined && replyToMessageId !== null && String(replyToMessageId).trim() !== '') {
       const rid = String(replyToMessageId).trim();
@@ -184,16 +211,14 @@ export class OneBotClient {
       segments.push({ type: 'at', data: { qq: at } });
     }
     segments.push({ type: 'image', data: { file: String(imageUrl) } });
-    return this.sendSegments(kind, id, segments);
+    return this.sendSegments(kind, id, segments, signal);
   }
 
-  async sendPoke(kind, id, targetUserId) {
+  async sendPoke(kind, id, targetUserId, signal) {
     if (kind === 'private') {
-      return this.call('friend_poke', { user_id: Number(id) }).catch(() =>
-        this.call('send_poke', { user_id: Number(id) }));
+      return this.call('friend_poke', { user_id: Number(id) }, 15000, signal);
     }
-    return this.call('group_poke', { group_id: Number(id), user_id: Number(targetUserId || id) }).catch(() =>
-      this.call('send_poke', { group_id: Number(id), user_id: Number(targetUserId || id) }));
+    return this.call('group_poke', { group_id: Number(id), user_id: Number(targetUserId || id) }, 15000, signal);
   }
 
   async getMsg(messageId) {

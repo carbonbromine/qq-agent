@@ -23,7 +23,9 @@ export const DEFAULT_CONFIG = {
     vision: true,                           // 模型是否支持图片输入（关掉则移除看图工具）
     temperature: 0.8,
     maxRounds: 12,                          // 单次运行的最多工具轮数
-    timeoutMs: 180000,
+    timeoutMs: 60000,
+    runTimeoutMs: 180000,
+    maxRunTokens: 120000,
     // 成本核算（仅本地估算展示，不参与任何请求）
     priceInputPerM: 0,      // 输入单价（元 / 百万 token）—— 兜底默认值
     priceOutputPerM: 0,     // 输出单价
@@ -128,8 +130,11 @@ export const DEFAULT_CONFIG = {
   deny: { groups: [], private: [] },
   allowAllWhenEmpty: false,
   // 运行节奏
-  wakeDelayMs: 2000,        // 空闲时收到消息到发起运行的防抖窗口（等连发聚成一批）
-  drainDelayMs: 1200,       // 一次运行结束后发现还有未读，到下一次运行的间隔
+  wakeDelayMs: 10000,
+  drainDelayMs: 10000,
+  maxBatchWaitMs: 20000,
+  runtime: { mode: 'observe', paused: false },
+  telemetry: { enabled: false },
   maxConcurrentRuns: 2,     // 全局同时进行的 agent 运行数
   // 发送保护
   send: {
@@ -171,16 +176,19 @@ export const DEFAULT_CONFIG = {
     // 档位是"累积生效"的：选 4 档时 1/2/3 档也都生效，按 4→3→2→1 顺序检查，
     // 第一个命中的决定读取条数。这个设置替代了原来的 pastStateLimit 固定值。
     contextTier: 4,             // 1=仅艾特 2=+关键词 3=+随机 4=全读
-    atCount: 20,                // 档1：机器人被艾特时读 w 条
-    keywordCount: 15,           // 档2：命中关键词时读 x 条
+    atCount: 300,
+    keywordCount: 100,
     keywords: [],               // 档2 的关键词表
     randomPercent: 10,          // 档3：y% 概率
-    randomCount: 8,             // 档3：命中时读 z 条
-    allCount: 80,               // 档4：读全部（上限）
+    randomCount: 60,
+    allCount: 300,
+    batchLimit: 100,
+    batchMaxChars: 32000,
+    pastStateMaxChars: 24000,
     // ── 响应档位的作用范围 ──
     unifiedTier: true,          // true = 上方滑条对所有会话生效；false = 可按群单独设置
     groupSliderPos: {},         // { [群号]: 0~100 } 仅 unifiedTier=false 时生效；未设置的群/私聊跟随全局滑条
-    keepSessionFiles: 0         // 保留最近多少个会话记录文件；**0 = 不限制**（原为 300）
+    keepSessionFiles: 2000
   },
   // 屏蔽名单：{ [群号]: [QQ号, ...] }
   // 被屏蔽群员的消息在入口处直接丢弃——不存档、不触发会话、不作为提示词背景。
@@ -197,6 +205,8 @@ export const DEFAULT_CONFIG = {
   // 桌面端/控制台
   server: {
     port: 3210,
+    host: '127.0.0.1',
+    strictPort: true,
     token: '',                // 留空 = 只监听 127.0.0.1
     autoStart: false,         // 开机自启（仅 Electron 桌面端生效）
     closeToTray: true         // 点关闭 = 最小化到托盘
@@ -253,7 +263,15 @@ export function getConfig() {
 
 /** 更新并持久化配置（浅合并到当前值；patch 里传对象字段则整体替换该字段）。 */
 export function updateConfig(patch) {
-  currentConfig = deepMerge(getConfig(), patch);
+  const next = deepMerge(getConfig(), patch);
+  if (!['observe', 'active'].includes(next.runtime?.mode)) throw new Error('Invalid runtime mode');
+  if (!Number.isInteger(Number(next.server?.port)) || next.server.port < 1 || next.server.port > 65535) {
+    throw new Error('Invalid server port');
+  }
+  if (!['127.0.0.1', 'localhost', '::1'].includes(next.server.host) && !String(next.server.token || '').trim()) {
+    throw new Error('A console token is required for LAN access');
+  }
+  currentConfig = next;
 
   // ── 响应档位：以滑条位置为唯一真相，派生 tier 与随机概率 ──
   // 前端只负责上报滑条位置（contextSliderPos），档位和概率一律由这里换算。
@@ -265,9 +283,9 @@ export function updateConfig(patch) {
     currentConfig.store.randomPercent = randomPercent;
   }
 
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
   const tmp = `${CONFIG_FILE}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(currentConfig, null, 2), 'utf8');
+  fs.writeFileSync(tmp, JSON.stringify(currentConfig, null, 2), { mode: 0o600 });
   fs.renameSync(tmp, CONFIG_FILE);
   return currentConfig;
 }

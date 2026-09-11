@@ -1806,3 +1806,23 @@ body, .btn, .tab, .model-modal, .price-card, .tier-btn, .icon-btn {
   50%  { opacity: 1; transform: translate(var(--dx, 30px), var(--dy, -70px)) rotate(var(--rot, 180deg)) scale(1.6); }
   100% { opacity: 0; transform: translate(calc(var(--dx, 30px) * 2), calc(var(--dy, -70px) * 2)) rotate(calc(var(--rot, 180deg) * 2)) scale(.8); }
 }
+
+#console-login {
+  width: min(360px, calc(100vw - 32px));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg, #fff);
+  color: var(--text, #202020);
+  padding: 24px;
+}
+#console-login::backdrop { background: #0008; }
+#console-login-form { display: grid; gap: 12px; }
+#console-login-form h2 { font-size: 20px; margin: 0 0 8px; }
+#console-token { width: 100%; min-width: 0; box-sizing: border-box; }
+#console-login-error { color: #d64848; margin: 0; }
+#runtime-mode { width: 84px; padding: 5px; }
+@media (max-width: 760px) {
+  #topbar, .top-status { flex-wrap: wrap; height: auto; gap: 8px; }
+  #model-label { max-width: 220px; overflow-wrap: anywhere; }
+  #tabs { flex-wrap: wrap; height: auto; }
+}

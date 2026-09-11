@@ -1,11 +1,39 @@
+# QQ Agent Linux
+
+本仓库基于 [K0nd1us/QQ-agent](https://github.com/K0nd1us/QQ-agent) 的无状态架构，
+保留上游提交历史和 MIT 署名，增加独立 Linux 服务部署与可靠消息处理。
+不依赖 DSH/MCP，不修改既有 qq-bridge 实例。
+
+- Node.js >= 22.13；SQLite/WAL 消息库，入站去重、批次租约、成功确认、失败重试。
+- 聚合默认 10 秒，首条消息起最多 20 秒；最近上下文最多 300 条，触发批最多 100 条。
+- 新实例默认 `observe`：存档但不调用模型、不发消息；启用需要明确确认账号/会话独占。
+- 控制台支持 Token 登录；Linux 支持 SIGTERM、systemd 自动恢复、独立端口与目录。
+- 默认关闭上游匿名遥测；保留可选的用户主动社区分享入口。
+
+```bash
+git clone https://github.com/carbonbromine/qq-agent.git
+cd qq-agent
+bash deploy.sh --install-dir "$PWD" --data-dir "$PWD/data" --host 127.0.0.1 --port 3210
+bash manage.sh status
+bash manage.sh token
+```
+
+完整安装、迁移、回滚及限制说明：[Linux 运维手册](docs/LINUX.md)。
+`npm test` 运行隔离回归测试，不接入真实 QQ 或模型。
+
+## 上游项目说明
+
+以下保留上游产品背景。实际 Linux 行为以本节和运维手册为准；
+不承诺固定 token 成本或固定通过数，依赖运行批次、工具轮数和测试执行结果。
+
 # QQ Agent（桌面端）
 
-![平台](https://img.shields.io/badge/platform-Windows%20%7C%20Electron-lightgrey)
+![平台](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-lightgrey)
 ![技术栈](https://img.shields.io/badge/stack-Node.js%20%7C%20原生前端-orange)
-![测试](https://img.shields.io/badge/tests-149%20passed-brightgreen)
+![测试](https://img.shields.io/badge/tests-npm%20test-brightgreen)
 
 一个跑在你自己电脑上的 QQ 群聊机器人：装完双击启动，扫码登录，填个模型 Key 就能用。
-事件驱动 + 无状态会话架构，每次处理的 token 成本恒定可控；所有操作都在图形控制台里完成，不用碰命令行。
+事件驱动 + 无状态会话架构，每次处理使用有界上下文；Linux 运维走脚本，日常配置可在图形控制台完成。
 
 从 [Derpyu520/qq-bridge](https://github.com/Derpyu520/qq-bridge) 彻底改造而来的独立 QQ agent 应用。
 
@@ -23,7 +51,7 @@
 
 1. 群聊消息持续写入本地 JSON 存档（每条带时间与已读状态）
 2. 每次有新消息（或主动机会），**新开一个独立会话**：提示词 = 静态系统提示（人设/规则/策略）+ 存档摘要 + 本次新消息
-3. 会话结束即弃置，LLM 层面零历史——一次处理的成本是恒定小份，不随聊天量膨胀
+3. 会话结束即弃置，LLM 层面零历史；历史条数、字符数、批次和轮数都有上限，实际成本仍取决于内容与工具调用
 4. 处理期间新来的消息只写存档；本次结束后发现未读 → 自动再开新会话，直到清空
 5. 长期信息走记忆工具持久化，跨运行生效
 
@@ -82,7 +110,7 @@
 npm install          # 装依赖
 npm start            # 桌面端启动
 npm run server       # headless 模式：浏览器打开 http://127.0.0.1:3210
-npm test             # 全部测试（149 项）：功能自测 + 前端渲染 + 滚动加载 + 用量端到端
+npm test             # 单元测试 + 功能自测 + 前端渲染 + 滚动加载 + 用量端到端
 ```
 
 ### 分发前脱敏

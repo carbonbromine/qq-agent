@@ -10,9 +10,10 @@ import { validateImageUrl, safeFetchBinary } from './safe-fetch.js';
 import { webSearch, webFetch } from './web-search.js';
 import { expandForwardNodes } from './onebot.js';
 
-async function downloadImageAsDataUrl(url, timeoutMs = 30000) {
+async function downloadImageAsDataUrl(url, signal) {
+  signal?.throwIfAborted();
   const safeUrl = await validateImageUrl(url);
-  const { buffer, contentType } = await safeFetchBinary(safeUrl);
+  const { buffer, contentType } = await safeFetchBinary(safeUrl, 12 * 1024 * 1024, signal);
   if (!buffer || !buffer.length) throw new Error('图片内容为空');
   const mime = detectMime(buffer) || String(contentType || 'image/jpeg').split(';')[0];
   return `data:${mime};base64,${buffer.toString('base64')}`;
@@ -87,6 +88,7 @@ export function buildToolDefs() {
           const messages = normalizeMessageList(args.messages);
           if (!messages.length) return err('消息内容为空');
           const result = await ctx.sender.sendTextBatch(ctx.chatKey, messages, {
+            runId: ctx.session.leaseId, signal: ctx.signal,
             replyToMessageId: args.replyToMessageId ?? null,
             atUserId: args.atUserId ?? null
           });
@@ -123,6 +125,7 @@ export function buildToolDefs() {
             return err(`表情 ${sticker.id} 的图片地址不合法，已拒绝发送：${error?.message ?? error}`);
           }
           const result = await ctx.sender.sendSticker(ctx.chatKey, sticker, {
+            runId: ctx.session.leaseId, signal: ctx.signal,
             replyToMessageId: args.replyToMessageId ?? null,
             atUserId: args.atUserId ?? null
           });
@@ -167,7 +170,7 @@ export function buildToolDefs() {
           const sticker = await ctx.stickers.find(args.stickerId);
           if (!sticker) return err(`找不到表情 ${args.stickerId}`);
           if (!sticker.url) return err('该表情没有图片地址');
-          const dataUrl = await downloadImageAsDataUrl(sticker.url);
+          const dataUrl = await downloadImageAsDataUrl(sticker.url, ctx.signal);
           return { content: imageParts(`表情 ${sticker.id}（备注：${sticker.desc || '无'}）：`, [dataUrl]) };
         } catch (error) {
           return err(error?.message ?? error);
@@ -239,9 +242,9 @@ export function buildToolDefs() {
             if (!Number.isInteger(target) || target <= 0) {
               return err(`targetUserId 必须是正整数的 QQ 号（收到：${JSON.stringify(args.targetUserId)}）。${memberHint(ctx)}`);
             }
-            await ctx.sender.poke(ctx.chatKey, target);
+            await ctx.sender.poke(ctx.chatKey, target, { runId: ctx.session.leaseId, signal: ctx.signal });
           } else {
-            await ctx.sender.poke(ctx.chatKey, null);
+            await ctx.sender.poke(ctx.chatKey, null, { runId: ctx.session.leaseId, signal: ctx.signal });
           }
           return ok({ poked: true });
         } catch (error) {
@@ -356,12 +359,13 @@ export function buildToolDefs() {
         try {
           const entry = ctx.store.findByMid(ctx.chatKey, args.messageId);
           if (!entry) return err(`当前会话找不到消息 ${args.messageId}。${midHint(ctx)}`);
-          const urls = (entry.media || []).filter((m) => m.kind === 'image' && m.url).map((m) => m.url);
+          const urls = (entry.media || []).filter((m) => m.kind === 'image' && m.url).map((m) => m.url).slice(0, 4);
           if (!urls.length) return ok(`消息 ${args.messageId} 没有可查看的图片`);
           const dataUrls = [];
           const failed = [];
           for (const url of urls) {
-            try { dataUrls.push(await downloadImageAsDataUrl(url)); } catch (e) { failed.push(String(e?.message ?? e)); }
+            ctx.signal?.throwIfAborted();
+            try { dataUrls.push(await downloadImageAsDataUrl(url, ctx.signal)); } catch (e) { failed.push(String(e?.message ?? e)); }
           }
           if (!dataUrls.length) return err(`图片获取失败：${failed.join('；')}`);
           const note = failed.length ? `（另有 ${failed.length} 张获取失败）` : '';
@@ -537,7 +541,15 @@ export async function executeTool(defs, ctx, name, argsJson) {
     return { content: `错误：工具 ${name} 的参数不是合法 JSON：${String(raw).slice(0, 200)}`, isError: true };
   }
   try {
-    return await def.execute(ctx, args ?? {});
+    ctx.signal?.throwIfAborted();
+    const task = def.execute(ctx, args ?? {});
+    if (!ctx.signal) return await task;
+    return await new Promise((resolve, reject) => {
+      const abort = () => reject(ctx.signal.reason || new Error('Run cancelled'));
+      ctx.signal.addEventListener('abort', abort, { once: true });
+      if (ctx.signal.aborted) abort();
+      Promise.resolve(task).then(resolve, reject).finally(() => ctx.signal.removeEventListener('abort', abort));
+    });
   } catch (error) {
     return { content: `错误：${error?.message ?? error}`, isError: true };
   }

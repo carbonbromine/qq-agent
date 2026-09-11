@@ -77,6 +77,7 @@ function loadMeta(chatKey) {
 export class MemoryStore {
   constructor() {
     this.cache = new Map(); // chatKey -> Map(userId|_n_xx, member)
+    this.migrating = new Set();
   }
 
   /** 扫描所有有记忆的会话（文件夹或旧版单文件）。 */
@@ -98,12 +99,14 @@ export class MemoryStore {
 
   /** 旧版单文件 → 新版每成员文件。迁移后旧文件移到 backups/。 */
   #migrateLegacy(chatKey) {
+    if (this.migrating.has(chatKey)) return;
     const legacy = legacyFile(chatKey);
     if (!fs.existsSync(legacy)) return;
     try {
       if (fs.statSync(legacy).isDirectory()) return;
       const old = readJson(legacy, null);
       if (!old) return;
+      this.migrating.add(chatKey);
       const notes = getConfig().memberNotes || {};
       const nameToQq = {};
       for (const [qq, name] of Object.entries(notes)) {
@@ -130,6 +133,8 @@ export class MemoryStore {
       fs.renameSync(legacy, backup);
     } catch (error) {
       console.error('[memory] 旧记忆迁移失败:', error?.message ?? error);
+    } finally {
+      this.migrating.delete(chatKey);
     }
   }
 
@@ -440,11 +445,11 @@ export class MemoryStore {
       : all.slice(0, 15);
     if (!picked.length) return '';
     const lines = ['【对群友的印象】'];
-    for (const m of picked) {
+    for (const m of picked.slice(0, 20)) {
       const who = notes[String(m.userId)] || m.name || String(m.userId || '') || '某人';
       for (const e of m.impressions.slice(-3)) lines.push(`- ${who}：${e.content}`);
     }
-    return lines.join('\n');
+    return lines.join('\n').slice(0, 6000);
   }
 
   // ── 自动整理（consolidation）──

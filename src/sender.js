@@ -6,6 +6,7 @@
 import { getConfig, DEFAULT_CONFIG } from './config.js';
 import { sleep, randInt, createSendChain, escapeCqText, formatClockTime } from './util.js';
 import { mdToPlain, splitForQQ } from './md-to-plain.js';
+import { assertCanSend } from './access.js';
 
 // 限频回退值统一取自 DEFAULT_CONFIG，杜绝"代码默认 80 / 回退值 8 / UI 回退 8"三处打架。
 const DEFAULT_MAX_PER_MINUTE = DEFAULT_CONFIG.send.maxPerMinute;
@@ -54,6 +55,19 @@ export class SendQueue {
     return Math.min(15000, Math.max(min, randInt(min, max) * 0.5 + byLength * 0.5));
   }
 
+  async #deliver(chatKey, options, payload, send) {
+    assertCanSend(chatKey, options.signal);
+    const id = this.store.beginSend(chatKey, options.runId, payload);
+    try {
+      const data = await send();
+      this.store.finishSend(id, { messageId: data?.message_id });
+      return data;
+    } catch (error) {
+      this.store.finishSend(id, { error: error?.message ?? error });
+      throw error;
+    }
+  }
+
   /**
    * 发送一批文本消息（一条或多条）。
    * options: { replyToMessageId, atUserId }
@@ -84,12 +98,15 @@ export class SendQueue {
       const isLast = i === parts.length - 1;
       const gap = this.#gap(text, isLast);
       promises.push(chain(async () => {
+        assertCanSend(chatKey, options.signal);
+        if (options.runId && this.store.hasUncertainEffects(options.runId)) throw new Error('Previous send delivery is uncertain');
         this.#checkRate(chatKey);
         if (gap > 0) await sleep(gap);
-        const data = await this.onebot.sendText(kind, id, text, {
+        const data = await this.#deliver(chatKey, options, { type: 'text', text }, () => this.onebot.sendText(kind, id, text, {
           replyToMessageId: i === 0 ? options.replyToMessageId : null, // 引用挂在第一条上：回的就是那条
-          atUserId: i === 0 ? options.atUserId : null
-        });
+          atUserId: i === 0 ? options.atUserId : null,
+          signal: options.signal
+        }));
         const ts = Date.now();
         this.store.appendSelf(chatKey, { text, ts, mid: data?.message_id ?? null });
         this.onSent?.({ chatKey, text, messageId: data?.message_id ?? null });
@@ -123,10 +140,11 @@ export class SendQueue {
     return chain(async () => {
       this.#checkRate(chatKey);
       await sleep(randInt(600, 1500)); // 发表情前真人式的短暂停顿
-      const data = await this.onebot.sendSticker(kind, id, sticker.url, {
+      const data = await this.#deliver(chatKey, options, { type: 'sticker', id: sticker.id }, () => this.onebot.sendSticker(kind, id, sticker.url, {
         replyToMessageId: options.replyToMessageId ?? null,
-        atUserId: options.atUserId ?? null
-      });
+        atUserId: options.atUserId ?? null,
+        signal: options.signal
+      }));
       const ts = Date.now();
       this.store.appendSelf(chatKey, { text: `[表情包:${sticker.desc || sticker.localNote || sticker.id}]`, ts, mid: data?.message_id ?? null });
       this.onSent?.({ chatKey, text: `[表情包]`, messageId: data?.message_id ?? null, sticker: sticker.id });
@@ -135,12 +153,14 @@ export class SendQueue {
   }
 
   /** 拍一拍。发送成功后留档（self 记录），否则下一次运行不知道自己拍过。 */
-  poke(chatKey, targetUserId) {
+  poke(chatKey, targetUserId, options = {}) {
     const [kind, id] = String(chatKey).split(':');
     const chain = this.#chain(chatKey);
     return chain(async () => {
+      this.#checkRate(chatKey);
       await sleep(randInt(300, 900));
-      const data = await this.onebot.sendPoke(kind, id, targetUserId);
+      const data = await this.#deliver(chatKey, options, { type: 'poke', targetUserId },
+        () => this.onebot.sendPoke(kind, id, targetUserId, options.signal));
       const ts = Date.now();
       const target = kind === 'group' && targetUserId != null ? ` ${targetUserId}` : '对方';
       this.store.appendSelf(chatKey, { text: `[拍一拍] 你拍了拍${target}`, ts, mid: data?.message_id ?? null });

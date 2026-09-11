@@ -2,6 +2,7 @@
 // 支持工具调用、usage 统计、可自选模型 —— 这是与 DSH 解耦后的"大脑"接口。
 import { getConfig } from './config.js';
 import { resolveOfficialPrice, resolveModelPrice, priceAt } from './model-prices.js';
+import { setTimeout as delay } from 'node:timers/promises';
 
 function joinUrl(base, path) {
   return `${String(base).replace(/\/+$/, '')}${path}`;
@@ -114,13 +115,14 @@ export async function chatCompletionWithRetry(args, retries = 2) {
   let lastError = null;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
+      args.signal?.throwIfAborted();
       return await chatCompletion(args);
     } catch (error) {
       lastError = error;
-      if (attempt >= retries || !isRetryableError(error)) throw error;
+      if (args.signal?.aborted || attempt >= retries || !isRetryableError(error)) throw error;
       const wait = 1000 * Math.pow(2, attempt);   // 1s, 2s
       console.warn(`[llm] 请求失败（第 ${attempt + 1} 次尝试），${wait}ms 后重试：${error?.message ?? error}`);
-      await new Promise((r) => setTimeout(r, wait));
+      await delay(wait, undefined, { signal: args.signal });
     }
   }
   throw lastError;
@@ -135,7 +137,10 @@ export async function chatCompletion({ messages, tools = null, toolChoice = 'aut
   const api = overrides || effectiveApi();
   const body = {
     model: api.model,
-    messages,
+    messages: messages.map(({ role, content, tool_calls, tool_call_id, name }) => ({
+      role, content, ...(tool_calls ? { tool_calls } : {}),
+      ...(tool_call_id ? { tool_call_id } : {}), ...(name ? { name } : {})
+    })),
     stream: false
   };
   if (tools && tools.length > 0) {
@@ -148,40 +153,39 @@ export async function chatCompletion({ messages, tools = null, toolChoice = 'aut
   const controller = new AbortController();
   const timeoutMs = Math.max(5000, Number(api.timeoutMs) || 180000);
   const timer = setTimeout(() => controller.abort(new Error('请求超时')), timeoutMs);
+  const abort = () => controller.abort(signal.reason ?? new Error('Run cancelled'));
   if (signal) {
     if (signal.aborted) controller.abort(signal.reason ?? new Error('aborted'));
-    else signal.addEventListener('abort', () => controller.abort(signal.reason ?? new Error('aborted')), { once: true });
+    else signal.addEventListener('abort', abort, { once: true });
   }
 
-  let res;
   try {
-    res = await fetch(joinUrl(api.baseUrl, '/chat/completions'), {
+    const res = await fetch(joinUrl(api.baseUrl, '/chat/completions'), {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...authHeaders(api.apiKey, api.baseUrl, api.model) },
       body: JSON.stringify(body),
       signal: controller.signal
     });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`模型 API HTTP ${res.status}：${text.slice(0, 500)}`);
+    }
+    const data = await res.json();
+    const choice = data?.choices?.[0];
+    if (!choice) throw new Error('模型 API 响应缺少 choices');
+    return {
+      message: choice.message ?? {}, finishReason: choice.finish_reason ?? null,
+      usage: data.usage ?? null, model: data.model ?? api.model, raw: data
+    };
   } catch (error) {
-    clearTimeout(timer);
-    if (error?.name === 'AbortError') throw new Error(`模型请求超时（${timeoutMs}ms）`);
+    if (signal?.aborted) throw signal.reason ?? new Error('Run cancelled');
+    if (controller.signal.aborted) throw new Error(`模型请求超时（${timeoutMs}ms）`);
+    if (/模型 API HTTP/.test(String(error.message))) throw error;
     throw new Error(`模型请求失败：${error?.cause?.message ?? error?.message ?? error}`);
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', abort);
   }
-  clearTimeout(timer);
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`模型 API HTTP ${res.status}：${text.slice(0, 500)}`);
-  }
-  const data = await res.json().catch(() => { throw new Error('模型 API 返回了无法解析的 JSON'); });
-  const choice = data?.choices?.[0];
-  if (!choice) throw new Error(`模型 API 响应缺少 choices：${JSON.stringify(data).slice(0, 300)}`);
-  return {
-    message: choice.message ?? {},
-    finishReason: choice.finish_reason ?? null,
-    usage: data.usage ?? null,
-    model: data.model ?? api.model,
-    raw: data
-  };
 }
 
 /** 获取模型列表（GET /models）。返回 [{ id }]；失败抛错。 */
