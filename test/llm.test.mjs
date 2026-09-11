@@ -1,10 +1,24 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import http from 'node:http';
-import { chatCompletion, chatCompletionWithRetry, isRetryableError } from '../src/llm.js';
+import {
+  cachedTokensOfUsage,
+  chatCompletion,
+  chatCompletionWithRetry,
+  isRetryableError
+} from '../src/llm.js';
 import { DEFAULT_CONFIG, setRuntimeConfig } from '../src/config.js';
 
 describe('LLM client', () => {
+  it('reads cached input tokens from supported provider response shapes', () => {
+    assert.equal(cachedTokensOfUsage({
+      prompt_tokens_details: { cached_tokens: 120 }
+    }), 120);
+    assert.equal(cachedTokensOfUsage({ prompt_cache_hit_tokens: 80 }), 80);
+    assert.equal(cachedTokensOfUsage({ cached_tokens: 40 }), 40);
+    assert.equal(cachedTokensOfUsage({}), 0);
+  });
+
   it('strips local trace fields but preserves provider reasoning required by tool loops', async (t) => {
     const original = globalThis.fetch;
     t.after(() => { globalThis.fetch = original; });

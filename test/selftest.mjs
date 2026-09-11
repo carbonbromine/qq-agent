@@ -710,8 +710,14 @@ async function main() {
   const statusRes = await (await fetch(`http://127.0.0.1:${cfg.server.port}/api/status`)).json();
   assert.ok(statusRes.onebot.connected === true);
   assert.ok(statusRes.usage.totalTokens > 0, '今日 token 统计 > 0');
-  // cost 字段已移除（估算金额依赖单价配置，实际恒为 0，不展示）
-  assert.ok(statusRes.usage.cost === undefined, '成本估算字段已移除');
+  const todayUsageRes = await (await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/usage/stats?range=today`
+  )).json();
+  assert.equal(statusRes.usage.totalTokens, todayUsageRes.totals.totalTokens,
+    '顶部与用量页应使用同一份今日 Token 汇总');
+  assert.equal(statusRes.cost.cost, todayUsageRes.totals.cost,
+    '顶部与用量页应使用同一套逐调用计价');
+  assert.equal(statusRes.cost.calculation, 'per-call');
   const modelsRes = await (await fetch(`http://127.0.0.1:${cfg.server.port}/api/models`)).json();
   assert.strictEqual(modelsRes.models.length, 2, '模型列表 API');
   const sessRes = await (await fetch(`http://127.0.0.1:${cfg.server.port}/api/sessions`)).json();

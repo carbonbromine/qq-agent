@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { DATA_DIR } from './config.js';
+import { todayKey } from './util.js';
 
 const SESSIONS_DIR = path.join(DATA_DIR, 'sessions');
 
@@ -240,7 +241,7 @@ export class SessionRegistry {
 
   /** 在会话结束时累加今日用量。 */
   #bumpTodayUsage(s) {
-    const dayKey = localDayKey(s.startedAt);
+    const dayKey = todayKey(s.startedAt);
     let data = { dayKey, promptTokens: 0, completionTokens: 0, totalTokens: 0, cachedTokens: 0, runs: 0, webSearchCount: 0 };
     try {
       const parsed = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'usage-today.json'), 'utf8'));
@@ -287,12 +288,6 @@ export class SessionRegistry {
       console.error('[sessions] 持久化失败:', error?.message ?? error);
     }
   }
-}
-
-function localDayKey(ts) {
-  const d = new Date(ts);
-  const pad = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
 function triggerEntriesToText(trigger) {

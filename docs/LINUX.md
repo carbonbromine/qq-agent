@@ -151,6 +151,9 @@ unmatched messages before calling the model.
 - Token budget is checked between calls, not a guarantee against a single oversized
   response or unknown provider-side billing. Usage of failed attempts is retained.
 - LLM transient requests retry twice with backoff; persisted batch attempts cap at three.
+- Dashboard and usage-page costs are calculated from each provider call's model,
+  timestamp, prompt tokens, cached prompt tokens and completion tokens. Calendar-day
+  ranges use `Asia/Shanghai` regardless of the Linux host timezone.
 
 Legacy and threaded Agent Sessions use bounded reconstructed context plus the
 structured handoff. Lifecycle mode additionally carries the active thread's

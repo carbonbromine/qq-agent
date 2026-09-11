@@ -46,8 +46,20 @@ export function formatClockTime(ts = Date.now()) {
 }
 
 export function todayKey(ts = Date.now()) {
-  const d = new Date(ts);
-  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  const value = Number(ts);
+  const d = new Date((Number.isFinite(value) ? value : Date.now()) + 8 * 60 * 60 * 1000);
+  return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
+}
+
+/** 当前时间所属上海自然日的起点，返回 UTC 毫秒时间戳。 */
+export function shanghaiDayStart(ts = Date.now()) {
+  const value = Number(ts);
+  const shifted = new Date((Number.isFinite(value) ? value : Date.now()) + 8 * 60 * 60 * 1000);
+  return Date.UTC(
+    shifted.getUTCFullYear(),
+    shifted.getUTCMonth(),
+    shifted.getUTCDate()
+  ) - 8 * 60 * 60 * 1000;
 }
 
 // ── 文本处理 ─────────────────────────────────────────────────────────────

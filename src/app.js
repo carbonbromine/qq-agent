@@ -13,13 +13,13 @@ import { StickerManager } from './sticker-manager.js';
 import { SendQueue } from './sender.js';
 import { SessionRegistry } from './sessions.js';
 import { Orchestrator } from './orchestrator.js';
-import { listModels, chatCompletion, resolveApiKey, estimateCost, cacheHitRate } from './llm.js';
+import { listModels, chatCompletion, resolveApiKey, cachedTokensOfUsage } from './llm.js';
 import { resolveOfficialPrice, listOfficialPrices, isPeakHour, priceAt, resolveModelPrice, modelLabel, splitModelLabel, UNKNOWN_VENDOR } from './model-prices.js';
 import { initPriceFeed, refreshPriceFeed, priceFeedStatus } from './price-feed.js';
 import { currentProviders, setProviderKey, testAllProviders, testOneProvider, testModelChat, fetchModelsFrom, upsertProvider, addModelsToProvider, removeModelFromProvider } from './providers.js';
 import { scanModelsVision, visionResults, modelImageVerdict } from './vision-scan.js';
 import { builtinVisionResults } from './model-vision-docs.js';
-import { createEventBus, todayKey } from './util.js';
+import { createEventBus, todayKey, shanghaiDayStart } from './util.js';
 import { assertCanSend } from './access.js';
 
 // 全局 fetch（undici）默认连接建立超时只有 10 秒，openrouter.ai 这类海外端点
@@ -557,10 +557,41 @@ export function createApp({ log = console.log } = {}) {
 
       if (pathname === '/api/status' && method === 'GET') {
         const dayKey = todayKey();
-        const usage = sessions.todayUsage(dayKey);
+        const sessionUsage = sessions.todayUsage(dayKey);
+        const dailyStats = buildUsageStats({ range: 'today' });
+        const totals = dailyStats.totals;
+        const usage = {
+          dayKey,
+          promptTokens: totals.promptTokens,
+          completionTokens: totals.completionTokens,
+          totalTokens: totals.totalTokens,
+          cachedTokens: totals.cachedTokens,
+          runs: sessionUsage.runs,
+          webSearchCount: dailyStats.searchCount
+        };
         const cfgNow = getConfig();
-        // 成本估算：命中官方价走官方价，否则用手填单价
-        const cost = estimateCost(usage, { model: cfgNow.api?.model });
+        const currentPrice = resolveModelPrice(cfgNow.api?.model, cfgNow);
+        const currentTier = currentPrice.peak
+          ? priceAt(currentPrice, Date.now())
+          : currentPrice;
+        const cost = {
+          cost: totals.cost,
+          source: currentPrice.source,
+          calculation: 'per-call',
+          breakdown: totals.breakdown,
+          prices: {
+            in: currentTier.in,
+            out: currentTier.out,
+            cached: currentTier.cached
+          },
+          matched: currentPrice.matched,
+          peak: Boolean(currentTier.peak),
+          hasPeakTiers: totals.hasPeakModel,
+          peakCost: totals.peakCost,
+          offPeakCost: totals.offPeakCost,
+          exactCalls: totals.exactCalls,
+          calls: totals.runs
+        };
         return json(res, 200, {
           onebot: {
             connected: onebot.connected,
@@ -571,7 +602,7 @@ export function createApp({ log = console.log } = {}) {
           orchestrator: orchestrator.statusSummary(),
           usage,
           cost,
-          cacheHitRate: cacheHitRate(usage),
+          cacheHitRate: totals.cacheHitRate,
           webSearchCount: usage.webSearchCount || 0,
           paused: orchestrator.paused,
           pauseReason: orchestrator.pauseReason ?? null
@@ -1428,24 +1459,24 @@ function resolveRange(raw) {
   const s = String(raw || '7').trim().toLowerCase();
   const now = Date.now();
   if (s === 'today') {
-    const d = new Date(now);
-    d.setHours(0, 0, 0, 0);
-    return { mode: 'today', start: d.getTime(), end: now, label: '今天' };
+    return { mode: 'today', start: shanghaiDayStart(now), end: now, label: '今天' };
   }
   if (s === '24h') {
     return { mode: '24h', start: now - 24 * 60 * 60 * 1000, end: now, label: '最近 24 小时' };
   }
   const n = Math.min(30, Math.max(1, Number(s) || 7));
-  // 按自然日：从 N-1 天前的 0 点算起，保证"7 天"是 7 个完整日历日
-  const d = new Date(now);
-  d.setHours(0, 0, 0, 0);
-  return { mode: 'days', start: d.getTime() - (n - 1) * 24 * 60 * 60 * 1000, end: now, label: `最近 ${n} 天` };
+  // 按上海自然日：从 N-1 天前的 00:00 算起。
+  return {
+    mode: 'days',
+    start: shanghaiDayStart(now) - (n - 1) * 24 * 60 * 60 * 1000,
+    end: now,
+    label: `最近 ${n} 天`
+  };
 }
 
-/** 本地时区的 YYYY-MM-DD（用于按天分桶）。 */
+/** 上海时区的 YYYY-MM-DD（用于按天分桶）。 */
 function dayKeyOf(ts) {
-  const d = new Date(Number(ts) || 0);
-  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  return todayKey(ts);
 }
 
 /**
@@ -1534,7 +1565,7 @@ function collectUsageRows({ range }) {
       calls.push({
         promptTokens: rp,
         completionTokens: rc,
-        cachedTokens: Number(ru.prompt_tokens_details?.cached_tokens) || 0,
+        cachedTokens: cachedTokensOfUsage(ru),
         at,
         model: String(raw.model || s.model || '') || '(未知)'
       });
@@ -1606,6 +1637,7 @@ function priceOf(model, vendor) {
 function costOfRows(rows) {
   const cfg = getConfig();
   let cost = 0, peakCost = 0, offPeakCost = 0, peakTokens = 0, offPeakTokens = 0;
+  let freshCost = 0, cachedCost = 0, outputCost = 0;
   let promptTokens = 0, completionTokens = 0, cachedTokens = 0, exactCalls = 0, hasPeakModel = false;
   for (const r of rows) {
     const p = priceOf(r.model, r.vendor);
@@ -1615,8 +1647,14 @@ function costOfRows(rows) {
     const completion = Number(r.completionTokens) || 0;
     const cached = Math.min(Number(r.cachedTokens) || 0, prompt);
     const fresh = Math.max(0, prompt - cached);
-    const c = (fresh / 1_000_000) * tier.in + (cached / 1_000_000) * tier.cached + (completion / 1_000_000) * tier.out;
+    const freshPart = (fresh / 1_000_000) * tier.in;
+    const cachedPart = (cached / 1_000_000) * tier.cached;
+    const outputPart = (completion / 1_000_000) * tier.out;
+    const c = freshPart + cachedPart + outputPart;
     cost += c;
+    freshCost += freshPart;
+    cachedCost += cachedPart;
+    outputCost += outputPart;
     const tk = prompt + completion;
     if (isPeakHour(r.at)) { peakCost += c; peakTokens += tk; } else { offPeakCost += c; offPeakTokens += tk; }
     promptTokens += prompt;
@@ -1627,6 +1665,7 @@ function costOfRows(rows) {
   return {
     cost, peakCost, offPeakCost, peakTokens, offPeakTokens,
     promptTokens, completionTokens, cachedTokens,
+    breakdown: { fresh: freshCost, cached: cachedCost, output: outputCost },
     totalTokens: promptTokens + completionTokens,
     cacheHitRate: promptTokens ? Math.min(1, cachedTokens / promptTokens) : 0,
     peakRatio: (peakTokens + offPeakTokens) ? peakTokens / (peakTokens + offPeakTokens) : 0,
@@ -1652,8 +1691,6 @@ function groupBy(rows, field, limit = 0) {
 function buildUsageStats({ range = '7' } = {}) {
   const { rows, win, searchCount, toolCounts } = collectUsageRows({ range });
   const totals = costOfRows(rows);
-  // 单日/24小时场景下"按天"没有意义（只有一行），由前端决定是否隐藏
-  const days = win.mode === 'days' ? groupBy(rows, 'dayKey').map((x) => ({ day: x.key, ...x })) : [];
   // 按天分桶需要 dayKey 字段
   for (const r of rows) r.dayKey = dayKeyOf(r.at);
   const byDay = win.mode === 'days'

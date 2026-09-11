@@ -229,13 +229,18 @@ export function addUsage(target, usage) {
   target.promptTokens += prompt;
   target.completionTokens += completion;
   target.totalTokens += Number(usage.total_tokens) || (prompt + completion);
-  // 各家返回路径不同，逐个兼容
-  const cached = usage.prompt_tokens_details?.cached_tokens
+  target.cachedTokens = (Number(target.cachedTokens) || 0) + cachedTokensOfUsage(usage);
+  return target;
+}
+
+/** 兼容各供应商返回缓存命中 Token 的字段差异。 */
+export function cachedTokensOfUsage(usage = {}) {
+  return Number(
+    usage.prompt_tokens_details?.cached_tokens
     ?? usage.prompt_cache_hit_tokens
     ?? usage.cached_tokens
-    ?? 0;
-  target.cachedTokens = (Number(target.cachedTokens) || 0) + (Number(cached) || 0);
-  return target;
+    ?? 0
+  ) || 0;
 }
 
 export function emptyUsage() {
