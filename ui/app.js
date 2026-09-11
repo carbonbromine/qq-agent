@@ -2857,6 +2857,7 @@ function renderSettingsSidebar() {
     ['api', '模型 API'],
     ['search', '搜索服务'],
     ['memory', '记忆'],
+    ['moments', '每日动态'],
     ['persona', '人设'],
     ['allow', '聊天白名单'],
     ['chat', '聊天设置'],
@@ -2896,6 +2897,7 @@ function renderSettingsSection(c) {
     api: () => renderApiSection(c),
     search: () => renderSearchSection(c),
     memory: () => renderMemorySettingsSection(c),
+    moments: () => renderDailyMomentsSection(c),
     persona: () => renderPersonaSection(c),
     allow: () => renderAllowSection(c),
     chat: () => renderChatSection(c),
@@ -3127,6 +3129,75 @@ function renderMemorySettingsSection(c) {
     </div>
     <div class="field"><label>整理冷却时间（毫秒）</label><input type="number" id="cfg-mem-interval" min="1800000" step="600000" value="${esc(mem.consolidateMinIntervalMs ?? 21600000)}" /></div>
     <div class="hint">条数超过阈值且距上次整理超过该冷却时间后，才会在运行结束后后台整理。默认 6 小时（21600000 毫秒）。</div>`;
+}
+
+function renderDailyMomentsSection(c) {
+  const moments = c.dailyMoments || {};
+  const visibility = Number(moments.visibility) || 4;
+  return `
+    <h3 id="settings-moments">每日动态</h3>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-moments-enabled" ${moments.enabled === true ? 'checked' : ''} />
+      <label for="cfg-moments-enabled">启用每日群聊总结与说说决策</label></div>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-moments-catchup" ${moments.startupCatchup !== false ? 'checked' : ''} />
+      <label for="cfg-moments-catchup">服务错过定时点后补跑</label></div>
+    <div class="field-row">
+      <div class="field"><label>执行小时（上海时间）</label><input type="number" id="cfg-moments-hour" min="0" max="23" value="${esc(moments.hour ?? 23)}" /></div>
+      <div class="field"><label>执行分钟</label><input type="number" id="cfg-moments-minute" min="0" max="59" value="${esc(moments.minute ?? 30)}" /></div>
+      <div class="field"><label>说说可见范围</label>
+        <select id="cfg-moments-visibility">
+          <option value="1" ${visibility === 1 ? 'selected' : ''}>所有人可见</option>
+          <option value="4" ${visibility === 4 ? 'selected' : ''}>好友可见</option>
+          <option value="64" ${visibility === 64 ? 'selected' : ''}>仅自己可见</option>
+        </select></div>
+    </div>
+    <div class="field-row">
+      <div class="field"><label>每群最低消息数</label><input type="number" id="cfg-moments-min-messages" min="0" max="100" value="${esc(moments.minMessagesPerGroup ?? 3)}" /></div>
+      <div class="field"><label>最多汇总群数</label><input type="number" id="cfg-moments-max-groups" min="1" max="50" value="${esc(moments.maxGroups ?? 12)}" /></div>
+      <div class="field"><label>每群最多读取消息</label><input type="number" id="cfg-moments-max-messages" min="5" max="300" value="${esc(moments.maxMessagesPerGroup ?? 80)}" /></div>
+    </div>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-moments-images" ${moments.allowImages !== false ? 'checked' : ''} />
+      <label for="cfg-moments-images">允许模型查看并选择近期群图或收藏图</label></div>
+    <div class="field-row">
+      <div class="field"><label>单条说说最多配图</label><input type="number" id="cfg-moments-max-images" min="0" max="4" value="${esc(moments.maxImages ?? 1)}" /></div>
+      <div class="field"><label>最多研究调用</label><input type="number" id="cfg-moments-research" min="0" max="10" value="${esc(moments.maxResearchCalls ?? 4)}" /></div>
+      <div class="field"><label>模型最大轮次</label><input type="number" id="cfg-moments-rounds" min="2" max="16" value="${esc(moments.maxRounds ?? 8)}" /></div>
+    </div>
+    <div class="settings-actions">
+      <button class="btn btn-small" id="daily-moments-preview-btn">预览一次</button>
+      <button class="btn btn-primary btn-small" id="daily-moments-run-btn">立即总结并执行</button>
+      <span id="daily-moments-action-result" class="muted"></span>
+    </div>
+    <div id="daily-moments-status" class="daily-moments-status"><span class="muted">正在读取状态…</span></div>`;
+}
+
+async function loadDailyMomentsStatus() {
+  const box = $('#daily-moments-status');
+  if (!box) return;
+  try {
+    const status = await api('/api/daily-moments/status');
+    const latest = status.latest;
+    const records = Array.isArray(status.records) ? status.records.slice(0, 7) : [];
+    box.innerHTML = `
+      <div class="field-row">
+        <div class="field"><label>任务状态</label><div>${status.running ? '运行中' : (status.enabled ? '等待中' : '已关闭')}</div></div>
+        <div class="field"><label>下次执行</label><div>${status.nextRunAt ? esc(fmtTime(status.nextRunAt)) : '-'}</div></div>
+        <div class="field"><label>最近结果</label><div>${latest ? esc(latest.status || '-') : '-'}</div></div>
+      </div>
+      ${latest?.content ? `<div class="field"><label>最近正文</label><div class="daily-moments-content">${esc(latest.content)}</div></div>` : ''}
+      ${latest?.reason ? `<div class="field"><label>最近决定</label><div>${esc(latest.reason)}</div></div>` : ''}
+      ${records.length ? `<div class="table-wrap"><table class="usage-table">
+        <thead><tr><th>日期</th><th>状态</th><th>群数</th><th>配图</th><th>时间</th></tr></thead>
+        <tbody>${records.map((record) => `<tr>
+          <td>${esc(record.dayKey || '-')}</td>
+          <td>${esc(record.status || '-')}</td>
+          <td>${Number(record.groupCount) || 0}</td>
+          <td>${Number(record.imageCount) || 0}</td>
+          <td>${record.endedAt || record.startedAt ? esc(fmtTime(record.endedAt || record.startedAt)) : '-'}</td>
+        </tr>`).join('')}</tbody>
+      </table></div>` : ''}`;
+  } catch (error) {
+    box.innerHTML = `<span class="muted">状态读取失败：${esc(error.message)}</span>`;
+  }
 }
 
 function renderPersonaSection(c) {
@@ -3582,6 +3653,35 @@ function bindSettingsEvents(c) {
       $('#cfg-save-result').textContent = `保存失败：${e.message}`;
     }
   });
+
+  if ((state.settingsSection || 'api') === 'moments') {
+    loadDailyMomentsStatus();
+    const runMoments = async (publish) => {
+      const button = publish ? $('#daily-moments-run-btn') : $('#daily-moments-preview-btn');
+      const result = $('#daily-moments-action-result');
+      if (publish && !confirm('立即汇总今天的群聊，并允许模型按决定发布一条说说？')) return;
+      button.disabled = true;
+      result.textContent = publish ? '正在总结并执行…' : '正在生成预览…';
+      try {
+        await saveConfig({ quiet: true });
+        const response = await api('/api/daily-moments/run', {
+          method: 'POST',
+          body: JSON.stringify({ publish, confirm: publish })
+        });
+        const record = response.record || {};
+        result.textContent = response.alreadyAttempted
+          ? `今天已执行：${record.status || '-'}`
+          : `${publish ? '执行完成' : '预览完成'}：${record.status || '-'}${record.tid ? ` · ${record.tid}` : ''}`;
+        await loadDailyMomentsStatus();
+      } catch (error) {
+        result.textContent = `执行失败：${error.message}`;
+      } finally {
+        button.disabled = false;
+      }
+    };
+    $('#daily-moments-preview-btn')?.addEventListener('click', () => runMoments(false));
+    $('#daily-moments-run-btn')?.addEventListener('click', () => runMoments(true));
+  }
 
   $('#change-console-token-btn')?.addEventListener('click', async () => {
     const button = $('#change-console-token-btn');
@@ -4863,6 +4963,33 @@ async function saveConfig({ quiet = false } = {}) {
       provider: val('#cfg-mem-provider', c.memory?.provider || '').trim(),
       model: val('#cfg-mem-model', c.memory?.model || '').trim(),
       consolidateMinIntervalMs: Number(val('#cfg-mem-interval', c.memory?.consolidateMinIntervalMs ?? 21600000)) || 21600000
+    };
+  }
+
+  if (sec === 'moments') {
+    patch.dailyMoments = {
+      ...(c.dailyMoments || {}),
+      enabled: chk('#cfg-moments-enabled', c.dailyMoments?.enabled === true),
+      startupCatchup: chk('#cfg-moments-catchup', c.dailyMoments?.startupCatchup !== false),
+      hour: clampInt(val('#cfg-moments-hour', c.dailyMoments?.hour), 0, 23, 23),
+      minute: clampInt(val('#cfg-moments-minute', c.dailyMoments?.minute), 0, 59, 30),
+      minMessagesPerGroup: clampInt(
+        val('#cfg-moments-min-messages', c.dailyMoments?.minMessagesPerGroup),
+        0, 100, 3
+      ),
+      maxGroups: clampInt(val('#cfg-moments-max-groups', c.dailyMoments?.maxGroups), 1, 50, 12),
+      maxMessagesPerGroup: clampInt(
+        val('#cfg-moments-max-messages', c.dailyMoments?.maxMessagesPerGroup),
+        5, 300, 80
+      ),
+      allowImages: chk('#cfg-moments-images', c.dailyMoments?.allowImages !== false),
+      maxImages: clampInt(val('#cfg-moments-max-images', c.dailyMoments?.maxImages), 0, 4, 1),
+      visibility: clampInt(val('#cfg-moments-visibility', c.dailyMoments?.visibility), 1, 64, 4),
+      maxResearchCalls: clampInt(
+        val('#cfg-moments-research', c.dailyMoments?.maxResearchCalls),
+        0, 10, 4
+      ),
+      maxRounds: clampInt(val('#cfg-moments-rounds', c.dailyMoments?.maxRounds), 2, 16, 8)
     };
   }
 

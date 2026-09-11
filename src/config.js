@@ -161,6 +161,23 @@ export const DEFAULT_CONFIG = {
     idleThresholdMs: 1800000,   // 群里静默多久才算"冷场"
     probability: 0.25
   },
+  // 每日群聊记忆总结与 QQ 空间动态
+  dailyMoments: {
+    enabled: false,
+    hour: 23,                    // 上海时间
+    minute: 30,
+    startupCatchup: true,        // 错过定时点后，服务恢复时补一次
+    minMessagesPerGroup: 3,
+    maxGroups: 12,
+    maxMessagesPerGroup: 80,
+    maxPromptChars: 120000,
+    allowImages: true,
+    maxImages: 1,
+    visibility: 4,              // 1=所有人 4=好友 64=仅自己
+    targetUins: [],
+    maxResearchCalls: 4,
+    maxRounds: 8
+  },
   // 表情包
   sticker: {
     enabled: true,

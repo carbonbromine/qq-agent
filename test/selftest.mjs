@@ -718,6 +718,20 @@ async function main() {
   assert.equal(statusRes.cost.cost, todayUsageRes.totals.cost,
     '顶部与用量页应使用同一套逐调用计价');
   assert.equal(statusRes.cost.calculation, 'per-call');
+  const dailyMomentsStatus = await (await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/daily-moments/status`
+  )).json();
+  assert.equal(dailyMomentsStatus.enabled, false, '每日动态默认关闭');
+  assert.ok(Array.isArray(dailyMomentsStatus.records), '每日动态状态返回历史数组');
+  const unconfirmedMoment = await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/daily-moments/run`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ publish: true })
+    }
+  );
+  assert.equal(unconfirmedMoment.status, 409, '手动发布说说必须显式确认');
   const modelsRes = await (await fetch(`http://127.0.0.1:${cfg.server.port}/api/models`)).json();
   assert.strictEqual(modelsRes.models.length, 2, '模型列表 API');
   const sessRes = await (await fetch(`http://127.0.0.1:${cfg.server.port}/api/sessions`)).json();

@@ -121,6 +121,7 @@ bash manage.sh backup /path/to/new-backup-dir
 - `messages.sqlite`：消息、租约和出站状态
 - `sessions/`：每次 Agent 运行记录
 - `memory/`：群友长期印象和跨 Session 会话交接状态
+- `daily-moments.json`：每日群聊总结、说说决策与发布结果
 - `console-access.txt`：控制台地址和 Token，权限 `0600`
 
 每次 Agent 运行仍有独立的审计记录。`lifecycle` 模式会按 `threadId`
@@ -131,6 +132,11 @@ bash manage.sh backup /path/to/new-backup-dir
 
 顶部状态与用量页均按每次模型调用返回的 `usage`、实际模型和调用时刻计价。
 “今日”以及按天统计固定使用 `Asia/Shanghai` 自然日，不受服务器系统时区影响。
+
+“设置 -> 每日动态”可启用每日群聊总结。任务按上海时间运行，读取当天活跃群的
+消息、长期记忆和会话交接；模型可以联网研究、查看近期群图或收藏图，最终自行
+决定发布或跳过。发布通过 SnowLuma `send_qzone_msg` 完成，并按日期记录幂等状态，
+服务重启不会自动重复发布结果不明的说说。
 
 聊天、密钥、Token 和运行数据均被 Git 忽略。
 

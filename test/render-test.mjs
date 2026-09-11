@@ -108,7 +108,8 @@ try {
   // 取出渲染函数并执行
   const sections = [
     'renderSettingsSection', 'renderApiSection', 'renderSearchSection',
-    'renderMemorySettingsSection', 'renderPersonaSection', 'renderAllowSection',
+    'renderMemorySettingsSection', 'renderDailyMomentsSection',
+    'renderPersonaSection', 'renderAllowSection',
     'renderChatSection', 'renderDesktopSection', 'renderOnebotSection',
     'renderPersonaPicker', 'renderHealthCard'
   ];
@@ -168,6 +169,22 @@ try {
   } else {
     fail++;
     console.log('  FAIL  OneBot Token 控件会丢失或回显密钥');
+  }
+  const momentsHtml = ctx.renderDailyMomentsSection(cfg);
+  const momentControls = [
+    'cfg-moments-enabled', 'cfg-moments-catchup',
+    'cfg-moments-hour', 'cfg-moments-minute', 'cfg-moments-visibility',
+    'cfg-moments-min-messages', 'cfg-moments-max-groups',
+    'cfg-moments-max-messages', 'cfg-moments-images',
+    'cfg-moments-max-images', 'cfg-moments-research', 'cfg-moments-rounds',
+    'daily-moments-preview-btn', 'daily-moments-run-btn', 'daily-moments-status'
+  ].every((id) => momentsHtml.includes(`id="${id}"`));
+  if (momentControls) {
+    pass++;
+    console.log('  OK    每日动态调度、研究、配图和手动执行控件完整');
+  } else {
+    fail++;
+    console.log('  FAIL  每日动态设置控件缺失');
   }
   const conversationHtml = ctx.renderChatSection({
     ...cfg,

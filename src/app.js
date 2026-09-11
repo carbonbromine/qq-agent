@@ -13,6 +13,7 @@ import { StickerManager } from './sticker-manager.js';
 import { SendQueue } from './sender.js';
 import { SessionRegistry } from './sessions.js';
 import { Orchestrator } from './orchestrator.js';
+import { DailyMomentsManager } from './daily-moments.js';
 import { listModels, chatCompletion, resolveApiKey, cachedTokensOfUsage } from './llm.js';
 import { resolveOfficialPrice, listOfficialPrices, isPeakHour, priceAt, resolveModelPrice, modelLabel, splitModelLabel, UNKNOWN_VENDOR } from './model-prices.js';
 import { initPriceFeed, refreshPriceFeed, priceFeedStatus } from './price-feed.js';
@@ -121,6 +122,16 @@ export function createApp({ log = console.log } = {}) {
     onSent: ({ chatKey, text }) => log(`[发送 -> ${chatKey}] ${String(text).slice(0, 60)}`)
   });
   const orchestrator = new Orchestrator({ store, memory, stickers, sender, sessions, onebot, emit });
+  const dailyMoments = new DailyMomentsManager({
+    store,
+    memory,
+    stickers,
+    onebot,
+    sessions,
+    resolveChatName: (groupId) => orchestrator.getChatName(groupId),
+    emit,
+    log
+  });
 
   // 远程价格表：启动即初始化（内部幂等；URL 为空则完全不动）
   initPriceFeed(cfg.api?.priceRemoteUrl || '');
@@ -1034,9 +1045,32 @@ export function createApp({ log = console.log } = {}) {
         }
         if (closedThreads) emit('chat-update', '*');
         if (next.proactive?.enabled) orchestrator.startProactiveLoop(); else orchestrator.stopProactiveLoop();
+        dailyMoments.reconfigure();
         initPriceFeed(next.api?.priceRemoteUrl || '');   // 远程价格表 URL 可能改了（内部幂等）
         emit('status', { configUpdated: true });
         return json(res, 200, { ok: true, config: sanitizeConfig(next) });
+      }
+
+      if (pathname === '/api/daily-moments/status' && method === 'GET') {
+        return json(res, 200, dailyMoments.status());
+      }
+
+      if (pathname === '/api/daily-moments/run' && method === 'POST') {
+        const body = await readBody(req);
+        if (body.publish === true && body.confirm !== true) {
+          return json(res, 409, { error: '发布说说需要显式确认' });
+        }
+        try {
+          const result = await dailyMoments.runNow({
+            ...(body.dayKey ? { dayKey: String(body.dayKey) } : {}),
+            publish: body.publish === true,
+            force: body.force === true,
+            confirmDuplicateRisk: body.confirmDuplicateRisk === true
+          });
+          return json(res, 200, result);
+        } catch (error) {
+          return json(res, 500, { error: String(error?.message ?? error) });
+        }
       }
 
       if (pathname === '/api/models' && method === 'GET') {
@@ -1410,6 +1444,7 @@ export function createApp({ log = console.log } = {}) {
     await onebot.connect();
     orchestrator.startRecoveryLoop();
     if (getConfig().proactive?.enabled) orchestrator.startProactiveLoop();
+    if (getConfig().dailyMoments?.enabled) dailyMoments.start();
     log(`控制台已就绪：http://${serverCfg.host}:${port} (${getConfig().runtime.mode})`);
     log(`OneBot: ws=${getConfig().onebot?.wsUrl} http=${getConfig().onebot?.httpUrl}`);
     log(`模型: ${getConfig().api.model || '（未设置，请在设置里选择）'} @ ${getConfig().api.baseUrl}`);
@@ -1417,6 +1452,8 @@ export function createApp({ log = console.log } = {}) {
   }
 
   async function stop() {
+    dailyMoments.stop();
+    dailyMoments.abort();
     onebot.close();
     await orchestrator.abortAll();
     await Promise.allSettled([...ingress.values()]);
@@ -1439,7 +1476,22 @@ export function createApp({ log = console.log } = {}) {
     store.close();
   }
 
-  return { server, onebot, store, memory, stickers, sender, sessions, orchestrator, start, stop, emit, getConfig, updateConfig };
+  return {
+    server,
+    onebot,
+    store,
+    memory,
+    stickers,
+    sender,
+    sessions,
+    orchestrator,
+    dailyMoments,
+    start,
+    stop,
+    emit,
+    getConfig,
+    updateConfig
+  };
 }
 
 /**

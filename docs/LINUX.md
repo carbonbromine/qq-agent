@@ -136,6 +136,20 @@ No forced reply policy is added: at full trigger tier every batch reaches the
 model, but the model can finish without sending. Lower tiers intentionally skip
 unmatched messages before calling the model.
 
+## Daily Qzone Moments
+
+The optional daily-moments scheduler runs on an `Asia/Shanghai` wall-clock time.
+It builds an internal summary from each eligible group's messages, member memory
+and handoff state. The model may use a restricted search/fetch tool loop, inspect
+recent group images or saved stickers, and then explicitly choose `publish` or
+`skip`. Qzone writes use SnowLuma's `send_qzone_msg` action; text and image
+publishing requires SnowLuma `1.14.15-node` or newer.
+
+Each run is persisted in `daily-moments.json` before any external write. A
+`publishing`, `published` or `publish-unknown` record blocks automatic reruns for
+that Shanghai calendar day. Recent Qzone content is also checked before publish
+to avoid duplicating an already-created post after an ambiguous response.
+
 ## Budgets And Context
 
 - `wakeDelayMs=10000`, `drainDelayMs=10000`, `maxBatchWaitMs=20000`.
@@ -169,8 +183,8 @@ Bridge.
 ## Data And Backup
 
 The data directory contains `config.json` (0600), `messages.sqlite` plus WAL/SHM,
-member memory files, per-chat `memory/*/_handoff.json`, `sessions/` and sticker
-metadata. systemd uses UMask=0077.
+member memory files, per-chat `memory/*/_handoff.json`, `daily-moments.json`,
+`sessions/` and sticker metadata. systemd uses UMask=0077.
 Legacy `messages/group_123.json` files migrate once transactionally and are left
 unchanged. Corrupt archives abort migration rather than being treated as empty.
 Keep messages on a disk with sufficient free space; completed session logs default
