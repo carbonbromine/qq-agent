@@ -169,6 +169,31 @@ try {
     fail++;
     console.log('  FAIL  OneBot Token 控件会丢失或回显密钥');
   }
+  const conversationHtml = ctx.renderChatSection({
+    ...cfg,
+    allow: { ...cfg.allow, groups: ['123'] },
+    conversation: {
+      ...cfg.conversation,
+      mode: 'lifecycle',
+      unifiedMode: false,
+      groupModes: { 123: 'threaded' }
+    }
+  });
+  const conversationControls = [
+    'cfg-conversation-mode', 'cfg-conversation-unified',
+    'conversation-group-select', 'conversation-group-mode',
+    'cfg-life-silent', 'cfg-life-active', 'cfg-life-hard',
+    'cfg-life-rollover', 'cfg-life-history', 'cfg-life-chars'
+  ].every((id) => conversationHtml.includes(`id="${id}"`));
+  if (conversationControls
+      && conversationHtml.includes('value="lifecycle" selected')
+      && conversationHtml.includes('value="threaded"')) {
+    pass++;
+    console.log('  OK    三种对话模式及分群覆盖控件完整');
+  } else {
+    fail++;
+    console.log('  FAIL  三种对话模式或分群覆盖控件缺失');
+  }
 
   // 滑条换算函数
   console.log('\n=== 滑条换算（UI 侧）===');

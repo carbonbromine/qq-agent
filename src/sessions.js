@@ -58,7 +58,13 @@ export class SessionRegistry {
       model: s.model ?? '',
       trigger: s.triggerSummary ?? '',
       promptChars: s.promptChars ?? 0,
-      rounds: s.rounds ?? 0
+      rounds: s.rounds ?? 0,
+      conversationMode: s.conversationMode ?? 'legacy',
+      threadId: s.threadId ?? null,
+      threadState: s.threadState ?? null,
+      promptLayout: s.promptLayout ?? '',
+      lifecycleContinuation: s.lifecycleContinuation === true,
+      callUsage: s.callUsage ?? []
     };
   }
 

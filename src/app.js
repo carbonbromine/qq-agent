@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { getConfig, updateConfig, DATA_DIR } from './config.js';
+import { conversationConfigForChat, getConfig, updateConfig, DATA_DIR } from './config.js';
 import { customSearch } from './web-search.js';
 import { OneBotClient, segmentsToText, extractMediaFromSegments, expandForwardNodes } from './onebot.js';
 import { ChatStore } from './store.js';
@@ -79,6 +79,12 @@ export function createApp({ log = console.log } = {}) {
             trigger: s.triggerSummary ?? '',
             triggerSummary: s.triggerSummary ?? '',
             messages: s.messages ?? [],
+            conversationMode: s.conversationMode ?? 'legacy',
+            threadId: s.threadId ?? null,
+            threadState: s.threadState ?? null,
+            promptLayout: s.promptLayout ?? '',
+            lifecycleContinuation: s.lifecycleContinuation === true,
+            callUsage: s.callUsage ?? [],
             // sent/finishReason/error/endedAt 必须随 SSE 推下去：
             // 曾经载荷里没有它们，"已发送到 QQ"徽标只能等 HTTP 轮询带回来；
             // 而会话一结束轮询就不再拉详情（只刷 running/waiting），
@@ -164,6 +170,7 @@ export function createApp({ log = console.log } = {}) {
   async function ingestMessage(kind, id, event) {
     const cfgNow = getConfig();
     if (!allowed(kind, id, cfgNow)) return; // 白名单外的聊天完全不记录
+    const chatKey = `${kind}:${id}`;
 
     const segments = Array.isArray(event.message) ? event.message : null;
     const senderId = String(event.sender?.user_id ?? event.user_id ?? '');
@@ -179,7 +186,20 @@ export function createApp({ log = console.log } = {}) {
     let reply = null;
     if (segments) {
       const replySegment = segments.find((segment) => segment?.type === 'reply' && segment?.data?.id != null);
-      if (replySegment) reply = await resolveReply(replySegment.data.id);
+      if (replySegment) {
+        reply = await resolveReply(replySegment.data.id);
+        if (!reply) {
+          const local = store.findByMid(chatKey, replySegment.data.id);
+          if (local) {
+            reply = {
+              messageId: String(replySegment.data.id),
+              sender: local.self ? (onebot.selfNickname || cfgNow.persona?.botName || '我') : local.senderName,
+              senderId: local.self ? String(onebot.selfId || '') : String(local.senderId || ''),
+              text: String(local.text || '').slice(0, 120)
+            };
+          }
+        }
+      }
       text = await segmentsToText(segments, {
         resolveReply: (mid) => (
           reply && String(reply.messageId) === String(mid)
@@ -221,10 +241,10 @@ export function createApp({ log = console.log } = {}) {
       reply,
       media
     };
-    const stored = isSelf ? store.appendSelf(`${kind}:${id}`, message) : store.appendIncoming(`${kind}:${id}`, message);
+    const stored = isSelf ? store.appendSelf(chatKey, message) : store.appendIncoming(chatKey, message);
     if (stored.duplicate) return;
-    emit('chat-update', `${kind}:${id}`);
-    if (!isSelf) orchestrator.onIncoming(`${kind}:${id}`);
+    emit('chat-update', chatKey);
+    if (!isSelf) orchestrator.onIncoming(chatKey);
   }
 
   async function ingestPoke(event) {
@@ -965,6 +985,9 @@ export function createApp({ log = console.log } = {}) {
 
       if (pathname === '/api/config' && method === 'POST') {
         const patch = await readBody(req);
+        const previousModes = new Map(
+          store.listChats().map((chatKey) => [chatKey, conversationConfigForChat(chatKey).mode])
+        );
         delete patch.runtime;
         if (patch.server) {
           delete patch.server.token;
@@ -972,6 +995,13 @@ export function createApp({ log = console.log } = {}) {
         }
         const next = updateConfig(patch);
         store.setMaxPerChat(next.store?.maxMessagesPerChat ?? 0);
+        let closedThreads = 0;
+        for (const [chatKey, previousMode] of previousModes) {
+          if (conversationConfigForChat(chatKey).mode !== previousMode) {
+            if (store.closeConversationThread(chatKey, 'mode-changed')) closedThreads += 1;
+          }
+        }
+        if (closedThreads) emit('chat-update', '*');
         if (next.proactive?.enabled) orchestrator.startProactiveLoop(); else orchestrator.stopProactiveLoop();
         initPriceFeed(next.api?.priceRemoteUrl || '');   // 远程价格表 URL 可能改了（内部幂等）
         emit('status', { configUpdated: true });
@@ -1192,6 +1222,15 @@ export function createApp({ log = console.log } = {}) {
       }
 
       const chatThreadMatch = /^\/api\/chats\/(group|private)_(\d+)\/thread$/.exec(pathname);
+      if (chatThreadMatch && method === 'GET') {
+        const chatKey = `${chatThreadMatch[1]}:${chatThreadMatch[2]}`;
+        return json(res, 200, {
+          chatKey,
+          mode: conversationConfigForChat(chatKey).mode,
+          thread: store.getConversationThread(chatKey),
+          checkpoint: store.latestThreadCheckpoint(chatKey)
+        });
+      }
       if (chatThreadMatch && method === 'DELETE') {
         const chatKey = `${chatThreadMatch[1]}:${chatThreadMatch[2]}`;
         const closed = store.closeConversationThread(chatKey, 'operator');

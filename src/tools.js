@@ -546,6 +546,11 @@ export function buildToolDefs() {
             description: '仍未解决、需要后续消息确认的问题'
           },
           nextStep: { type: 'string', description: '下次继续时准备做什么或等待什么' },
+          threadDisposition: {
+            type: 'string',
+            enum: ['active', 'listening', 'close'],
+            description: '生命周期建议：active=仍在积极推进，listening=暂时沉默等待，close=话题已结束'
+          },
           ttlMinutes: {
             type: 'integer',
             minimum: 5,
@@ -565,12 +570,16 @@ export function buildToolDefs() {
         const draft = { summary };
         for (const key of [
           'topic', 'hypotheses', 'evidence', 'facts', 'decisions',
-          'rejectedDirections', 'openQuestions', 'nextStep', 'ttlMinutes', 'clearHandoff'
+          'rejectedDirections', 'openQuestions', 'nextStep',
+          'threadDisposition', 'ttlMinutes', 'clearHandoff'
         ]) {
           if (Object.hasOwn(args, key)) draft[key] = args[key];
         }
         ctx.session.finishReason = summary;
         ctx.session.handoffDraft = draft;
+        ctx.session.threadDisposition = ['active', 'listening', 'close'].includes(args.threadDisposition)
+          ? args.threadDisposition
+          : null;
         return ok({ finished: true, handoffPending: true });
       }
     }

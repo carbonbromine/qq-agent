@@ -14,6 +14,8 @@ OneBot WebSocket
   -> 按会话串行入库
   -> SQLite/WAL 消息状态机
   -> 10~20 秒有界聚合
+  -> legacy / threaded / lifecycle 路由
+  -> 可选持久化线程与检查点
   -> 一次性 Agent 会话
   -> 会话绑定工具
   -> OneBot HTTP
@@ -105,7 +107,8 @@ bash -n deploy.sh manage.sh
 ```
 
 详细说明见 [Linux 运维手册](docs/LINUX.md)。
-试验分支的持久化对话线程见
+试验性三模式对话引擎见
+[Conversation Modes](docs/CONVERSATION_MODES.md)；早期参与者续接方案见
 [Threaded Conversation Pilot](docs/THREADED_PILOT.md)。
 
 ## 许可

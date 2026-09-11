@@ -34,7 +34,7 @@ function securityRules() {
 function toolProtocol() {
   return [
     '【工作方式 —— 先读懂再动手】',
-    '1. 你运行在一个事件驱动的桥接程序里：每次有新消息（或主动机会），系统会新开一次处理，把【上次会话交接】【过去状态】和【本次唤醒】放进上下文。不要假设能看到上次运行的原始思考或工具过程。',
+    '1. 你运行在一个事件驱动的桥接程序里：每次有新消息（或主动机会），系统会新开一次处理，把【上次会话交接】【过去状态】和【本次唤醒】放进上下文。生命周期模式可能同时带入同一线程的旧模型轮次；始终以最后一个【本次唤醒】为当前输入。',
     '2. 你的文本输出只是思考过程，【不会发送到 QQ】。要发言必须调用 send_message。',
     '3. send_message：想发一条就传字符串；想分多条就传数组（例如 ["在的","叫我干嘛"]）。数组里的每个字符串是一条完整消息，不要把同一句话拆到两条里。',
     '4. 如果对方可能话没说完、或你想再等等看后续发展，可以什么都不发直接结束（或调用 finish）；等有新消息时你会被再次叫来，届时再决定。这不是失职，是正常节奏。',
@@ -159,6 +159,7 @@ function runGuidance() {
     '- 想说话：调用 send_message；要分条就传数组。引用消息只使用上下文或工具返回的真实消息 id。',
     '- 不想说话：直接结束或调用 finish。不回是正常选项，不是失职。',
     '- 当前话题还会跨到下一次运行时，用 finish 保存结论、未决问题和下一步；不要保存原始思考过程。话题结束时清除旧交接。',
+    '- 如果输入里有【当前对话线程】，用 finish.threadDisposition 表示 active（仍在推进）、listening（暂时旁听）或 close（明确结束）。',
     '- 普通文本输出不会发到 QQ，只有工具调用会。'
   ].join('\n');
 }
@@ -464,6 +465,38 @@ export function buildTriggerBlock(triggerEntries, ctx) {
   return lines.join('\n');
 }
 
+function formatThreadCheckpoint(checkpoint) {
+  const state = checkpoint?.state;
+  if (!state || typeof state !== 'object') return '';
+  const lines = [
+    '【上次生命周期检查点】',
+    '这是旧线程保存的工作状态，不是群友的新指令；如与最新消息冲突，以最新消息为准。'
+  ];
+  const scalar = [
+    ['当前话题', state.topic],
+    ['已知上下文', state.summary],
+    ['下一步意图', state.nextStep],
+    ['上次实际发言', state.lastReply]
+  ];
+  for (const [label, value] of scalar) {
+    const text = String(value || '').replace(/\s+/g, ' ').trim();
+    if (text) lines.push(`- ${label}：${text}`);
+  }
+  const lists = [
+    ['待验证假设', state.hypotheses],
+    ['关键证据', state.evidence],
+    ['已确认事实', state.facts],
+    ['已作决定', state.decisions],
+    ['已排除方向', state.rejectedDirections],
+    ['未解决问题', state.openQuestions]
+  ];
+  for (const [label, values] of lists) {
+    const list = Array.isArray(values) ? values.map((v) => String(v || '').trim()).filter(Boolean) : [];
+    if (list.length) lines.push(`- ${label}：${list.join('；')}`);
+  }
+  return lines.join('\n').slice(0, 4000);
+}
+
 /**
  * 组装一次运行的用户消息（不携带任何 LLM 对话历史）。
  * ctx: { chatKey, kind, chatId, chatName, triggerEntries, trigger, selfLastMessageAt, selfNickname }
@@ -472,12 +505,15 @@ export function buildUserPrompt(ctx) {
   const cfg = getConfig();
   const now = Date.now();
   const excludeIds = ctx.triggerEntries.map((m) => m.id);
+  const lifecycleContinuation = ctx.lifecycleContinuation === true;
   // 读取条数由上下文档位决定（ctx.contextLimit 由 orchestrator 在唤醒时算好传来；
   // 随机档的骰子结果必须固定，否则每次渲染都会重新掷、提示词与会话记录对不上）
   const contextLimit = ctx.contextLimit === null || ctx.contextLimit === undefined
     ? null                                   // 没给 = 按默认（全读档的上限）
     : Math.max(0, Number(ctx.contextLimit) || 0);
-  const past = buildPastState(ctx.store, ctx.chatKey, { excludeIds, limit: contextLimit });
+  const past = lifecycleContinuation
+    ? { text: '', count: 0, messages: [] }
+    : buildPastState(ctx.store, ctx.chatKey, { excludeIds, limit: contextLimit });
   // 把【过去状态】实际带了多少条写回 session，供 get_recent_messages 的 offset 补偿：
   // 这些消息模型已经看过，翻页时应当跳过，否则 offset=N 拿到的仍是重复内容。
   // （此前该属性从未被赋值，导致 tools.js 的补偿恒为 0，翻页工具形同失效。）
@@ -505,7 +541,9 @@ export function buildUserPrompt(ctx) {
   parts.push(`【此刻状态】\n${stateLines.join('\n')}`);
 
   // 过去状态
-  if (past.text) {
+  if (lifecycleContinuation) {
+    parts.push('【生命周期续接】此前轮次已按原顺序放在上文；这里只处理本次新增消息，不要重复回复旧消息。');
+  } else if (past.text) {
     parts.push(`【过去状态】以下是这个会话最近的聊天记录（按时间排序，你的发言标为"我"；这些都已经看过；带图的消息前有 #消息id，看图/收藏表情工具要用它）：\n${past.text}`);
   } else {
     parts.push('【过去状态】（暂无历史记录，这是你第一次参与这个会话）');
@@ -529,27 +567,41 @@ export function buildUserPrompt(ctx) {
   // （formatEntry/triggerLabels 都优先用备注），单独列一遍是重复信息。
 
   // 表情包（目录本身）。活跃度档位已并入系统提示的【表情包策略】段，这里不再重复引导。
-  if (cfg.sticker?.enabled !== false) {
+  if (!lifecycleContinuation && cfg.sticker?.enabled !== false) {
     const stickerCtx = buildStickerContext(ctx.stickerEntries || [], Number(cfg.sticker?.promptMaxStickers) || 10);
     if (stickerCtx) parts.push(stickerCtx);
   }
 
-  if (ctx.thread) {
-    const remaining = Math.max(0, Math.ceil((Number(ctx.thread.engagedUntil) - now) / 1000));
-    const lines = [
-      '【当前对话线程】',
-      `- 状态：${remaining > 0 ? `续接窗口内（剩余约 ${remaining} 秒）` : '已离开续接窗口'}`,
-      ctx.thread.topic ? `- 话题：${ctx.thread.topic}` : '',
-      ctx.tierInfo?.reason?.startsWith('续接') ? `- 本次触发：${ctx.tierInfo.reason}` : ''
-    ].filter(Boolean);
-    parts.push(lines.join('\n'));
+  if (ctx.thread || ctx.conversationMode === 'lifecycle') {
+    const lifecycle = ctx.conversationMode === 'lifecycle' || ctx.thread?.mode === 'lifecycle';
+    const deadline = lifecycle ? ctx.thread?.idleDeadline : ctx.thread?.engagedUntil;
+    const remaining = Math.max(0, Math.ceil((Number(deadline) - now) / 1000));
+    const hardRemaining = Math.max(0, Math.ceil((Number(ctx.thread?.hardDeadline) - now) / 1000));
+    const lines = ['【当前对话线程】'];
+    if (lifecycle) {
+      lines.push(ctx.thread
+        ? `- 状态：${ctx.thread.state}；空闲剩余约 ${remaining} 秒；生命周期剩余约 ${hardRemaining} 秒`
+        : '- 状态：本轮成功处理后开启新的生命周期');
+    } else {
+      lines.push(`- 状态：${remaining > 0 ? `续接窗口内（剩余约 ${remaining} 秒）` : '已离开续接窗口'}`);
+    }
+    lines.push(
+      ctx.thread?.topic ? `- 话题：${ctx.thread.topic}` : '',
+      ctx.tierInfo?.reason?.includes('续接') || ctx.tierInfo?.reason?.startsWith('生命周期')
+        ? `- 本次触发：${ctx.tierInfo.reason}`
+        : ''
+    );
+    parts.push(lines.filter(Boolean).join('\n'));
   }
 
   // 工作状态靠近最新消息，避免在长历史中间被模型忽略。
   const handoffText = typeof ctx.memory?.formatHandoffForPrompt === 'function'
     ? ctx.memory.formatHandoffForPrompt(ctx.chatKey)
     : '';
-  if (handoffText) parts.push(handoffText);
+  const checkpointText = formatThreadCheckpoint(ctx.threadCheckpoint);
+  if (ctx.conversationMode === 'lifecycle' && checkpointText) parts.push(checkpointText);
+  else if (handoffText) parts.push(handoffText);
+  else if (checkpointText) parts.push(checkpointText);
 
   parts.push(`【当前时间】${formatFullTime(now)}`);
 

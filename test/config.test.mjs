@@ -21,7 +21,7 @@ test('migrates legacy desktop and DSH keys into the Linux configuration', async 
     ui: { theme: '?' }
   }));
   process.env.QQ_AGENT_DATA_DIR = dir;
-  const { getConfig, updateConfig } = await import('../src/config.js');
+  const { conversationConfigForChat, getConfig, updateConfig } = await import('../src/config.js');
   const config = getConfig();
   assert.deepEqual(config.onebot, {
     wsUrl: 'ws://127.0.0.1:13001', httpUrl: 'http://127.0.0.1:13000',
@@ -39,6 +39,8 @@ test('migrates legacy desktop and DSH keys into the Linux configuration', async 
     ui: { refreshMs: 5000 },
     conversation: {
       mode: 'threaded',
+      unifiedMode: false,
+      groupModes: { 100: 'lifecycle', 200: 'legacy' },
       continuationWindowMs: 120000,
       threadTtlMs: 900000,
       continuationContextCount: 80
@@ -49,5 +51,13 @@ test('migrates legacy desktop and DSH keys into the Linux configuration', async 
   assert.equal(saved.providerKeys.provider, 'model-secret');
   assert.equal('snowluma' in saved, false);
   assert.equal(saved.conversation.mode, 'threaded');
+  assert.equal(conversationConfigForChat('group:100').mode, 'lifecycle');
+  assert.equal(conversationConfigForChat('group:200').mode, 'legacy');
+  assert.equal(conversationConfigForChat('group:300').mode, 'threaded');
+  assert.equal(conversationConfigForChat('private:100').mode, 'threaded');
   assert.throws(() => updateConfig({ conversation: { mode: 'invalid' } }), /conversation mode/);
+  assert.throws(
+    () => updateConfig({ conversation: { groupModes: { 100: 'invalid' } } }),
+    /group conversation mode/
+  );
 });

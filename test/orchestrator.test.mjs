@@ -383,6 +383,189 @@ describe('Orchestrator', () => {
     assert.equal(latest.contextTier, 5);
     assert.equal(latest.contextReason, '续接：引用机器人');
   });
+
+  it('supports per-group lifecycle mode and reuses the append-only DeepSeek transcript', async (t) => {
+    const { cfg, runner, store, append } = fixture(t);
+    cfg.conversation.mode = 'legacy';
+    cfg.conversation.unifiedMode = false;
+    cfg.conversation.groupModes = { 1: 'lifecycle' };
+    cfg.store.contextTier = 1;
+    cfg.store.randomPercent = 0;
+    const requests = [];
+    globalThis.fetch = async (_url, options) => {
+      const body = JSON.parse(options.body);
+      requests.push(body);
+      if (requests.length === 1) {
+        return Response.json({
+          choices: [{
+            message: {
+              reasoning_content: '先回应并保持当前生命周期',
+              tool_calls: [{
+                id: 'send-life-1',
+                type: 'function',
+                function: { name: 'send_message', arguments: JSON.stringify({ messages: ['继续说'] }) }
+              }]
+            }
+          }],
+          usage: { total_tokens: 10 }
+        });
+      }
+      if (requests.length === 2) {
+        return Response.json({
+          choices: [{ message: { reasoning_content: '已经回复，等待后续', content: 'done' } }],
+          usage: { total_tokens: 10 }
+        });
+      }
+      return Response.json({
+        choices: [{ message: { content: 'done' } }],
+        usage: { total_tokens: 10 }
+      });
+    };
+
+    append(1, '@bot 开始生命周期', '42');
+    await runner.wake('group:1');
+    const firstThread = store.getConversationThread('group:1');
+    assert.equal(firstThread.mode, 'lifecycle');
+    assert.equal(firstThread.state, 'active');
+    assert.ok(firstThread.hardDeadline > firstThread.idleDeadline);
+    assert.ok(store.getThreadTurns(firstThread.threadId).length >= 3);
+
+    append(2, '路过说一句', '99');
+    await runner.wake('group:1');
+
+    assert.equal(requests.length, 3, '生命周期内任意参与者消息都应进入模型');
+    assert.ok(requests[2].messages.length > 2, '第二次运行应携带持久化 transcript');
+    assert.deepEqual(
+      requests[2].messages.slice(0, requests[1].messages.length),
+      requests[1].messages,
+      '生命周期下一次请求应完整复用上一请求前缀'
+    );
+    const priorReasoning = requests[2].messages.find(
+      (message) => message.reasoning_content === '先回应并保持当前生命周期'
+    );
+    assert.ok(priorReasoning, 'DeepSeek reasoning_content 应跨生命周期调用续传');
+    assert.ok(
+      requests[2].messages.some((message) => message.reasoning_content === '已经回复，等待后续'),
+      '终止轮 reasoning_content 也应随实际发言记录续传'
+    );
+    assert.match(
+      String(requests[2].messages.at(-1)?.content || ''),
+      /【生命周期续接】/
+    );
+    const secondThread = store.getConversationThread('group:1');
+    assert.equal(secondThread.threadId, firstThread.threadId);
+    assert.equal(secondThread.state, 'listening', '无回复后应进入短空闲监听状态');
+    const latest = runner.sessions.get(runner.sessions.listSummaries(1)[0].id);
+    assert.equal(latest.contextTier, 6);
+    assert.match(latest.contextReason, /生命周期/);
+  });
+
+  it('consumes rollover-armed state with the next arbitrary message', async (t) => {
+    const { cfg, runner, store, append } = fixture(t);
+    cfg.conversation.mode = 'lifecycle';
+    cfg.store.contextTier = 1;
+    cfg.store.randomPercent = 0;
+    const old = store.updateLifecycleThread('group:1', {
+      disposition: 'active',
+      participantIds: ['42'],
+      promptHash: 'old-prefix'
+    });
+    store.armLifecycleRollover('group:1', 'hard-lifetime', 600000);
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls += 1;
+      return Response.json({
+        choices: [{ message: { content: 'not related, stay silent' } }],
+        usage: { total_tokens: 10 }
+      });
+    };
+
+    append(1, '完全普通的新消息', '99');
+    await runner.wake('group:1');
+
+    assert.equal(calls, 1);
+    const latest = runner.sessions.get(runner.sessions.listSummaries(1)[0].id);
+    assert.equal(latest.contextTier, 7);
+    const next = store.getConversationThread('group:1');
+    assert.notEqual(next.threadId, old.threadId);
+    assert.equal(next.state, 'listening');
+  });
+
+  it('honors an explicit active lifecycle disposition even without sending', async (t) => {
+    const { cfg, runner, store, append } = fixture(t);
+    cfg.conversation.mode = 'lifecycle';
+    globalThis.fetch = async () => Response.json({
+      choices: [{
+        message: {
+          tool_calls: [{
+            id: 'finish-active',
+            type: 'function',
+            function: {
+              name: 'finish',
+              arguments: JSON.stringify({
+                summary: '等待对方补充日志',
+                topic: '继续排查',
+                openQuestions: ['完整日志是什么'],
+                nextStep: '等待日志',
+                threadDisposition: 'active'
+              })
+            }
+          }]
+        }
+      }],
+      usage: { total_tokens: 10 }
+    });
+
+    append(1, '@bot 我稍后补日志', '42');
+    await runner.wake('group:1');
+
+    const thread = store.getConversationThread('group:1');
+    assert.equal(thread.state, 'active');
+    assert.ok(thread.idleDeadline - thread.updatedAt >= 19 * 60000);
+    assert.equal(store.latestThreadCheckpoint('group:1').state.nextStep, '等待日志');
+  });
+
+  it('does not drop a previously claimed retry when the trigger state changes', async (t) => {
+    const { cfg, runner, store, append } = fixture(t);
+    cfg.store.contextTier = 1;
+    cfg.store.randomPercent = 0;
+    append(1, '普通消息', '42');
+    const firstLease = store.claimUnread('group:1');
+    store.failLease(firstLease.id, 'temporary failure', { delayMs: 0 });
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls += 1;
+      return Response.json({
+        choices: [{ message: { content: 'done' } }],
+        usage: { total_tokens: 10 }
+      });
+    };
+
+    await runner.wake('group:1');
+
+    assert.equal(calls, 1);
+    assert.equal(store.findByMid('group:1', 1).read, true);
+    const latest = runner.sessions.get(runner.sessions.listSummaries(1)[0].id);
+    assert.equal(latest.contextReason, '失败批次重试');
+  });
+
+  it('does not recreate a lifecycle after its mode is changed during a run', async (t) => {
+    const { cfg, runner, store, append } = fixture(t);
+    cfg.conversation.mode = 'lifecycle';
+    globalThis.fetch = async () => {
+      cfg.conversation.mode = 'legacy';
+      return Response.json({
+        choices: [{ message: { content: 'done' } }],
+        usage: { total_tokens: 10 }
+      });
+    };
+
+    append(1, '@bot start', '42');
+    await runner.wake('group:1');
+
+    assert.equal(store.findByMid('group:1', 1).read, true);
+    assert.equal(store.getConversationThread('group:1'), null);
+  });
 });
 
 process.on('exit', () => fs.rmSync(root, { recursive: true, force: true }));

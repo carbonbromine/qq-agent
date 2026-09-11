@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { ChatStore } from '../src/store.js';
 
 describe('ChatStore', () => {
@@ -168,5 +169,198 @@ describe('ChatStore', () => {
     assert.equal(store.getConversationThread('group:1').threadId, thread.threadId);
     assert.equal(store.getConversationThread('group:1', thread.expiresAt + 1), null);
     store.close();
+  });
+
+  it('applies lifecycle idle deadlines, hard rollover and one-shot resume state', (t) => {
+    const { store } = fixture(t);
+    const startedAt = 1_000_000;
+    const listening = store.updateLifecycleThread('group:1', {
+      disposition: 'listening',
+      participantIds: ['42'],
+      silentIdleMs: 300000,
+      activeIdleMs: 1200000,
+      hardLifetimeMs: 1800000,
+      rolloverArmedMs: 600000,
+      promptHash: 'prompt-v1',
+      now: startedAt
+    });
+    assert.equal(listening.state, 'listening');
+    assert.equal(listening.idleDeadline, startedAt + 300000);
+    assert.ok(store.getConversationThread('group:1', startedAt + 299999));
+    const acceptedBeforeDeadline = store.updateLifecycleThread('group:1', {
+      disposition: 'listening',
+      silentIdleMs: 300000,
+      hardLifetimeMs: 1800000,
+      rolloverArmedMs: 600000,
+      acceptedAt: startedAt + 299999,
+      now: startedAt + 310000
+    });
+    assert.equal(acceptedBeforeDeadline.threadId, listening.threadId, '截止前到达的消息应继续原生命周期');
+    assert.equal(store.getConversationThread('group:1', acceptedBeforeDeadline.idleDeadline + 1), null);
+
+    const active = store.updateLifecycleThread('group:2', {
+      disposition: 'active',
+      participantIds: ['42'],
+      activeIdleMs: 1200000,
+      hardLifetimeMs: 1800000,
+      rolloverArmedMs: 600000,
+      promptHash: 'prompt-v1',
+      now: startedAt
+    });
+    store.appendThreadTurns('group:2', active.threadId, 'run-1', [
+      { role: 'user', content: '第一轮' },
+      { role: 'assistant', content: '继续' }
+    ]);
+    assert.equal(store.getThreadTurns(active.threadId).length, 2);
+
+    const refreshedOnce = store.updateLifecycleThread('group:2', {
+      disposition: 'active',
+      participantIds: ['43'],
+      activeIdleMs: 1200000,
+      hardLifetimeMs: 1800000,
+      rolloverArmedMs: 600000,
+      promptHash: 'prompt-v1',
+      now: startedAt + 15 * 60000
+    });
+    const refreshed = store.updateLifecycleThread('group:2', {
+      disposition: 'active',
+      participantIds: ['43'],
+      activeIdleMs: 1200000,
+      hardLifetimeMs: 1800000,
+      rolloverArmedMs: 600000,
+      promptHash: 'prompt-v1',
+      now: startedAt + 25 * 60000
+    });
+    assert.equal(refreshedOnce.hardDeadline, active.hardDeadline, '第一次刷新不延长硬上限');
+    assert.equal(refreshed.hardDeadline, active.hardDeadline, '硬上限不能随消息刷新');
+    const armed = store.getConversationThread('group:2', active.hardDeadline + 1);
+    assert.equal(armed.state, 'rollover_armed');
+    assert.equal(store.getThreadTurns(active.threadId).length, 0, '滚动时清除原始 provider transcript');
+
+    const resumed = store.updateLifecycleThread('group:2', {
+      disposition: 'active',
+      promptHash: 'prompt-v1',
+      now: active.hardDeadline + 2
+    });
+    assert.notEqual(resumed.threadId, active.threadId, '任意消息续接应创建新生命周期');
+    assert.equal(resumed.state, 'active');
+
+    const equalDeadline = store.updateLifecycleThread('group:3', {
+      disposition: 'active',
+      activeIdleMs: 1200000,
+      hardLifetimeMs: 1800000,
+      rolloverArmedMs: 600000,
+      now: startedAt
+    });
+    store.updateLifecycleThread('group:3', {
+      disposition: 'active',
+      activeIdleMs: 1200000,
+      hardLifetimeMs: 1800000,
+      rolloverArmedMs: 600000,
+      now: startedAt + 10 * 60000
+    });
+    assert.equal(
+      store.getConversationThread('group:3', equalDeadline.hardDeadline + 1).state,
+      'rollover_armed',
+      '空闲与硬截止相同时应按硬截止进入续接待命'
+    );
+
+    const crossedDuringRun = store.updateLifecycleThread('group:4', {
+      disposition: 'active',
+      activeIdleMs: 2400000,
+      hardLifetimeMs: 1800000,
+      rolloverArmedMs: 600000,
+      now: startedAt
+    });
+    const crossedResult = store.updateLifecycleThread('group:4', {
+      disposition: 'listening',
+      activeIdleMs: 2400000,
+      hardLifetimeMs: 1800000,
+      rolloverArmedMs: 600000,
+      acceptedAt: crossedDuringRun.hardDeadline - 1,
+      now: crossedDuringRun.hardDeadline + 10000
+    });
+    assert.equal(crossedResult.state, 'rollover_armed', '截止前接收的活跃轮次跨过硬上限后仍应待续接');
+  });
+
+  it('restores lifecycle provider turns after reopening', (t) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-lifecycle-reopen-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    let store = new ChatStore(0, { dataDir: dir });
+    const thread = store.updateLifecycleThread('group:1', {
+      disposition: 'active',
+      promptHash: 'stable-prefix',
+      now: Date.now()
+    });
+    store.appendThreadTurns('group:1', thread.threadId, 'run-1', [
+      { role: 'user', content: '第一批消息' },
+      {
+        role: 'assistant',
+        content: null,
+        reasoning_content: '需要先检查',
+        tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'check', arguments: '{}' } }]
+      },
+      { role: 'tool', tool_call_id: 'call-1', name: 'check', content: 'ok' }
+    ]);
+    store.close();
+
+    store = new ChatStore(0, { dataDir: dir });
+    const restored = store.getConversationThread('group:1');
+    assert.equal(restored.threadId, thread.threadId);
+    const turns = store.getThreadTurns(thread.threadId);
+    assert.equal(turns.length, 3);
+    assert.equal(turns[1].reasoning_content, '需要先检查');
+    store.close();
+  });
+
+  it('adds lifecycle columns to databases created by the threaded pilot', (t) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-thread-migrate-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const filename = path.join(dir, 'messages.sqlite');
+    const old = new DatabaseSync(filename);
+    old.exec(`
+      CREATE TABLE conversation_threads (
+        chat_key TEXT PRIMARY KEY, thread_id TEXT NOT NULL, state TEXT NOT NULL,
+        topic TEXT NOT NULL DEFAULT '', participant_ids TEXT NOT NULL DEFAULT '[]',
+        opened_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        last_human_at INTEGER NOT NULL DEFAULT 0, last_agent_at INTEGER NOT NULL DEFAULT 0,
+        engaged_until INTEGER NOT NULL DEFAULT 0, expires_at INTEGER NOT NULL DEFAULT 0,
+        last_message_id INTEGER NOT NULL DEFAULT 0, version INTEGER NOT NULL DEFAULT 1,
+        close_reason TEXT
+      );
+      INSERT INTO conversation_threads
+        (chat_key,thread_id,state,opened_at,updated_at,expires_at)
+        VALUES ('group:1','old-thread','engaged',1,1,9999999999999);
+    `);
+    old.close();
+
+    const store = new ChatStore(0, { dataDir: dir });
+    const migrated = store.getConversationThread('group:1');
+    assert.equal(migrated.threadId, 'old-thread');
+    assert.equal(migrated.mode, 'threaded');
+    assert.equal(migrated.transcriptChars, 0);
+    store.close();
+  });
+
+  it('atomically rolls back message acknowledgement when lifecycle persistence fails', (t) => {
+    const { store } = fixture(t);
+    append(store, 1);
+    const lease = store.claimUnread('group:1');
+    const cyclic = { role: 'user', content: 'broken' };
+    cyclic.self = cyclic;
+
+    assert.throws(() => store.commitLifecycleRun({
+      chatKey: 'group:1',
+      leaseId: lease.id,
+      runId: lease.id,
+      threadOptions: { disposition: 'active', promptHash: 'v1' },
+      checkpointState: { summary: 'should roll back' },
+      sourceMessageIds: [1],
+      messages: [cyclic]
+    }));
+
+    assert.equal(store.findByMid('group:1', 1).state, 'leased');
+    assert.equal(store.getConversationThread('group:1'), null);
+    assert.equal(store.latestThreadCheckpoint('group:1'), null);
   });
 });

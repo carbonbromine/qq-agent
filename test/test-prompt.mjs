@@ -150,7 +150,49 @@ const proactivePrompt = buildUserPrompt({
 });
 assert.ok(proactivePrompt.includes('【过去状态】'), '主动模式也带过去状态');
 
-// ── 7. 默认人设 = 原版小鲸鱼角色卡（已适配新架构，不含旧机制指令） ──
+// ── 7. 生命周期续接只发送增量，旧 transcript 由 orchestrator 放在上文 ──
+const lifecyclePrompt = buildUserPrompt({
+  chatKey: 'group:123', kind: 'group', chatId: '123', chatName: '测试群',
+  triggerEntries, store, memory, stickerEntries: [],
+  selfNickname: '测试机', selfLastMessageAt: Date.now() - 30000,
+  lastMessageAt: Date.now(), recentCount: 42, lifecycleContinuation: true,
+  tierInfo: { reason: '生命周期：活跃状态' },
+  thread: {
+    mode: 'lifecycle', state: 'active', topic: '继续确认周末安排',
+    idleDeadline: Date.now() + 60000, hardDeadline: Date.now() + 600000
+  }
+});
+assert.ok(lifecyclePrompt.includes('【生命周期续接】'));
+assert.ok(lifecyclePrompt.includes('【当前对话线程】'));
+assert.ok(!lifecyclePrompt.includes('第100条消息'), '续接增量不应重复旧历史');
+assert.ok(lifecyclePrompt.indexOf('【上次会话交接】') < lifecyclePrompt.indexOf('【本次唤醒】'));
+const lifecycleStartPrompt = buildUserPrompt({
+  chatKey: 'group:123', kind: 'group', chatId: '123', chatName: '测试群',
+  triggerEntries, store, memory, stickerEntries: [],
+  selfNickname: '测试机', selfLastMessageAt: 0, lastMessageAt: Date.now(),
+  recentCount: 3, conversationMode: 'lifecycle'
+});
+assert.ok(lifecycleStartPrompt.includes('本轮成功处理后开启新的生命周期'));
+const checkpointFallbackPrompt = buildUserPrompt({
+  chatKey: 'group:123', kind: 'group', chatId: '123', chatName: '测试群',
+  triggerEntries, store,
+  memory: { formatForPrompt: () => '', formatHandoffForPrompt: () => '' },
+  stickerEntries: [], selfNickname: '测试机', selfLastMessageAt: 0,
+  lastMessageAt: Date.now(), recentCount: 3, conversationMode: 'lifecycle',
+  threadCheckpoint: {
+    state: {
+      topic: '旧生命周期话题',
+      hypotheses: ['仍需验证缓存'],
+      rejectedDirections: ['不再使用长轮询'],
+      nextStep: '继续采样'
+    }
+  }
+});
+assert.ok(checkpointFallbackPrompt.includes('【上次生命周期检查点】'));
+assert.ok(checkpointFallbackPrompt.includes('仍需验证缓存'));
+assert.ok(checkpointFallbackPrompt.includes('不再使用长轮询'));
+
+// ── 8. 默认人设 = 原版小鲸鱼角色卡（已适配新架构，不含旧机制指令） ──
 assert.ok(DEFAULT_CONFIG.persona.roleText.includes('DeepSeek 小鲸鱼'), '默认人设为原版小鲸鱼角色卡');
 for (const banned of ['[SILENT]', 'mcp__snowluma', 'qq_set_wake_config', 'qq_mark_read', 'qq_wait_for_messages', 'qq_send_message', '空格分隔（例如']) {
   assert.ok(!DEFAULT_CONFIG.persona.roleText.includes(banned), `默认人设不应包含旧架构指令：${banned}`);

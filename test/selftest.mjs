@@ -732,6 +732,32 @@ async function main() {
     '控制台线程测试',
     '会话列表返回线程摘要'
   );
+  const threadDetail = await (await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/chats/group_456/thread`
+  )).json();
+  assert.strictEqual(threadDetail.mode, 'legacy', '线程详情返回当前生效模式');
+  assert.strictEqual(threadDetail.thread.topic, '控制台线程测试');
+  await fetch(`http://127.0.0.1:${cfg.server.port}/api/config`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      conversation: { unifiedMode: false, groupModes: { 456: 'lifecycle' } }
+    })
+  });
+  const lifecycleDetail = await (await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/chats/group_456/thread`
+  )).json();
+  assert.strictEqual(lifecycleDetail.mode, 'lifecycle', '分群模式覆盖全局默认');
+  assert.strictEqual(lifecycleDetail.thread, null, '切换模式时关闭不兼容的旧线程');
+  await fetch(`http://127.0.0.1:${cfg.server.port}/api/config`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ conversation: { mode: 'legacy', unifiedMode: true } })
+  });
+  app.store.upsertConversationThread('group:456', {
+    participantIds: ['111'],
+    topic: '控制台关闭线程测试',
+    continuationWindowMs: 60000,
+    ttlMs: 600000
+  });
   const closeThread = await (await fetch(
     `http://127.0.0.1:${cfg.server.port}/api/chats/group_456/thread`,
     { method: 'DELETE' }

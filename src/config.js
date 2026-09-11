@@ -131,10 +131,18 @@ export const DEFAULT_CONFIG = {
   maxConcurrentRuns: 2,     // 全局同时进行的 agent 运行数
   // 对话线程试点：默认关闭，可从控制台动态切换，不影响旧触发模式。
   conversation: {
-    mode: 'legacy',                  // legacy | threaded
+    mode: 'legacy',                  // legacy | threaded | lifecycle
+    unifiedMode: true,               // false 时允许 groupModes 按群覆盖
+    groupModes: {},                  // { [groupId]: legacy | threaded | lifecycle }
     continuationWindowMs: 180000,    // 机器人发言后，同一参与者确定性续接窗口
     threadTtlMs: 1800000,            // 线程空闲多久后关闭
-    continuationContextCount: 100    // 续接唤醒时携带的历史消息条数
+    continuationContextCount: 100,   // threaded 续接唤醒时携带的历史消息条数
+    silentIdleMs: 300000,            // lifecycle：沉默状态 5 分钟无消息即结束
+    activeIdleMs: 1200000,           // lifecycle：活跃状态 20 分钟无消息即结束
+    hardLifetimeMs: 1800000,         // lifecycle：绝对生命周期上限 30 分钟
+    rolloverArmedMs: 600000,         // 活跃线程撞硬上限后，一次性任意消息触发期限
+    lifecycleContextCount: 100,      // 生命周期首次运行携带的历史条数
+    maxTranscriptChars: 240000       // 生命周期追加式模型上下文硬预算
   },
   // 发送保护
   send: {
@@ -290,8 +298,13 @@ export function getConfig() {
 export function updateConfig(patch) {
   const next = migrateConfig(deepMerge(getConfig(), patch));
   if (!['observe', 'active'].includes(next.runtime?.mode)) throw new Error('Invalid runtime mode');
-  if (!['legacy', 'threaded'].includes(next.conversation?.mode)) {
+  if (!['legacy', 'threaded', 'lifecycle'].includes(next.conversation?.mode)) {
     throw new Error('Invalid conversation mode');
+  }
+  for (const mode of Object.values(next.conversation?.groupModes || {})) {
+    if (!['legacy', 'threaded', 'lifecycle'].includes(mode)) {
+      throw new Error('Invalid group conversation mode');
+    }
   }
   if (!Number.isInteger(Number(next.server?.port)) || next.server.port < 1 || next.server.port > 65535) {
     throw new Error('Invalid server port');
@@ -338,6 +351,18 @@ export function storeConfigForChat(chatKey) {
   if (pos === undefined || pos === null) return store;
   const { tier, randomPercent } = sliderToTier(Number(pos));
   return { ...store, contextTier: tier, randomPercent };
+}
+
+/** 获取某个会话实际生效的对话引擎配置。私聊始终使用全局模式。 */
+export function conversationConfigForChat(chatKey) {
+  const conversation = getConfig().conversation || {};
+  if (conversation.unifiedMode !== false) return conversation;
+  const [kind, id] = String(chatKey || '').split(':');
+  if (kind !== 'group' || !id) return conversation;
+  const mode = conversation.groupModes?.[id];
+  return ['legacy', 'threaded', 'lifecycle'].includes(mode)
+    ? { ...conversation, mode }
+    : conversation;
 }
 
 /** 防抖保存：高频小改动合并写盘。 */

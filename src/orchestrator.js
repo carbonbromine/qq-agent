@@ -9,7 +9,12 @@
 // 同一会话（群/私聊）同时最多一个运行；运行期间新消息只写 JSON（未读），不叠加触发。
 // 不同会话之间并行，受 maxConcurrentRuns 全局限流。
 import crypto from 'node:crypto';
-import { getConfig, storeConfigForChat, updateConfig } from './config.js';
+import {
+  conversationConfigForChat,
+  getConfig,
+  storeConfigForChat,
+  updateConfig
+} from './config.js';
 import { canRun } from './access.js';
 import { vendorOfConfig } from './model-prices.js';
 import { sleep, randInt, createEventBus, todayKey } from './util.js';
@@ -55,6 +60,12 @@ function lastSentText(session) {
     .slice(0, 600);
 }
 
+function hasInlineImage(messages) {
+  return (messages || []).some((message) => Array.isArray(message?.content)
+    && message.content.some((part) => part?.type === 'image_url'
+      && String(part?.image_url?.url || '').startsWith('data:')));
+}
+
 export class Orchestrator {
   constructor({ store, memory, stickers, sender, sessions, onebot, emit = null }) {
     this.store = store;
@@ -97,8 +108,10 @@ export class Orchestrator {
   startRecoveryLoop() {
     clearInterval(this.retryTimer);
     this.store.recoverExpired();
+    this.store.expireConversationThreads?.();
     this.retryTimer = setInterval(() => {
       this.store.recoverExpired();
+      this.store.expireConversationThreads?.();
       if (this.paused || this.aborted) return;
       for (const key of this.store.listChats()) {
         if (canRun(key) && !this.runningChats.has(key) && !this.pendingWake.has(key)
@@ -133,9 +146,16 @@ export class Orchestrator {
    */
   #predictTier(chatKey) {
     const cfg = getConfig();
+    const conversation = conversationConfigForChat(chatKey);
     const entries = this.store.peekUnread(chatKey, 100) || [];
     if (chatKey.startsWith('private:')) {
-      return { shouldRespond: entries.length > 0, tier: 4, count: getConfig().store.atCount, reason: '私聊' };
+      return {
+        shouldRespond: entries.length > 0,
+        tier: 4,
+        count: getConfig().store.atCount,
+        reason: '私聊',
+        conversationMode: conversation.mode
+      };
     }
     const result = resolveContextTier({
       triggerEntries: entries,
@@ -145,12 +165,32 @@ export class Orchestrator {
       cfg: storeConfigForChat(chatKey)   // 按会话取档位：统一开关关闭时各群可以有独立滑条
     });
     // 没有未读就不算"需要响应"（防抖窗口刚建立时的空转）
-    if (entries.length === 0) return { ...result, shouldRespond: false, reason: '无未读' };
-    if (result.shouldRespond || cfg.conversation?.mode !== 'threaded') return result;
-    return this.#continuationTier(chatKey, entries, result);
+    if (entries.length === 0) {
+      return { ...result, shouldRespond: false, reason: '无未读', conversationMode: conversation.mode };
+    }
+    if (entries.some((entry) => Number(entry.attempts) > 0)) {
+      return {
+        tier: 8,
+        count: Math.min(
+          500,
+          Math.max(1, Number(conversation.lifecycleContextCount) || result.count || 100)
+        ),
+        reason: '失败批次重试',
+        shouldRespond: true,
+        conversationMode: conversation.mode
+      };
+    }
+    if (result.shouldRespond) return { ...result, conversationMode: conversation.mode };
+    if (conversation.mode === 'lifecycle') {
+      return this.#lifecycleTier(chatKey, entries, result, conversation);
+    }
+    if (conversation.mode === 'threaded') {
+      return this.#continuationTier(chatKey, entries, result, conversation);
+    }
+    return { ...result, conversationMode: 'legacy' };
   }
 
-  #continuationTier(chatKey, entries, fallback) {
+  #isReplyToSelf(entries) {
     const cfg = getConfig();
     const selfId = String(cfg.onebot?.selfId || this.onebot.selfId || '');
     const names = new Set([
@@ -158,27 +198,64 @@ export class Orchestrator {
       this.onebot.selfNickname,
       cfg.persona?.botName
     ].map((v) => String(v || '').trim()).filter(Boolean));
-    const replyToSelf = entries.some((m) => {
+    return entries.some((m) => {
       if (selfId && String(m.reply?.senderId || '') === selfId) return true;
       return names.has(String(m.reply?.sender || '').trim());
     });
-    const count = Math.max(1, Number(cfg.conversation?.continuationContextCount) || 100);
-    if (replyToSelf) {
-      return { tier: 5, count, reason: '续接：引用机器人', shouldRespond: true };
+  }
+
+  #continuationTier(chatKey, entries, fallback, conversation) {
+    const count = Math.min(500, Math.max(1, Number(conversation?.continuationContextCount) || 100));
+    if (this.#isReplyToSelf(entries)) {
+      return {
+        tier: 5, count, reason: '续接：引用机器人',
+        shouldRespond: true, conversationMode: 'threaded'
+      };
     }
 
     const thread = this.store.getConversationThread?.(chatKey);
-    if (!thread || thread.engagedUntil <= Date.now()) return fallback;
+    if (!thread || thread.mode !== 'threaded' || thread.engagedUntil <= Date.now()) {
+      return { ...fallback, conversationMode: 'threaded' };
+    }
     const participants = new Set((thread.participantIds || []).map(String));
     const sameParticipant = entries.some((m) => participants.has(String(m.senderId || '')));
-    if (!sameParticipant) return fallback;
+    if (!sameParticipant) return { ...fallback, conversationMode: 'threaded' };
     return {
       tier: 5,
       count,
       reason: '续接：参与者在活跃窗口内继续发言',
       shouldRespond: true,
-      threadId: thread.threadId
+      threadId: thread.threadId,
+      conversationMode: 'threaded'
     };
+  }
+
+  #lifecycleTier(chatKey, entries, fallback, conversation) {
+    const count = Math.min(500, Math.max(1, Number(conversation?.lifecycleContextCount) || 100));
+    const thread = this.store.getConversationThread?.(chatKey);
+    if (thread?.mode === 'lifecycle') {
+      if (thread.state === 'rollover_armed') {
+        return {
+          tier: 7, count, reason: '生命周期：硬上限后的任意消息续接',
+          shouldRespond: true, threadId: thread.threadId,
+          conversationMode: 'lifecycle', lifecycleState: thread.state
+        };
+      }
+      if (thread.state === 'active' || thread.state === 'listening') {
+        return {
+          tier: 6, count, reason: `生命周期：${thread.state === 'active' ? '活跃' : '监听'}状态`,
+          shouldRespond: true, threadId: thread.threadId,
+          conversationMode: 'lifecycle', lifecycleState: thread.state
+        };
+      }
+    }
+    if (this.#isReplyToSelf(entries)) {
+      return {
+        tier: 5, count, reason: '生命周期：引用机器人',
+        shouldRespond: true, conversationMode: 'lifecycle'
+      };
+    }
+    return { ...fallback, conversationMode: 'lifecycle' };
   }
 
   scheduleWake(chatKey, delay = null) {
@@ -329,6 +406,7 @@ export class Orchestrator {
 
     // 未命中时只确认本次判定的快照；运行批次在模型处理成功后确认。
     const cfgNow = getConfig();
+    const conversation = conversationConfigForChat(chatKey);
     let pendingEntries = [];
     let tierResult = null;
     if (!proactive) {
@@ -414,13 +492,23 @@ export class Orchestrator {
     this.emit('chat-update', chatKey);
 
     try {
-      await this.#runAgent(session, { kind, chatId, chatKey, triggerEntries, proactive, seq,
-        contextLimit: tierResult.count, tierInfo: tierResult, signal: controller.signal });
+      const runResult = await this.#runAgent(session, { kind, chatId, chatKey, triggerEntries, proactive, seq,
+        contextLimit: tierResult.count, tierInfo: tierResult, conversation, signal: controller.signal });
       controller.signal.throwIfAborted();
-      if (lease) this.store.ackLease(lease.id);
-      else this.store.completeRun(session.leaseId);
-      const handoff = this.#commitSessionHandoff(session, { chatKey, triggerEntries });
-      this.#commitConversationThread(session, { chatKey, triggerEntries, handoff });
+      if (conversation.mode === 'lifecycle') {
+        const handoff = this.#commitSessionHandoff(session, { chatKey, triggerEntries });
+        this.#commitConversationThread(session, {
+          chatKey, triggerEntries, handoff, conversation, runResult,
+          leaseId: lease?.id || '', runId: session.leaseId
+        });
+      } else {
+        if (lease) this.store.ackLease(lease.id);
+        else this.store.completeRun(session.leaseId);
+        const handoff = this.#commitSessionHandoff(session, { chatKey, triggerEntries });
+        this.#commitConversationThread(session, {
+          chatKey, triggerEntries, handoff, conversation, runResult
+        });
+      }
       const status = session.sent.length > 0 ? 'done' : 'noreply';
       this.sessions.finish(session.id, status);
       this.emit('session-end', { sessionId: session.id, chatKey, status,
@@ -502,29 +590,107 @@ export class Orchestrator {
     }
   }
 
-  #commitConversationThread(session, { chatKey, triggerEntries, handoff }) {
-    const cfg = getConfig();
-    if (cfg.conversation?.mode !== 'threaded') return;
+  #commitConversationThread(session, {
+    chatKey,
+    triggerEntries,
+    handoff,
+    conversation,
+    runResult = null,
+    leaseId = '',
+    runId = ''
+  }) {
+    const mode = conversation?.mode || 'legacy';
+    const currentMode = conversationConfigForChat(chatKey).mode;
+    if (currentMode !== mode) {
+      if (mode === 'lifecycle') {
+        this.store.commitLifecycleRun({
+          chatKey, leaseId, runId, persistThread: false, closeReason: 'mode-changed'
+        });
+      } else {
+        this.store.closeConversationThread?.(chatKey, 'mode-changed');
+      }
+      session.threadState = 'closed';
+      return;
+    }
+    if (mode === 'legacy') return;
+    const lastMessageId = Math.max(0, ...(triggerEntries || []).map((m) => Number(m.id) || 0));
+    const lastHumanAt = Math.max(0, ...(triggerEntries || []).map((m) => Number(m.ts) || 0));
+    const participantIds = mode === 'threaded'
+      ? continuationParticipantIds(session, triggerEntries, this.store, chatKey)
+      : handoffParticipantIds(triggerEntries);
+    if (mode === 'lifecycle') {
+      const hasOpenWork = Boolean(
+        handoff?.nextStep
+        || handoff?.openQuestions?.length
+        || handoff?.hypotheses?.length
+      );
+      const disposition = session.threadDisposition
+        || (session.sent.length > 0 || hasOpenWork ? 'active' : 'listening');
+      const closeReason = session.handoffDraft?.clearHandoff === true
+        ? 'handoff-cleared'
+        : session.threadDisposition === 'close'
+          ? 'model-close'
+          : '';
+      const persistThread = triggerEntries.length > 0
+        || session.sent.length > 0
+        || Boolean(session.threadDisposition);
+      const checkpointState = handoff || session.handoffDraft || {
+        summary: session.sent.length
+          ? `本轮已发送 ${session.sent.length} 条消息`
+          : '本轮已读取消息并保持沉默',
+        lastReply: lastSentText(session)
+      };
+      const result = this.store.commitLifecycleRun({
+        chatKey,
+        leaseId,
+        runId,
+        persistThread,
+        closeReason,
+        threadOptions: {
+          disposition,
+          participantIds,
+          topic: handoff?.topic || session.handoffDraft?.topic || '',
+          lastMessageId,
+          lastHumanAt,
+          lastAgentAt: session.sent.length ? Date.now() : 0,
+          promptHash: session.promptPrefixHash || '',
+          silentIdleMs: conversation?.silentIdleMs,
+          activeIdleMs: conversation?.activeIdleMs,
+          hardLifetimeMs: conversation?.hardLifetimeMs,
+          rolloverArmedMs: conversation?.rolloverArmedMs,
+          acceptedAt: session.startedAt
+        },
+        checkpointState,
+        sourceMessageIds: (triggerEntries || []).map((m) => m.id),
+        messages: runResult?.providerTranscriptDelta || [],
+        maxTranscriptChars: conversation?.maxTranscriptChars,
+        forceRollover: runResult?.forceThreadRollover || '',
+        rolloverArmedMs: conversation?.rolloverArmedMs
+      });
+      session.threadId = result.thread?.threadId || null;
+      session.threadState = result.thread?.state || (closeReason ? 'closed' : null);
+      session.threadTranscriptChars = result.transcriptChars;
+      return;
+    }
+
     if (session.handoffDraft?.clearHandoff === true) {
       this.store.closeConversationThread?.(chatKey, 'handoff-cleared');
       return;
     }
-    if (!session.sent.length || typeof this.store.upsertConversationThread !== 'function') return;
     try {
-      const lastMessageId = Math.max(0, ...(triggerEntries || []).map((m) => Number(m.id) || 0));
-      const lastHumanAt = Math.max(0, ...(triggerEntries || []).map((m) => Number(m.ts) || 0));
-      const thread = this.store.upsertConversationThread(chatKey, {
-        participantIds: continuationParticipantIds(session, triggerEntries, this.store, chatKey),
-        topic: handoff?.topic || session.handoffDraft?.topic || '',
-        lastMessageId,
-        lastHumanAt,
-        lastAgentAt: Date.now(),
-        continuationWindowMs: cfg.conversation?.continuationWindowMs,
-        ttlMs: cfg.conversation?.threadTtlMs
-      });
-      session.threadId = thread.threadId;
-      session.threadState = thread.state;
-      if (typeof this.store.appendThreadCheckpoint === 'function') {
+      if (mode === 'threaded') {
+        if (!session.sent.length || typeof this.store.upsertConversationThread !== 'function') return;
+        const thread = this.store.upsertConversationThread(chatKey, {
+          participantIds,
+          topic: handoff?.topic || session.handoffDraft?.topic || '',
+          lastMessageId,
+          lastHumanAt,
+          lastAgentAt: Date.now(),
+          continuationWindowMs: conversation?.continuationWindowMs,
+          ttlMs: conversation?.threadTtlMs
+        });
+        session.threadId = thread.threadId;
+        session.threadState = thread.state;
         this.store.appendThreadCheckpoint(
           chatKey,
           thread.threadId,
@@ -542,13 +708,26 @@ export class Orchestrator {
     }
   }
 
-  async #runAgent(session, { kind, chatId, chatKey, triggerEntries, proactive, seq, contextLimit = null, tierInfo = null, signal }) {
+  async #runAgent(session, {
+    kind,
+    chatId,
+    chatKey,
+    triggerEntries,
+    proactive,
+    seq,
+    contextLimit = null,
+    tierInfo = null,
+    conversation = null,
+    signal
+  }) {
     const cfg = getConfig();
+    const conversationCfg = conversation || conversationConfigForChat(chatKey);
     const chatName = kind === 'group' ? await this.#chatName(chatId) : '';
     const selfNickname = kind === 'group' ? (cfg.persona.selfNickname || this.onebot.selfNickname || cfg.persona.botName) : cfg.persona.botName;
-    const thread = cfg.conversation?.mode === 'threaded'
+    let thread = conversationCfg.mode !== 'legacy'
       ? this.store.getConversationThread?.(chatKey)
       : null;
+    if (thread && thread.mode !== conversationCfg.mode) thread = null;
 
     // 上下文统计
     const tenMinAgo = Date.now() - 600000;
@@ -566,8 +745,45 @@ export class Orchestrator {
       try { stickerEntries = (await this.stickers.sync(false)).entries ?? []; } catch { stickerEntries = []; }
     }
 
-    // 组装提示词（无 LLM 历史）
+    // 工具集按配置过滤：工具列表属于缓存前缀，必须先固定后再决定是否复用生命周期 transcript。
+    const visionEnabled = cfg.api.vision !== false
+      && modelImageVerdict(cfg.api.provider, cfg.api.model) !== 'no-vision';
+    const searchEnabled = cfg.webSearch?.enabled !== false;
+    const toolDefs = this.toolDefs.filter((d) => {
+      if (!visionEnabled && (d.name === 'get_message_images' || d.name === 'get_sticker_image')) return false;
+      if (!searchEnabled && (d.name === 'web_search' || d.name === 'web_fetch')) return false;
+      return true;
+    });
+    const openAiTools = toOpenAiTools(toolDefs);
     const systemPrompt = buildSystemPrompt();
+    const promptPrefixHash = crypto.createHash('sha256')
+      .update(String(cfg.api.provider || ''))
+      .update('\0')
+      .update(String(cfg.api.baseUrl || ''))
+      .update('\0')
+      .update(String(cfg.api.model || ''))
+      .update('\0')
+      .update(systemPrompt)
+      .update('\0')
+      .update(JSON.stringify(openAiTools))
+      .digest('hex');
+
+    let priorProviderMessages = [];
+    if (conversationCfg.mode === 'lifecycle' && thread?.mode === 'lifecycle'
+      && ['active', 'listening'].includes(thread.state)) {
+      if (thread.promptHash && thread.promptHash !== promptPrefixHash) {
+        this.store.closeConversationThread?.(chatKey, 'prompt-prefix-changed');
+        thread = null;
+      } else {
+        priorProviderMessages = this.store.getThreadTurns?.(thread.threadId) || [];
+      }
+    }
+    const threadCheckpoint = conversationCfg.mode === 'lifecycle' && thread
+      ? this.store.latestThreadCheckpoint?.(chatKey)
+      : null;
+    const lifecycleContinuation = priorProviderMessages.length > 0;
+
+    // 首轮带完整上下文；生命周期后续轮只附加增量，旧消息保持字节级稳定以命中 DeepSeek 前缀缓存。
     const userPrompt = buildUserPrompt({
       chatKey, kind, chatId, chatName,
       triggerEntries,
@@ -584,13 +800,20 @@ export class Orchestrator {
       contextLimit,
       tierInfo,
       thread,
+      threadCheckpoint,
+      conversationMode: conversationCfg.mode,
+      lifecycleContinuation,
       session
     });
 
     session.systemPrompt = systemPrompt;
     session.userPrompt = userPrompt;
-    session.promptChars = systemPrompt.length + userPrompt.length;
+    session.promptChars = systemPrompt.length + userPrompt.length
+      + JSON.stringify(priorProviderMessages).length;
     session.model = cfg.api.model;
+    session.conversationMode = conversationCfg.mode;
+    session.lifecycleContinuation = lifecycleContinuation;
+    session.threadId = thread?.threadId || null;
     // 记录本次调用走的是哪个渠道（A6API / openrouter / 本地中转…）。
     // 同名模型在不同渠道是不同商品，用量与价格要分开统计。
     session.vendor = vendorOfConfig(cfg);
@@ -604,33 +827,25 @@ export class Orchestrator {
     this.sessions.update(session.id);
     this.emit('session-update', session.id);
 
+    const currentUserMessage = {
+      role: 'user',
+      content: proactive
+        ? `${userPrompt}\n\n【本次唤醒】（主动机会）群里已经安静了一会儿。你可以主动抛一个自然的话题（像随口说的，不要像播报），也可以判断没必要说话就安静结束。`
+        : userPrompt
+    };
     const messages = [
       { role: 'system', content: systemPrompt },
-      { role: 'user', content: proactive
-        ? `${userPrompt}\n\n【本次唤醒】（主动机会）群里已经安静了一会儿。你可以主动抛一个自然的话题（像随口说的，不要像播报），也可以判断没必要说话就安静结束。`
-        : userPrompt }
+      ...structuredClone(priorProviderMessages),
+      currentUserMessage
     ];
+    const transcriptStart = 1 + priorProviderMessages.length;
     // JSON 模式需要看到输入给模型的完整 messages（去工具之前）
     session.inputMessages = structuredClone(messages.map((m) => ({ role: m.role, content: m.content })));
     this.sessions.update(session.id);
 
-    // 工具集按配置过滤：无视觉模型 → 移除看图工具；搜索关闭 → 移除联网工具
-    // 视觉判定 = 全局开关 && 选中模型未被探测为"明确不支持图片"（未探测/unknown 时保持开关行为）
-    const visionEnabled = cfg.api.vision !== false
-      && modelImageVerdict(cfg.api.provider, cfg.api.model) !== 'no-vision';
-    const searchEnabled = cfg.webSearch?.enabled !== false;
-    const toolDefs = this.toolDefs.filter((d) => {
-      if (!visionEnabled && (d.name === 'get_message_images' || d.name === 'get_sticker_image')) return false;
-      if (!searchEnabled && (d.name === 'web_search' || d.name === 'web_fetch')) return false;
-      return true;
-    });
-    const openAiTools = toOpenAiTools(toolDefs);
-    const promptPrefixHash = crypto.createHash('sha256')
-      .update(systemPrompt)
-      .update('\0')
-      .update(JSON.stringify(openAiTools))
-      .digest('hex');
-    session.promptLayout = 'stable-prefix-v2';
+    session.promptLayout = lifecycleContinuation
+      ? 'deepseek-lifecycle-append-v1'
+      : 'stable-prefix-v2';
     session.promptPrefixHash = promptPrefixHash;
 
     const ctx = {
@@ -697,14 +912,17 @@ export class Orchestrator {
         ? msg.reasoning_content
         : null;
       const finalToolCalls = Array.isArray(msg.tool_calls) && msg.tool_calls.length ? msg.tool_calls : undefined;
-      const assistantEntry = {
+      const providerAssistant = {
         role: 'assistant',
         content: finalContent,
         ...(reasoningContent ? { reasoning_content: reasoningContent } : {}),
-        tool_calls: finalToolCalls,
+        ...(finalToolCalls ? { tool_calls: finalToolCalls } : {})
+      };
+      const assistantEntry = {
+        ...providerAssistant,
         raw: response.raw ?? null
       };
-      messages.push(assistantEntry);
+      messages.push(providerAssistant);
       session.messages.push(structuredClone(assistantEntry));
       session.rounds = round + 1;
       markActivity('');
@@ -790,7 +1008,7 @@ export class Orchestrator {
         if (this.store.hasUncertainEffects(session.leaseId)) {
           throw new Error('Delivery uncertain; batch held for operator review');
         }
-        if (name === 'finish' && !result.isError) { finish = true; break; }
+        if (name === 'finish' && !result.isError) finish = true;
       }
       messages.push(...toolResults.map(({ role, tool_call_id, name, content }) => ({ role, tool_call_id, content, name })));
       // 图片消息跟随在全部 tool 结果之后（OpenAI 校验要求每个 tool_call 都有对应 tool 消息）
@@ -800,6 +1018,28 @@ export class Orchestrator {
 
     signal.throwIfAborted();
     if (!finish && !completed) throw new Error('Run round budget exceeded');
+    const providerTranscriptDelta = conversationCfg.mode === 'lifecycle'
+      ? structuredClone(messages.slice(transcriptStart))
+      : [];
+    // 普通 assistant 文本不会发到 QQ，它只是本次运行的内部输出。下一生命周期轮次
+    // 不应把它伪装成机器人曾经说过的话；移除后仍能完整命中上一请求的输入边界。
+    const tail = providerTranscriptDelta.at(-1);
+    const terminalReasoning = tail?.role === 'assistant' && !tail.tool_calls?.length
+      ? tail.reasoning_content
+      : '';
+    if (tail?.role === 'assistant' && !tail.tool_calls?.length) providerTranscriptDelta.pop();
+    providerTranscriptDelta.push({
+      role: 'assistant',
+      content: session.sent.length
+        ? lastSentText(session)
+        : '（本轮未向 QQ 发送消息）',
+      ...(terminalReasoning ? { reasoning_content: terminalReasoning } : {})
+    });
+    const containsInlineImage = hasInlineImage(providerTranscriptDelta);
+    return {
+      providerTranscriptDelta: containsInlineImage ? [] : providerTranscriptDelta,
+      forceThreadRollover: containsInlineImage ? 'multimodal-context' : ''
+    };
   }
 
   /**
