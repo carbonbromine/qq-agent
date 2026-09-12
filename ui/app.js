@@ -3488,7 +3488,7 @@ function renderMemorySettingsSection(c) {
 function renderExperimentalSettingsSection(c) {
   const enabled = c.identityPilot?.enabled === true;
   const friend = c.identityPilot?.friendProposal || {};
-  const ownerUin = friend.ownerUin || c.allow?.private?.[0] || '';
+  const ownerUin = friend.ownerUin || '';
   return `
     <section class="experimental-settings">
       <h3 id="settings-experiments">实验功能</h3>
