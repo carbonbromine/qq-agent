@@ -440,6 +440,9 @@ async function refreshStatus() {
     if (state.tab === 'settings' && state.settingsSection === 'qzone-interactions') {
       loadQzoneInteractionStatus();
     }
+    if (state.tab === 'settings' && state.settingsSection === 'experiments') {
+      loadIdentityPilotStatus();
+    }
     renderBanner();
   } catch (e) { /* 忽略瞬时错误 */ }
 }
@@ -3266,7 +3269,13 @@ function renderExperimentalSettingsSection(c) {
       <div class="checkbox-row">
         <input type="checkbox" id="cfg-identity-pilot-enabled" ${enabled ? 'checked' : ''} />
         <label for="cfg-identity-pilot-enabled">跨会话人物画像与好友关系</label>
-        <span class="muted" id="identity-pilot-state">${enabled ? '总开关已开启（阶段 1）' : '已关闭 · 当前系统行为不变'}</span>
+        <span class="muted" id="identity-pilot-state">${enabled ? '正在读取统一身份库…' : '已关闭 · 当前系统行为不变'}</span>
+      </div>
+      <div class="field-row" id="identity-pilot-stats" ${enabled ? '' : 'hidden'}>
+        <div class="field"><label>统一身份</label><div data-identity-stat="people">-</div></div>
+        <div class="field"><label>会话来源</label><div data-identity-stat="sources">-</div></div>
+        <div class="field"><label>身份别名</label><div data-identity-stat="aliases">-</div></div>
+        <div class="field"><label>旧印象引用</label><div data-identity-stat="memories">-</div></div>
       </div>
     </section>`;
 }
@@ -3276,6 +3285,38 @@ function identityPilotSettingsPatch(c, enabled) {
     ...(c.identityPilot || {}),
     enabled: enabled === true
   };
+}
+
+async function loadIdentityPilotStatus() {
+  const statusNode = $('#identity-pilot-state');
+  if (!statusNode) return;
+  try {
+    const status = await api('/api/identity-pilot/status');
+    const stats = $('#identity-pilot-stats');
+    if (!status.enabled) {
+      statusNode.textContent = '已关闭 · 当前系统行为不变';
+      if (stats) stats.hidden = true;
+      return;
+    }
+    statusNode.textContent = status.active
+      ? `已启用 · 最近索引 ${status.lastIndexedAt ? fmtTime(status.lastIndexedAt) : '-'}`
+      : `未运行${status.error ? `：${status.error}` : ''}`;
+    if (stats) {
+      stats.hidden = !status.active;
+      const values = {
+        people: status.people,
+        sources: status.sources,
+        aliases: status.aliases,
+        memories: status.legacyMemories
+      };
+      for (const [key, value] of Object.entries(values)) {
+        const node = stats.querySelector(`[data-identity-stat="${key}"]`);
+        if (node) node.textContent = fmtTok(value);
+      }
+    }
+  } catch (error) {
+    statusNode.textContent = `状态读取失败：${error.message}`;
+  }
 }
 
 const TIME_RULE_LABELS = {
@@ -4106,15 +4147,14 @@ function bindSettingsEvents(c) {
   if ((state.settingsSection || 'api') === 'experiments') {
     const toggle = $('#cfg-identity-pilot-enabled');
     const status = $('#identity-pilot-state');
+    loadIdentityPilotStatus();
     toggle?.addEventListener('change', async () => {
       const requested = toggle.checked;
       toggle.disabled = true;
       status.textContent = '保存中…';
       try {
         await saveConfig({ quiet: true });
-        status.textContent = requested
-          ? '总开关已开启（阶段 1）'
-          : '已关闭 · 当前系统行为不变';
+        await loadIdentityPilotStatus();
       } catch (error) {
         toggle.checked = !requested;
         status.textContent = `保存失败：${error.message}`;

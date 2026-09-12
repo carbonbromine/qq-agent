@@ -805,4 +805,32 @@ export class ChatStore {
       COUNT(*) AS count FROM messages WHERE chat_key=? AND self=0
       GROUP BY sender_id ORDER BY lastTs DESC LIMIT ?`).all(chatKey, Math.max(1, limit));
   }
+
+  /** 实验身份库启用时才调用：为跨会话 QQ 查询创建索引。 */
+  ensureIdentityLookupIndex() {
+    this.db.exec(`CREATE INDEX IF NOT EXISTS messages_sender_time
+      ON messages(sender_id, ts DESC) WHERE self=0`);
+  }
+
+  /**
+   * 返回按 QQ / 会话 / 昵称聚合的只读活动快照。
+   * 不在构造阶段自动执行，确保实验开关关闭时数据库结构和查询成本均不变化。
+   */
+  identityActivityRows() {
+    return this.db.prepare(`
+      SELECT sender_id AS userId, chat_key AS chatKey, sender_name AS name,
+        COUNT(*) AS messageCount, MIN(ts) AS firstSeenAt, MAX(ts) AS lastSeenAt
+      FROM messages
+      WHERE self=0 AND sender_id!=''
+      GROUP BY sender_id, chat_key, sender_name
+      ORDER BY lastSeenAt DESC
+    `).all().map((row) => ({
+      userId: String(row.userId || ''),
+      chatKey: String(row.chatKey || ''),
+      name: String(row.name || ''),
+      messageCount: Number(row.messageCount) || 0,
+      firstSeenAt: Number(row.firstSeenAt) || 0,
+      lastSeenAt: Number(row.lastSeenAt) || 0
+    }));
+  }
 }

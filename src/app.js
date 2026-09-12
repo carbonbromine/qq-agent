@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { conversationConfigForChat, getConfig, updateConfig, onTimeControlChange, DATA_DIR } from './config.js';
+import { conversationConfigForChat, getConfig, identityPilotEnabled, updateConfig, onTimeControlChange, DATA_DIR } from './config.js';
 import { customSearch } from './web-search.js';
 import { OneBotClient, segmentsToText, extractMediaFromSegments, expandForwardNodes } from './onebot.js';
 import { ChatStore } from './store.js';
@@ -25,6 +25,7 @@ import { createEventBus, todayKey, shanghaiDayStart } from './util.js';
 import { assertCanSend } from './access.js';
 import { isTimeActive } from './time-gate.js';
 import { timeControlState, TIME_ZONE } from './time-control.js';
+import { IdentityPilotManager, inactiveIdentityPilotStatus } from './identity-pilot.js';
 
 // 全局 fetch（undici）默认连接建立超时只有 10 秒，openrouter.ai 这类海外端点
 // 握手慢时会直接报 "Connect Timeout Error ... timeout: 10000ms"（注意这不是
@@ -146,6 +147,36 @@ export function createApp({ log = console.log } = {}) {
     emit,
     log
   });
+  let identityPilot = null;
+  let identityPilotError = '';
+  function identityPilotStatus() {
+    return identityPilot?.status() || inactiveIdentityPilotStatus({
+      enabled: identityPilotEnabled(),
+      error: identityPilotError
+    });
+  }
+  async function syncIdentityPilot({ reindex = false } = {}) {
+    if (!identityPilotEnabled()) {
+      identityPilot?.stop();
+      identityPilot = null;
+      identityPilotError = '';
+      return identityPilotStatus();
+    }
+    identityPilot ||= new IdentityPilotManager({ store, onebot, log });
+    try {
+      const status = reindex && identityPilot.active
+        ? await identityPilot.reindex()
+        : await identityPilot.start();
+      identityPilotError = '';
+      emit('identity-pilot-update', status);
+      return status;
+    } catch (error) {
+      identityPilotError = String(error?.message ?? error);
+      identityPilot?.stop();
+      identityPilot = null;
+      throw error;
+    }
+  }
   let timeControlTimer = null;
   function refreshTimeControl() {
     clearTimeout(timeControlTimer);
@@ -285,6 +316,7 @@ export function createApp({ log = console.log } = {}) {
       recordOnly: arrivedInactive || !isTimeActive(chatKey)
     });
     if (stored.duplicate) return;
+    if (!isSelf) identityPilot?.observeMessage(chatKey, stored);
     emit('chat-update', chatKey);
     if (!isSelf) orchestrator.onIncoming(chatKey);
   }
@@ -1065,6 +1097,13 @@ export function createApp({ log = console.log } = {}) {
         const previousProactive = JSON.stringify(cfgNow.proactive || {});
         const previousDailyMoments = JSON.stringify(cfgNow.dailyMoments || {});
         const previousQzoneInteractions = JSON.stringify(cfgNow.qzoneInteractions || {});
+        const previousIdentityPilot = JSON.stringify(cfgNow.identityPilot || {});
+        const previousIdentitySources = JSON.stringify({
+          allow: cfgNow.allow || {},
+          deny: cfgNow.deny || {},
+          allowAllWhenEmpty: cfgNow.allowAllWhenEmpty === true,
+          blocklist: cfgNow.blocklist || {}
+        });
         const previousModes = new Map(
           store.listChats().map((chatKey) => [chatKey, conversationConfigForChat(chatKey).mode])
         );
@@ -1092,6 +1131,27 @@ export function createApp({ log = console.log } = {}) {
         if (JSON.stringify(next.qzoneInteractions || {}) !== previousQzoneInteractions) {
           qzoneInteractions.reconfigure();
         }
+        const identityChanged = JSON.stringify(next.identityPilot || {}) !== previousIdentityPilot;
+        const identitySourcesChanged = JSON.stringify({
+          allow: next.allow || {},
+          deny: next.deny || {},
+          allowAllWhenEmpty: next.allowAllWhenEmpty === true,
+          blocklist: next.blocklist || {}
+        }) !== previousIdentitySources;
+        if (identityChanged || (identityPilotEnabled(next) && identitySourcesChanged)) {
+          try {
+            await syncIdentityPilot({ reindex: identitySourcesChanged });
+          } catch (error) {
+            const reverted = updateConfig({
+              identityPilot: { ...(next.identityPilot || {}), enabled: false }
+            });
+            return json(res, 500, {
+              ok: false,
+              error: `统一身份库启动失败，开关已恢复为关闭：${String(error?.message ?? error)}`,
+              config: sanitizeConfig(reverted)
+            });
+          }
+        }
         initPriceFeed(next.api?.priceRemoteUrl || '');   // 远程价格表 URL 可能改了（内部幂等）
         emit('status', { configUpdated: true });
         return json(res, 200, { ok: true, config: sanitizeConfig(next) });
@@ -1103,6 +1163,21 @@ export function createApp({ log = console.log } = {}) {
 
       if (pathname === '/api/qzone-interactions/status' && method === 'GET') {
         return json(res, 200, qzoneInteractions.status());
+      }
+
+      if (pathname === '/api/identity-pilot/status' && method === 'GET') {
+        return json(res, 200, identityPilotStatus());
+      }
+
+      if (pathname === '/api/identity-pilot/people' && method === 'GET') {
+        if (!identityPilot?.active) {
+          return json(res, 409, { error: '统一身份库未启用' });
+        }
+        const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 100));
+        return json(res, 200, {
+          status: identityPilot.status(),
+          people: identityPilot.listPeople(limit)
+        });
       }
 
       if (pathname === '/api/qzone-interactions/run' && method === 'POST') {
@@ -1549,6 +1624,13 @@ export function createApp({ log = console.log } = {}) {
     if (port == null) throw lastError ?? new Error('无法监听端口');
 
     await onebot.connect();
+    if (identityPilotEnabled()) {
+      try {
+        await syncIdentityPilot();
+      } catch (error) {
+        log(`[identity-pilot] 启动失败，聊天主流程继续：${error?.message ?? error}`);
+      }
+    }
     refreshTimeControl();
     orchestrator.startRecoveryLoop();
     if (getConfig().dailyMoments?.enabled) dailyMoments.start();
@@ -1567,6 +1649,8 @@ export function createApp({ log = console.log } = {}) {
     dailyMoments.abort();
     qzoneInteractions.stop();
     await qzoneInteractions.abort();
+    identityPilot?.stop();
+    identityPilot = null;
     onebot.close();
     await orchestrator.abortAll();
     await Promise.allSettled([...ingress.values()]);
@@ -1600,6 +1684,8 @@ export function createApp({ log = console.log } = {}) {
     orchestrator,
     dailyMoments,
     qzoneInteractions,
+    get identityPilot() { return identityPilot; },
+    identityPilotStatus,
     start,
     stop,
     emit,

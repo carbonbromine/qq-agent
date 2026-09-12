@@ -734,6 +734,46 @@ async function main() {
   assert.equal(statusRes.cost.cost, todayUsageRes.totals.cost,
     '顶部与用量页应使用同一套逐调用计价');
   assert.equal(statusRes.cost.calculation, 'per-call');
+
+  // ── 场景 11b：统一 QQ 身份库动态启停 ──
+  const identityDb = path.join(dataDir, 'identity-pilot.sqlite');
+  const identityBefore = await (await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/identity-pilot/status`
+  )).json();
+  assert.equal(identityBefore.enabled, false);
+  assert.equal(identityBefore.active, false);
+  assert.equal(fs.existsSync(identityDb), false, '默认关闭时不得创建身份库');
+  const identityEnable = await fetch(`http://127.0.0.1:${cfg.server.port}/api/config`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ identityPilot: { enabled: true } })
+  });
+  assert.equal(identityEnable.status, 200);
+  const identityOn = await (await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/identity-pilot/status`
+  )).json();
+  assert.equal(identityOn.enabled, true);
+  assert.equal(identityOn.active, true);
+  assert.ok(identityOn.people >= 2, '启用后应索引已有群聊和私聊身份');
+  assert.ok(fs.existsSync(identityDb), '启用后创建独立身份库');
+  const peopleRes = await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/identity-pilot/people?limit=10`
+  );
+  assert.equal(peopleRes.status, 200);
+  const peopleBody = await peopleRes.json();
+  assert.ok(peopleBody.people.some((person) => person.userId === '111'));
+  await fetch(`http://127.0.0.1:${cfg.server.port}/api/config`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ identityPilot: { enabled: false } })
+  });
+  const identityOff = await (await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/identity-pilot/status`
+  )).json();
+  assert.equal(identityOff.enabled, false);
+  assert.equal(identityOff.active, false);
+  pass('统一 QQ 身份库：默认无副作用、动态启用索引、关闭停止运行');
+
   const dailyMomentsStatus = await (await fetch(
     `http://127.0.0.1:${cfg.server.port}/api/daily-moments/status`
   )).json();

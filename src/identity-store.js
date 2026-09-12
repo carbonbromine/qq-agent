@@ -1,0 +1,462 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { DATA_DIR } from './config.js';
+
+const DB_NAME = 'identity-pilot.sqlite';
+
+function normalizeUin(value) {
+  const uin = String(value ?? '').trim();
+  return /^\d{1,15}$/.test(uin) && Number(uin) > 0 ? uin : '';
+}
+
+function cleanName(value) {
+  return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, 60);
+}
+
+function cleanMemory(value) {
+  return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, 300);
+}
+
+function readJson(file) {
+  try {
+    let text = fs.readFileSync(file, 'utf8');
+    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+    const value = JSON.parse(text);
+    return value && typeof value === 'object' ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function chatKeyFromName(name) {
+  const match = /^(group|private)_(\d+)$/.exec(String(name || ''));
+  return match ? `${match[1]}:${match[2]}` : '';
+}
+
+export function identityDatabasePath(dataDir = DATA_DIR) {
+  return path.join(dataDir, DB_NAME);
+}
+
+/**
+ * 只读扫描旧版会话内印象。不会调用 MemoryStore，因其加载过程可能执行历史迁移。
+ */
+export function readLegacyIdentityMemories(
+  dataDir = DATA_DIR,
+  { allowSource = () => true } = {}
+) {
+  const memoryDir = path.join(dataDir, 'memory');
+  const rows = [];
+  let names = [];
+  try { names = fs.readdirSync(memoryDir); } catch { return rows; }
+
+  const add = (chatKey, userId, content, createdAt, sourceFile) => {
+    const uin = normalizeUin(userId);
+    const text = cleanMemory(content);
+    if (!uin || !text || !allowSource(chatKey, uin)) return;
+    rows.push({
+      userId: uin,
+      chatKey,
+      content: text,
+      observedAt: Number(createdAt) || 0,
+      sourceFile: path.relative(dataDir, sourceFile)
+    });
+  };
+
+  for (const name of names) {
+    const full = path.join(memoryDir, name);
+    let stat;
+    try { stat = fs.statSync(full); } catch { continue; }
+
+    if (stat.isDirectory()) {
+      const chatKey = chatKeyFromName(name);
+      if (!chatKey) continue;
+      let files = [];
+      try { files = fs.readdirSync(full); } catch { continue; }
+      for (const filename of files) {
+        if (!/^\d{1,15}\.json$/.test(filename)) continue;
+        const file = path.join(full, filename);
+        const raw = readJson(file);
+        if (!raw) continue;
+        const userId = normalizeUin(raw.userId) || filename.slice(0, -5);
+        for (const impression of Array.isArray(raw.impressions) ? raw.impressions : []) {
+          add(chatKey, userId, impression?.content, impression?.createdAt, file);
+        }
+      }
+      continue;
+    }
+
+    const legacyMatch = /^(group|private)_(\d+)\.json$/.exec(name);
+    if (!legacyMatch) continue;
+    const chatKey = `${legacyMatch[1]}:${legacyMatch[2]}`;
+    const raw = readJson(full);
+    for (const impression of Array.isArray(raw?.memberImpression) ? raw.memberImpression : []) {
+      add(
+        chatKey,
+        impression?.userId || (/^\d{1,15}$/.test(String(impression?.target || ''))
+          ? impression.target
+          : ''),
+        impression?.content,
+        impression?.createdAt,
+        full
+      );
+    }
+  }
+  return rows;
+}
+
+export class IdentityStore {
+  constructor({ dataDir = DATA_DIR, filename = identityDatabasePath(dataDir) } = {}) {
+    this.filename = filename;
+    fs.mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
+    this.db = new DatabaseSync(filename);
+    try { fs.chmodSync(filename, 0o600); } catch { /* best effort */ }
+    this.db.exec(`
+      PRAGMA journal_mode=WAL;
+      PRAGMA synchronous=FULL;
+      PRAGMA busy_timeout=5000;
+      PRAGMA foreign_keys=ON;
+      CREATE TABLE IF NOT EXISTS people (
+        uin TEXT PRIMARY KEY,
+        primary_name TEXT NOT NULL DEFAULT '',
+        first_seen_at INTEGER NOT NULL DEFAULT 0,
+        last_seen_at INTEGER NOT NULL DEFAULT 0,
+        message_count INTEGER NOT NULL DEFAULT 0,
+        chat_count INTEGER NOT NULL DEFAULT 0,
+        is_friend INTEGER NOT NULL DEFAULT 0,
+        legacy_memory_count INTEGER NOT NULL DEFAULT 0,
+        profile_json TEXT NOT NULL DEFAULT '{}',
+        profile_updated_at INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS identity_sources (
+        uin TEXT NOT NULL,
+        chat_key TEXT NOT NULL,
+        message_count INTEGER NOT NULL DEFAULT 0,
+        first_seen_at INTEGER NOT NULL DEFAULT 0,
+        last_seen_at INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (uin, chat_key),
+        FOREIGN KEY (uin) REFERENCES people(uin) ON DELETE CASCADE
+      );
+      CREATE TABLE IF NOT EXISTS identity_aliases (
+        uin TEXT NOT NULL,
+        chat_key TEXT NOT NULL,
+        alias TEXT NOT NULL,
+        seen_count INTEGER NOT NULL DEFAULT 0,
+        first_seen_at INTEGER NOT NULL DEFAULT 0,
+        last_seen_at INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (uin, chat_key, alias),
+        FOREIGN KEY (uin) REFERENCES people(uin) ON DELETE CASCADE
+      );
+      CREATE TABLE IF NOT EXISTS legacy_memory_refs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        uin TEXT NOT NULL,
+        chat_key TEXT NOT NULL,
+        content TEXT NOT NULL,
+        observed_at INTEGER NOT NULL DEFAULT 0,
+        source_file TEXT NOT NULL DEFAULT '',
+        UNIQUE (uin, chat_key, content),
+        FOREIGN KEY (uin) REFERENCES people(uin) ON DELETE CASCADE
+      );
+      CREATE TABLE IF NOT EXISTS identity_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS identity_people_recent ON people(last_seen_at DESC);
+      CREATE INDEX IF NOT EXISTS identity_sources_chat ON identity_sources(chat_key, last_seen_at DESC);
+      CREATE INDEX IF NOT EXISTS identity_memories_person ON legacy_memory_refs(uin, observed_at DESC);
+    `);
+  }
+
+  close() {
+    this.db.close();
+  }
+
+  rebuild({ activityRows = [], legacyMemories = [], friends = [], now = Date.now() } = {}) {
+    const people = new Map();
+    const sources = new Map();
+    const aliases = new Map();
+    const memories = new Map();
+    const friendMap = new Map();
+
+    const person = (uin) => {
+      if (!people.has(uin)) {
+        people.set(uin, {
+          uin,
+          primaryName: '',
+          firstSeenAt: 0,
+          lastSeenAt: 0,
+          messageCount: 0,
+          chatCount: 0,
+          isFriend: false,
+          legacyMemoryCount: 0
+        });
+      }
+      return people.get(uin);
+    };
+
+    for (const friend of friends || []) {
+      const uin = normalizeUin(friend?.userId ?? friend?.user_id);
+      if (!uin) continue;
+      const name = cleanName(friend?.remark || friend?.name || friend?.nickname);
+      friendMap.set(uin, name);
+      const row = person(uin);
+      row.isFriend = true;
+      if (name) row.primaryName = name;
+    }
+
+    for (const raw of activityRows || []) {
+      const uin = normalizeUin(raw?.userId);
+      const chatKey = String(raw?.chatKey || '');
+      if (!uin || !/^(group|private):\d+$/.test(chatKey)) continue;
+      const count = Math.max(0, Number(raw.messageCount) || 0);
+      const firstSeenAt = Number(raw.firstSeenAt) || 0;
+      const lastSeenAt = Number(raw.lastSeenAt) || 0;
+      const sourceKey = `${uin}\u0000${chatKey}`;
+      const source = sources.get(sourceKey) || {
+        uin, chatKey, messageCount: 0, firstSeenAt: 0, lastSeenAt: 0
+      };
+      source.messageCount += count;
+      source.firstSeenAt = source.firstSeenAt
+        ? Math.min(source.firstSeenAt, firstSeenAt || source.firstSeenAt)
+        : firstSeenAt;
+      source.lastSeenAt = Math.max(source.lastSeenAt, lastSeenAt);
+      sources.set(sourceKey, source);
+
+      const name = cleanName(raw.name);
+      if (name) {
+        const aliasKey = `${sourceKey}\u0000${name}`;
+        const alias = aliases.get(aliasKey) || {
+          uin, chatKey, alias: name, seenCount: 0, firstSeenAt: 0, lastSeenAt: 0
+        };
+        alias.seenCount += count;
+        alias.firstSeenAt = alias.firstSeenAt
+          ? Math.min(alias.firstSeenAt, firstSeenAt || alias.firstSeenAt)
+          : firstSeenAt;
+        alias.lastSeenAt = Math.max(alias.lastSeenAt, lastSeenAt);
+        aliases.set(aliasKey, alias);
+      }
+
+      const row = person(uin);
+      row.messageCount += count;
+      row.firstSeenAt = row.firstSeenAt
+        ? Math.min(row.firstSeenAt, firstSeenAt || row.firstSeenAt)
+        : firstSeenAt;
+      if (lastSeenAt >= row.lastSeenAt && name && !friendMap.has(uin)) {
+        row.primaryName = name;
+      }
+      row.lastSeenAt = Math.max(row.lastSeenAt, lastSeenAt);
+    }
+
+    for (const raw of legacyMemories || []) {
+      const uin = normalizeUin(raw?.userId);
+      const chatKey = String(raw?.chatKey || '');
+      const content = cleanMemory(raw?.content);
+      if (!uin || !/^(group|private):\d+$/.test(chatKey) || !content) continue;
+      const key = `${uin}\u0000${chatKey}\u0000${content}`;
+      memories.set(key, {
+        uin,
+        chatKey,
+        content,
+        observedAt: Number(raw.observedAt) || 0,
+        sourceFile: String(raw.sourceFile || '').slice(0, 500)
+      });
+      person(uin);
+    }
+
+    for (const source of sources.values()) {
+      person(source.uin).chatCount += 1;
+    }
+    for (const memory of memories.values()) {
+      person(memory.uin).legacyMemoryCount += 1;
+    }
+
+    const previous = new Map(this.db.prepare(
+      'SELECT uin, profile_json, profile_updated_at, created_at FROM people'
+    ).all().map((row) => [String(row.uin), row]));
+
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db.exec('DELETE FROM identity_aliases; DELETE FROM identity_sources; DELETE FROM legacy_memory_refs; DELETE FROM people;');
+      const insertPerson = this.db.prepare(`
+        INSERT INTO people (
+          uin, primary_name, first_seen_at, last_seen_at, message_count, chat_count,
+          is_friend, legacy_memory_count, profile_json, profile_updated_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const row of people.values()) {
+        const old = previous.get(row.uin);
+        insertPerson.run(
+          row.uin,
+          friendMap.get(row.uin) || row.primaryName,
+          row.firstSeenAt,
+          row.lastSeenAt,
+          row.messageCount,
+          row.chatCount,
+          row.isFriend ? 1 : 0,
+          row.legacyMemoryCount,
+          old?.profile_json || '{}',
+          Number(old?.profile_updated_at) || 0,
+          Number(old?.created_at) || now,
+          now
+        );
+      }
+
+      const insertSource = this.db.prepare(`
+        INSERT INTO identity_sources
+          (uin, chat_key, message_count, first_seen_at, last_seen_at)
+        VALUES (?, ?, ?, ?, ?)
+      `);
+      for (const row of sources.values()) {
+        insertSource.run(
+          row.uin, row.chatKey, row.messageCount, row.firstSeenAt, row.lastSeenAt
+        );
+      }
+
+      const insertAlias = this.db.prepare(`
+        INSERT INTO identity_aliases
+          (uin, chat_key, alias, seen_count, first_seen_at, last_seen_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `);
+      for (const row of aliases.values()) {
+        insertAlias.run(
+          row.uin, row.chatKey, row.alias, row.seenCount, row.firstSeenAt, row.lastSeenAt
+        );
+      }
+
+      const insertMemory = this.db.prepare(`
+        INSERT INTO legacy_memory_refs
+          (uin, chat_key, content, observed_at, source_file)
+        VALUES (?, ?, ?, ?, ?)
+      `);
+      for (const row of memories.values()) {
+        insertMemory.run(
+          row.uin, row.chatKey, row.content, row.observedAt, row.sourceFile
+        );
+      }
+      this.db.prepare(`
+        INSERT INTO identity_meta(key, value) VALUES ('last_indexed_at', ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value
+      `).run(String(now));
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+    return this.status();
+  }
+
+  observe(chatKey, message) {
+    const uin = normalizeUin(message?.senderId);
+    const source = String(chatKey || '');
+    if (!uin || !/^(group|private):\d+$/.test(source) || message?.self) return false;
+    const name = cleanName(message?.senderName);
+    const at = Number(message?.ts) || Date.now();
+    const now = Date.now();
+
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db.prepare(`
+        INSERT INTO people (
+          uin, primary_name, first_seen_at, last_seen_at, message_count, chat_count,
+          is_friend, legacy_memory_count, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 1, 1, 0, 0, ?, ?)
+        ON CONFLICT(uin) DO UPDATE SET
+          primary_name=CASE WHEN excluded.primary_name!='' THEN excluded.primary_name ELSE people.primary_name END,
+          first_seen_at=CASE WHEN people.first_seen_at=0 THEN excluded.first_seen_at ELSE MIN(people.first_seen_at, excluded.first_seen_at) END,
+          last_seen_at=MAX(people.last_seen_at, excluded.last_seen_at),
+          message_count=people.message_count+1,
+          updated_at=excluded.updated_at
+      `).run(uin, name, at, at, now, now);
+      this.db.prepare(`
+        INSERT INTO identity_sources
+          (uin, chat_key, message_count, first_seen_at, last_seen_at)
+        VALUES (?, ?, 1, ?, ?)
+        ON CONFLICT(uin, chat_key) DO UPDATE SET
+          message_count=identity_sources.message_count+1,
+          first_seen_at=CASE WHEN identity_sources.first_seen_at=0 THEN excluded.first_seen_at ELSE MIN(identity_sources.first_seen_at, excluded.first_seen_at) END,
+          last_seen_at=MAX(identity_sources.last_seen_at, excluded.last_seen_at)
+      `).run(uin, source, at, at);
+      if (name) {
+        this.db.prepare(`
+          INSERT INTO identity_aliases
+            (uin, chat_key, alias, seen_count, first_seen_at, last_seen_at)
+          VALUES (?, ?, ?, 1, ?, ?)
+          ON CONFLICT(uin, chat_key, alias) DO UPDATE SET
+            seen_count=identity_aliases.seen_count+1,
+            first_seen_at=CASE WHEN identity_aliases.first_seen_at=0 THEN excluded.first_seen_at ELSE MIN(identity_aliases.first_seen_at, excluded.first_seen_at) END,
+            last_seen_at=MAX(identity_aliases.last_seen_at, excluded.last_seen_at)
+        `).run(uin, source, name, at, at);
+      }
+      this.db.prepare(`
+        UPDATE people SET chat_count=(
+          SELECT COUNT(*) FROM identity_sources WHERE identity_sources.uin=people.uin
+        ) WHERE uin=?
+      `).run(uin);
+      this.db.prepare(`
+        INSERT INTO identity_meta(key, value) VALUES ('last_observed_at', ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value
+      `).run(String(now));
+      this.db.exec('COMMIT');
+      return true;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  status() {
+    const totals = this.db.prepare(`
+      SELECT COUNT(*) AS people,
+        COALESCE(SUM(message_count),0) AS messages,
+        COALESCE(SUM(is_friend),0) AS friends,
+        COALESCE(SUM(legacy_memory_count),0) AS legacyMemories
+      FROM people
+    `).get();
+    const aliases = this.db.prepare('SELECT COUNT(*) AS count FROM identity_aliases').get();
+    const sources = this.db.prepare('SELECT COUNT(*) AS count FROM identity_sources').get();
+    const indexed = this.db.prepare(
+      "SELECT value FROM identity_meta WHERE key='last_indexed_at'"
+    ).get();
+    return {
+      people: Number(totals.people) || 0,
+      messages: Number(totals.messages) || 0,
+      friends: Number(totals.friends) || 0,
+      legacyMemories: Number(totals.legacyMemories) || 0,
+      aliases: Number(aliases.count) || 0,
+      sources: Number(sources.count) || 0,
+      lastIndexedAt: Number(indexed?.value) || 0
+    };
+  }
+
+  listPeople(limit = 100) {
+    const rows = this.db.prepare(`
+      SELECT * FROM people
+      ORDER BY last_seen_at DESC, message_count DESC, uin
+      LIMIT ?
+    `).all(Math.min(500, Math.max(1, Number(limit) || 100)));
+    const aliasStmt = this.db.prepare(`
+      SELECT alias, chat_key AS chatKey, seen_count AS seenCount,
+        first_seen_at AS firstSeenAt, last_seen_at AS lastSeenAt
+      FROM identity_aliases WHERE uin=?
+      ORDER BY last_seen_at DESC, seen_count DESC
+    `);
+    return rows.map((row) => ({
+      userId: String(row.uin),
+      primaryName: String(row.primary_name || ''),
+      firstSeenAt: Number(row.first_seen_at) || 0,
+      lastSeenAt: Number(row.last_seen_at) || 0,
+      messageCount: Number(row.message_count) || 0,
+      chatCount: Number(row.chat_count) || 0,
+      isFriend: Boolean(row.is_friend),
+      legacyMemoryCount: Number(row.legacy_memory_count) || 0,
+      aliases: aliasStmt.all(row.uin).map((alias) => ({
+        ...alias,
+        seenCount: Number(alias.seenCount) || 0,
+        firstSeenAt: Number(alias.firstSeenAt) || 0,
+        lastSeenAt: Number(alias.lastSeenAt) || 0
+      }))
+    }));
+  }
+}

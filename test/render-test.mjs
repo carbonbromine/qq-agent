@@ -223,9 +223,12 @@ try {
   if (
     experimentalHtml.includes('id="cfg-identity-pilot-enabled"')
     && experimentalHtml.includes('已关闭 · 当前系统行为不变')
+    && experimentalHtml.includes('id="identity-pilot-stats" hidden')
     && !/id="cfg-identity-pilot-enabled" checked/.test(experimentalHtml)
     && /id="cfg-identity-pilot-enabled" checked/.test(experimentalOnHtml)
-    && experimentalOnHtml.includes('总开关已开启（阶段 1）')
+    && experimentalOnHtml.includes('正在读取统一身份库')
+    && experimentalOnHtml.includes('data-identity-stat="people"')
+    && experimentalOnHtml.includes('data-identity-stat="memories"')
   ) {
     pass++;
     console.log('  OK    人物画像实验总开关默认关闭并可展示开启状态');

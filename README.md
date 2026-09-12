@@ -121,13 +121,16 @@ bash manage.sh backup /path/to/new-backup-dir
 - `messages.sqlite`：消息、租约和出站状态
 - `sessions/`：每次 Agent 运行记录
 - `memory/`：群友长期印象和跨 Session 会话交接状态
+- `identity-pilot.sqlite`：实验性统一 QQ 身份索引（仅启用实验开关后创建）
 - `daily-moments.json`：每日群聊总结、说说决策与发布结果
 - `qzone-interactions.json`：好友动态未读队列、评论回复和外部写入状态
 - `console-access.txt`：控制台地址和 Token，权限 `0600`
 
 “设置 -> 实验功能”中的“跨会话人物画像与好友关系”总开关默认关闭。
-当前阶段仅建立配置闸门；关闭时不注册额外工具、不修改模型提示词、不启动后台任务，
-也不会创建实验数据文件。
+启用后会以 QQ 号聚合当前白名单会话里的群聊/私聊身份、别名、消息统计、好友状态，
+并只读索引已有会话印象；关闭时不注册额外工具、不修改模型提示词、不启动后台任务，
+也不会创建实验数据文件。当前阶段尚未把统一身份注入模型或开放人物记忆工具。
+实现边界见[统一身份试点](docs/IDENTITY_PILOT.md)。
 
 每次 Agent 运行仍有独立的审计记录。`lifecycle` 模式会按 `threadId`
 持久化 provider transcript（包括工具轨迹和供应商返回的
