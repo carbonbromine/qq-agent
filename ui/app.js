@@ -12,6 +12,7 @@ const CHAT_MSG_MORE = 200;    // 存档页：每次滚动追加
 
 const state = {
   tab: 'sessions',
+  integrationStatus: null,
   sessions: [],          // 摘要列表
   currentSessionId: null,
   sessionDetail: null,   // 完整记录
@@ -408,12 +409,149 @@ function switchTab(name) {
   $$('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === name));
   $$('.view').forEach((v) => v.classList.toggle('active', v.id === `view-${name}`));
   state.tab = name;
+  if (name === 'control') loadControlHub();
   if (name === 'sessions') loadSessions();
   if (name === 'chats') loadChats();
   if (name === 'memory') loadMemoryView();
   if (name === 'assets') loadAssetObservatory();
   if (name === 'usage') loadUsageView({ force: true });
   if (name === 'settings') loadSettings();
+}
+
+const CORE_SERVICE_LINKS = [
+  { id: 'agent', name: 'QQ Agent', detail: '当前控制台', port: 3210, mark: 'AG' },
+  { id: 'dsh', name: 'DeepSeek Harness', detail: '模型与会话', port: 3080, mark: 'DS' },
+  { id: 'bridge', name: 'Bridge Console', detail: '旧架构运维', port: 3100, mark: 'BR' },
+  { id: 'snowluma', name: 'SnowLuma', detail: 'QQ 网关', port: 5099, mark: 'SL' },
+  { id: 'novnc', name: 'QQ 远程桌面', detail: '登录与客户端维护', port: 6081, mark: 'QQ' }
+];
+
+function serviceUrl(port, path = '/') {
+  const protocol = location.protocol === 'https:' ? 'https:' : 'http:';
+  const hostname = location.hostname || new URL(location.href).hostname;
+  return `${protocol}//${hostname}:${port}${path}`;
+}
+
+function renderControlHub(data = {}) {
+  const box = $('#control-page');
+  if (!box) return;
+  const statuses = new Map((data.services || []).map((service) => [service.id, service]));
+  box.innerHTML = `
+    <div class="control-head">
+      <div><h2>服务与访问控制</h2><span class="muted">统一入口</span></div>
+      <button type="button" class="icon-btn" id="control-refresh" title="刷新服务状态" aria-label="刷新服务状态">↻</button>
+    </div>
+    <div class="control-service-grid">
+      ${CORE_SERVICE_LINKS.map((service) => {
+        const status = statuses.get(service.id);
+        const online = service.id === 'agent' || status?.online === true;
+        return `<a class="control-service" href="${esc(serviceUrl(service.port))}" target="_blank" rel="noreferrer">
+          <span class="control-service-mark">${esc(service.mark)}</span>
+          <span class="control-service-copy"><strong>${esc(service.name)}</strong><small>${esc(service.detail)} · :${service.port}</small></span>
+          <span class="control-service-state ${online ? 'online' : 'offline'}">${online ? '在线' : status ? '不可达' : '检测中'}</span>
+        </a>`;
+      }).join('')}
+    </div>
+    <section class="control-section">
+      <h3>密钥控制</h3>
+      <div class="control-key-list">
+        <button type="button" class="control-key-row" data-open-settings="api">
+          <span><strong>模型 API Key</strong><small>模型 API</small></span><b>管理</b>
+        </button>
+        <button type="button" class="control-key-row" data-open-settings="search">
+          <span><strong>搜索服务 Key</strong><small>搜索服务</small></span><b>管理</b>
+        </button>
+        <button type="button" class="control-key-row" data-open-settings="onebot">
+          <span><strong>OneBot HTTP / WS Token</strong><small>OneBot</small></span><b>管理</b>
+        </button>
+        <button type="button" class="control-key-row" data-open-settings="desktop">
+          <span><strong>QQ Agent 控制台 Token</strong><small>系统</small></span><b>管理</b>
+        </button>
+        <a class="control-key-row" href="${esc(serviceUrl(3100))}" target="_blank" rel="noreferrer">
+          <span><strong>Bridge 控制台 Token</strong><small>旧架构控制台</small></span><b>打开</b>
+        </a>
+      </div>
+    </section>
+    <section class="control-section">
+      <div class="control-section-title">
+        <div><h3>SnowLuma 登录密钥</h3><span class="muted">修改后 SnowLuma WebUI 的现有登录会话会失效</span></div>
+        <a class="btn btn-small" href="${esc(serviceUrl(5099, '/settings?tab=account'))}" target="_blank" rel="noreferrer">打开账号安全</a>
+      </div>
+      <form id="snowluma-password-form" class="control-password-form" autocomplete="off">
+        <label><span>当前密钥</span><input type="password" id="snowluma-current-password" autocomplete="current-password" required /></label>
+        <label><span>新密钥</span><input type="password" id="snowluma-new-password" autocomplete="new-password" placeholder="至少 10 位，含大小写与符号" required /></label>
+        <label><span>确认新密钥</span><input type="password" id="snowluma-confirm-password" autocomplete="new-password" required /></label>
+        <button type="submit" class="btn btn-primary" id="snowluma-password-submit">更新密钥</button>
+      </form>
+      <div id="snowluma-password-result" class="control-result muted" role="status" aria-live="polite"></div>
+    </section>`;
+
+  $('#control-refresh')?.addEventListener('click', () => loadControlHub({ force: true }));
+  $$('#control-page [data-open-settings]').forEach((button) => {
+    button.addEventListener('click', () => {
+      state.settingsSection = button.dataset.openSettings;
+      switchTab('settings');
+    });
+  });
+  $('#snowluma-password-form')?.addEventListener('submit', changeSnowLumaPassword);
+}
+
+async function loadControlHub({ force = false } = {}) {
+  const box = $('#control-page');
+  if (!box) return;
+  if (!state.integrationStatus || force) {
+    box.innerHTML = '<div class="empty-hint">正在检查服务…</div>';
+  }
+  try {
+    state.integrationStatus = await api('/api/integrations/status');
+    if (state.tab === 'control') renderControlHub(state.integrationStatus);
+  } catch (error) {
+    box.innerHTML = `<div class="empty-hint">服务状态读取失败：${esc(error.message)}</div>`;
+  }
+}
+
+async function changeSnowLumaPassword(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const currentPassword = $('#snowluma-current-password')?.value || '';
+  const newPassword = $('#snowluma-new-password')?.value || '';
+  const confirmPassword = $('#snowluma-confirm-password')?.value || '';
+  const result = $('#snowluma-password-result');
+  if (newPassword !== confirmPassword) {
+    result.textContent = '两次输入的新密钥不一致。';
+    result.className = 'control-result error';
+    return;
+  }
+  if (
+    newPassword.length < 10
+    || !/[a-z]/.test(newPassword)
+    || !/[A-Z]/.test(newPassword)
+    || !/[^A-Za-z0-9\s]/.test(newPassword)
+    || /\s/.test(newPassword)
+  ) {
+    result.textContent = '新密钥至少 10 位，且需包含大小写字母和特殊符号。';
+    result.className = 'control-result error';
+    return;
+  }
+  if (!confirm('更新 SnowLuma 登录密钥并注销其现有 WebUI 会话？')) return;
+  const button = $('#snowluma-password-submit');
+  button.disabled = true;
+  result.textContent = '正在更新…';
+  result.className = 'control-result muted';
+  try {
+    await api('/api/integrations/snowluma/password', {
+      method: 'POST',
+      body: JSON.stringify({ currentPassword, newPassword, confirmPassword })
+    });
+    form.reset();
+    result.textContent = 'SnowLuma 登录密钥已更新。';
+    result.className = 'control-result success';
+  } catch (error) {
+    result.textContent = `更新失败：${error.message}`;
+    result.className = 'control-result error';
+  } finally {
+    button.disabled = false;
+  }
 }
 
 // ── 状态栏 ──

@@ -312,6 +312,34 @@ try {
     fail++;
     console.log('  FAIL  AI 资产观测视图缺失或泄露了图片源 URL');
   }
+  ctx.renderControlHub({
+    services: [
+      { id: 'agent', online: true },
+      { id: 'dsh', online: true },
+      { id: 'bridge', online: true },
+      { id: 'snowluma', online: true },
+      { id: 'novnc', online: false }
+    ]
+  });
+  const controlHtml = String(document.getElementById('control-page').innerHTML || '');
+  const controlUiOk =
+    indexHtml.includes('data-tab="control"')
+    && indexHtml.includes('id="view-control"')
+    && controlHtml.includes('服务与访问控制')
+    && controlHtml.includes('SnowLuma 登录密钥')
+    && controlHtml.includes('QQ Agent 控制台 Token')
+    && controlHtml.includes(':3080')
+    && controlHtml.includes(':3100')
+    && controlHtml.includes(':5099')
+    && controlHtml.includes(':6081')
+    && !/id="snowluma-current-password"[^>]*\svalue=/.test(controlHtml);
+  if (controlUiOk) {
+    pass++;
+    console.log('  OK    服务入口与密钥控制视图完整且不包含明文密钥');
+  } else {
+    fail++;
+    console.log('  FAIL  服务入口或密钥控制视图缺失');
+  }
   const timeHtml = ctx.renderTimeControlSection({
     ...cfg, allow: { groups: ['123'], private: ['456'] }
   });

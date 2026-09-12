@@ -28,6 +28,7 @@ import { timeControlState, TIME_ZONE } from './time-control.js';
 import { IdentityPilotManager, inactiveIdentityPilotStatus } from './identity-pilot.js';
 import { AssetObserver } from './asset-observer.js';
 import { safeFetchBinary } from './safe-fetch.js';
+import { integrationStatus, updateSnowLumaPassword } from './integrations.js';
 
 // 全局 fetch（undici）默认连接建立超时只有 10 秒，openrouter.ai 这类海外端点
 // 握手慢时会直接报 "Connect Timeout Error ... timeout: 10000ms"（注意这不是
@@ -702,6 +703,21 @@ export function createApp({ log = console.log } = {}) {
         for (const client of sseClients) client.end();
         sseClients.clear();
         return json(res, 200, { ok: true, accessFileUpdated });
+      }
+
+      if (pathname === '/api/integrations/status' && method === 'GET') {
+        return json(res, 200, await integrationStatus());
+      }
+
+      if (pathname === '/api/integrations/snowluma/password' && method === 'POST') {
+        const body = await readBody(req);
+        try {
+          return json(res, 200, await updateSnowLumaPassword(body));
+        } catch (error) {
+          return json(res, error.httpStatus || 502, {
+            error: String(error?.message ?? error)
+          });
+        }
       }
 
       if (pathname === '/api/runtime' && method === 'POST') {

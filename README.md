@@ -111,6 +111,11 @@ bash manage.sh backup /path/to/new-backup-dir
 控制台默认端口为 `3210`。Token 可在
 `设置 -> 系统 -> 控制台安全` 中轮换。
 
+顶层“控制”页是统一运维入口，集中提供 QQ Agent、DSH、Bridge、SnowLuma 和
+QQ 远程桌面的入口与在线状态，并可跳转到模型、搜索、OneBot 和控制台 Token
+设置。SnowLuma 登录密钥可在该页直接修改，密钥仅随单次请求发送，不写入 QQ
+Agent 配置或前端存储。旧的 `3110` 门户不再映射。
+
 启用前必须确保旧机器人未处理相同会话，否则会产生双回复。
 
 ## 数据

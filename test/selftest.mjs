@@ -889,6 +889,20 @@ async function main() {
   assert.equal(missingStickerImage.status, 404);
   pass('AI 资产观测：表情包、黑话状态、人物和记忆接口');
 
+  const integrations = await (await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/integrations/status`
+  )).json();
+  assert.ok(Array.isArray(integrations.services));
+  assert.equal(
+    integrations.services.find((service) => service.id === 'agent')?.online,
+    true
+  );
+  assert.deepEqual(
+    integrations.services.map((service) => service.id),
+    ['agent', 'dsh', 'bridge', 'snowluma', 'novnc']
+  );
+  pass('控制中心：核心服务状态接口');
+
   const dailyMomentsStatus = await (await fetch(
     `http://127.0.0.1:${cfg.server.port}/api/daily-moments/status`
   )).json();

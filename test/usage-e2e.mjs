@@ -47,7 +47,7 @@ const byId = new Map();
 // 页签与视图桩：让 app.js 加载时能真实绑定点击事件。
 // 曾经点击处理器漏了 usage 分支，而旧桩 querySelectorAll 恒返 []，
 // 测试里根本没绑过点击事件 —— 于是"点页签空白"这个 bug 测试完全覆盖不到。
-const TAB_NAMES = ['sessions', 'chats', 'memory', 'assets', 'usage', 'settings'];
+const TAB_NAMES = ['control', 'sessions', 'chats', 'memory', 'assets', 'usage', 'settings'];
 const tabStubs = TAB_NAMES.map((n) => { const el = makeEl(); el.dataset.tab = n; return el; });
 const viewStubs = TAB_NAMES.map((n) => makeEl('view-' + n));
 const document = {
@@ -216,6 +216,27 @@ check('观测页展示表情包、黑话、人物和记忆',
     assetHtml.includes(text)),
   assetHtml.slice(0, 120));
 check('观测页不是错误提示', !assetHtml.includes('资产读取失败'), assetHtml.slice(0, 120));
+
+console.log('\n=== 回归：模拟真实点击「控制」页签 ===');
+const controlTab = tabStubs.find((t) => t.dataset.tab === 'control');
+const controlClickHandlers = (controlTab && controlTab._ev && controlTab._ev.click) || [];
+check('控制页签已绑定点击事件', controlClickHandlers.length > 0);
+vm.runInContext("state.tab = 'sessions';", ctx);
+const controlBox = document.getElementById('control-page');
+controlBox.innerHTML = '';
+for (const fn of controlClickHandlers) fn({ preventDefault() {} });
+let controlHtml = '';
+for (let i = 0; i < 40; i++) {
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  controlHtml = String(controlBox.innerHTML || '');
+  if (controlHtml.includes('服务与访问控制')) break;
+}
+check('点击后 state.tab = control', vm.runInContext('state.tab', ctx) === 'control');
+check('控制页展示服务入口与密钥控制',
+  ['服务与访问控制', 'DeepSeek Harness', 'Bridge Console', 'SnowLuma', 'QQ Agent 控制台 Token']
+    .every((text) => controlHtml.includes(text)),
+  controlHtml.slice(0, 120));
+check('控制页不是错误提示', !controlHtml.includes('服务状态读取失败'), controlHtml.slice(0, 120));
 
 await app.stop();
 console.log('\n' + (fail ? 'FAILED ' + fail : 'ALL PASSED ' + pass));

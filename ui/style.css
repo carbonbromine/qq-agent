@@ -1406,6 +1406,135 @@ body {
 /* ── 用量/成本看板 ── */
 .usage-pane { flex: 1; overflow-y: auto; padding: 22px 26px 40px; }
 
+/* ── 服务与访问控制 ── */
+.control-pane {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 22px 26px 40px;
+}
+.control-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.control-head h2 { margin: 0 0 3px; font-size: 18px; }
+.control-head span { font-size: 11px; }
+.control-service-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(205px, 1fr));
+  gap: 9px;
+}
+.control-service {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 66px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-2);
+  color: var(--text);
+  text-decoration: none;
+}
+.control-service:hover { border-color: var(--accent); background: var(--bg-3); }
+.control-service-mark {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-3);
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+}
+.control-service-copy { display: grid; min-width: 0; }
+.control-service-copy strong,
+.control-service-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.control-service-copy strong { font-size: 13px; }
+.control-service-copy small { margin-top: 3px; color: var(--muted); font-size: 10.5px; }
+.control-service-state { font-size: 10.5px; white-space: nowrap; }
+.control-service-state.online { color: var(--green); }
+.control-service-state.offline { color: var(--red); }
+.control-section {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+.control-section h3 { margin: 0 0 10px; font-size: 14px; }
+.control-section-title {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.control-section-title h3 { margin-bottom: 3px; }
+.control-section-title span { display: block; font-size: 11px; }
+.control-key-list {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--bg-2);
+}
+.control-key-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  width: 100%;
+  min-height: 54px;
+  padding: 9px 12px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  text-decoration: none;
+}
+.control-key-row:last-child { border-bottom: 0; }
+.control-key-row:hover { background: var(--bg-3); }
+.control-key-row > span { display: grid; min-width: 0; }
+.control-key-row strong { font-size: 12.5px; }
+.control-key-row small { margin-top: 2px; color: var(--muted); font-size: 10.5px; }
+.control-key-row b { color: var(--accent); font-size: 11px; font-weight: 500; }
+.control-password-form {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+  align-items: end;
+  gap: 9px;
+  margin-top: 12px;
+}
+.control-password-form label { display: grid; gap: 5px; min-width: 0; }
+.control-password-form label > span { color: var(--muted); font-size: 11px; }
+.control-password-form input { min-width: 0; }
+.control-password-form .btn { min-height: 34px; white-space: nowrap; }
+.control-result { min-height: 18px; margin-top: 8px; font-size: 11px; }
+.control-result.success { color: var(--green); }
+.control-result.error { color: var(--red); }
+
+@media (max-width: 600px) {
+  .control-pane { padding: 16px; }
+  .control-service-grid { grid-template-columns: 1fr; }
+  .control-password-form { grid-template-columns: 1fr; }
+  .control-section-title {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .control-section-title .btn { align-self: flex-start; }
+}
+
 /* ── AI 资产观测 ── */
 .asset-pane {
   flex: 1;

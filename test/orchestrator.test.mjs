@@ -544,13 +544,16 @@ describe('Orchestrator', () => {
     await runner.wake('group:1');
 
     assert.equal(requests.length, 2);
-    assert.deepEqual(proposals, [{
+    assert.equal(proposals.length, 1);
+    const [{ signal, ...proposal }] = proposals;
+    assert.ok(signal instanceof AbortSignal);
+    assert.deepEqual(proposal, {
       userId: '42',
       chatKey: 'group:1',
       reasonCode: 'interest',
       reason: '长期聊下来确实感兴趣',
       verificationMessage: '以后继续聊'
-    }]);
+    });
   });
 
   it('deterministically wakes the same participant inside the threaded continuation window', async (t) => {
