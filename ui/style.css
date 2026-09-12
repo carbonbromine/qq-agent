@@ -1424,7 +1424,7 @@ body {
 .control-head span { font-size: 11px; }
 .control-service-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(205px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
   gap: 9px;
 }
 .control-service {
@@ -1456,11 +1456,7 @@ body {
 }
 .control-service-copy { display: grid; min-width: 0; }
 .control-service-copy strong,
-.control-service-copy small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+.control-service-copy small { overflow-wrap: anywhere; }
 .control-service-copy strong { font-size: 13px; }
 .control-service-copy small { margin-top: 3px; color: var(--muted); font-size: 10.5px; }
 .control-service-state { font-size: 10.5px; white-space: nowrap; }
