@@ -3277,6 +3277,7 @@ function renderExperimentalSettingsSection(c) {
         <div class="field"><label>身份别名</label><div data-identity-stat="aliases">-</div></div>
         <div class="field"><label>旧印象引用</label><div data-identity-stat="memories">-</div></div>
       </div>
+      <div class="identity-pilot-people" id="identity-pilot-people" ${enabled ? '' : 'hidden'}></div>
     </section>`;
 }
 
@@ -3296,6 +3297,11 @@ async function loadIdentityPilotStatus() {
     if (!status.enabled) {
       statusNode.textContent = '已关闭 · 当前系统行为不变';
       if (stats) stats.hidden = true;
+      const people = $('#identity-pilot-people');
+      if (people) {
+        people.hidden = true;
+        people.innerHTML = '';
+      }
       return;
     }
     statusNode.textContent = status.active
@@ -3313,6 +3319,29 @@ async function loadIdentityPilotStatus() {
         const node = stats.querySelector(`[data-identity-stat="${key}"]`);
         if (node) node.textContent = fmtTok(value);
       }
+    }
+    const peopleBox = $('#identity-pilot-people');
+    if (peopleBox && status.active) {
+      const data = await api('/api/identity-pilot/people?limit=100');
+      const rows = (data.people || []).map((person) => {
+        const aliases = [...new Set((person.aliases || []).map((item) => item.alias).filter(Boolean))];
+        return `<tr>
+          <td><code>${esc(person.userId)}</code></td>
+          <td>${esc(person.primaryName || '-')}</td>
+          <td title="${esc(aliases.join(' / '))}">${esc(aliases.slice(0, 3).join(' / ') || '-')}</td>
+          <td>${fmtTok(person.chatCount)}</td>
+          <td>${fmtTok(person.messageCount)}</td>
+          <td>${person.isFriend ? '是' : '否'}</td>
+          <td>${fmtTok(person.legacyMemoryCount)}</td>
+        </tr>`;
+      }).join('');
+      peopleBox.hidden = false;
+      peopleBox.innerHTML = rows
+        ? `<table class="identity-pilot-table">
+            <thead><tr><th>QQ</th><th>首选名称</th><th>别名</th><th>会话</th><th>消息</th><th>好友</th><th>旧印象</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>`
+        : '<div class="empty-hint">当前没有可索引的身份</div>';
     }
   } catch (error) {
     statusNode.textContent = `状态读取失败：${error.message}`;

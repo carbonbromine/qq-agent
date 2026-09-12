@@ -557,6 +557,34 @@ body {
 }
 .context-tabs button:hover { color: var(--text); }
 .context-tabs button.active { border-bottom-color: var(--accent); color: var(--accent); }
+.identity-pilot-people {
+  margin-top: 12px;
+  max-height: 420px;
+  overflow: auto;
+  border: 1px solid var(--border);
+}
+.identity-pilot-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.identity-pilot-table th,
+.identity-pilot-table td {
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  white-space: nowrap;
+}
+.identity-pilot-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  color: var(--muted);
+  background: var(--bg-3);
+  font-weight: 500;
+}
+.identity-pilot-table td:nth-child(n+4) { text-align: right; }
+.identity-pilot-table tr:last-child td { border-bottom: none; }
 .context-tab-body {
   min-height: 140px;
   max-height: 520px;

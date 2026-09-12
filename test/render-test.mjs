@@ -224,6 +224,7 @@ try {
     experimentalHtml.includes('id="cfg-identity-pilot-enabled"')
     && experimentalHtml.includes('已关闭 · 当前系统行为不变')
     && experimentalHtml.includes('id="identity-pilot-stats" hidden')
+    && experimentalHtml.includes('id="identity-pilot-people" hidden')
     && !/id="cfg-identity-pilot-enabled" checked/.test(experimentalHtml)
     && /id="cfg-identity-pilot-enabled" checked/.test(experimentalOnHtml)
     && experimentalOnHtml.includes('正在读取统一身份库')
