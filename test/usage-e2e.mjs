@@ -47,7 +47,7 @@ const byId = new Map();
 // 页签与视图桩：让 app.js 加载时能真实绑定点击事件。
 // 曾经点击处理器漏了 usage 分支，而旧桩 querySelectorAll 恒返 []，
 // 测试里根本没绑过点击事件 —— 于是"点页签空白"这个 bug 测试完全覆盖不到。
-const TAB_NAMES = ['sessions', 'chats', 'memory', 'usage', 'settings'];
+const TAB_NAMES = ['sessions', 'chats', 'memory', 'assets', 'usage', 'settings'];
 const tabStubs = TAB_NAMES.map((n) => { const el = makeEl(); el.dataset.tab = n; return el; });
 const viewStubs = TAB_NAMES.map((n) => makeEl('view-' + n));
 const document = {
@@ -195,6 +195,27 @@ for (let i = 0; i < 40; i++) {
 check('点击后 state.tab = usage', vm.runInContext('state.tab', ctx) === 'usage');
 check('点击后页面有实质内容（含「用量与成本」）', clickedHtml.includes('用量与成本'), clickedHtml.slice(0, 80));
 check('点击后不是错误提示', !clickedHtml.includes('加载失败'), clickedHtml.slice(0, 80));
+
+console.log('\n=== 回归：模拟真实点击「观测」页签 ===');
+const assetTab = tabStubs.find((t) => t.dataset.tab === 'assets');
+const assetClickHandlers = (assetTab && assetTab._ev && assetTab._ev.click) || [];
+check('观测页签已绑定点击事件', assetClickHandlers.length > 0);
+vm.runInContext("state.tab = 'sessions';", ctx);
+const assetBox = document.getElementById('asset-page');
+assetBox.innerHTML = '';
+for (const fn of assetClickHandlers) fn({ preventDefault() {} });
+let assetHtml = '';
+for (let i = 0; i < 40; i++) {
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assetHtml = String(assetBox.innerHTML || '');
+  if (assetHtml.includes('AI 资产观测')) break;
+}
+check('点击后 state.tab = assets', vm.runInContext('state.tab', ctx) === 'assets');
+check('观测页展示表情包、黑话、人物和记忆',
+  ['AI 资产观测', '表情包', '黑话', '统一人物', '会话印象'].every((text) =>
+    assetHtml.includes(text)),
+  assetHtml.slice(0, 120));
+check('观测页不是错误提示', !assetHtml.includes('资产读取失败'), assetHtml.slice(0, 120));
 
 await app.stop();
 console.log('\n' + (fail ? 'FAILED ' + fail : 'ALL PASSED ' + pass));

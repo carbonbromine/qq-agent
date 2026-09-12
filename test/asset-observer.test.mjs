@@ -14,6 +14,7 @@ const {
   readMemoryAssetSummary,
   readSlangAssets
 } = await import('../src/asset-observer.js');
+const { IdentityStore } = await import('../src/identity-store.js');
 
 function digest(file) {
   return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
@@ -45,6 +46,18 @@ test('builds a read-only inventory for stickers, slang, memory, and identities',
   fs.writeFileSync(path.join(memberDir, '_handoff.json'), JSON.stringify({ topic: '测试' }));
   const beforeSlang = digest(slangFile);
   const beforeMember = digest(memberFile);
+  const identityStore = new IdentityStore({ dataDir: dir });
+  identityStore.rebuild({
+    activityRows: [{
+      userId: '123456',
+      chatKey: 'group:100',
+      name: '测试成员',
+      messageCount: 9,
+      firstSeenAt: 1,
+      lastSeenAt: 2
+    }]
+  });
+  identityStore.close();
 
   let refreshes = 0;
   const observer = new AssetObserver({
@@ -75,12 +88,7 @@ test('builds a read-only inventory for stickers, slang, memory, and identities',
         return { entries: [], fromCache: false };
       }
     },
-    getIdentityStatus: () => ({
-      enabled: true,
-      active: true,
-      people: 4,
-      sources: 6
-    })
+    getIdentityStatus: () => ({ enabled: false, active: false })
   });
 
   const overview = observer.overview();
@@ -94,7 +102,11 @@ test('builds a read-only inventory for stickers, slang, memory, and identities',
   assert.equal(overview.memory.people, 1);
   assert.equal(overview.memory.impressions, 1);
   assert.equal(overview.memory.handoffs, 1);
-  assert.equal(overview.identity.people, 4);
+  assert.equal(overview.identity.people, 1);
+  assert.equal(overview.identity.databaseExists, true);
+  const identities = observer.identitySnapshot();
+  assert.equal(identities.entries[0].userId, '123456');
+  assert.equal(identities.entries[0].messageCount, 9);
 
   const stickers = await observer.listStickers({ query: '庆祝' });
   assert.equal(stickers.matched, 1);

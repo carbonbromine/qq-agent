@@ -1212,7 +1212,10 @@ export function createApp({ log = console.log } = {}) {
       if (pathname === '/api/assets/stickers/image' && method === 'GET') {
         const id = String(url.searchParams.get('id') || '').trim();
         if (!id) return json(res, 400, { error: '缺少表情 ID' });
-        const sticker = stickers.peek(id);
+        let sticker = stickers.peek(id);
+        if (sticker?.source === 'ai') {
+          sticker = await stickers.findForSend(id);
+        }
         if (!sticker?.url) return json(res, 404, { error: '表情图片不存在' });
         try {
           const image = await safeFetchBinary(sticker.url, 8 * 1024 * 1024);
@@ -1240,6 +1243,11 @@ export function createApp({ log = console.log } = {}) {
           offset: url.searchParams.get('offset') || 0,
           limit: url.searchParams.get('limit') || 200
         }));
+      }
+
+      if (pathname === '/api/assets/identities' && method === 'GET') {
+        const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 500));
+        return json(res, 200, assetObserver.identitySnapshot(limit));
       }
 
       if (pathname === '/api/assets/memory' && method === 'GET') {

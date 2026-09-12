@@ -791,10 +791,19 @@ async function main() {
   )).json();
   assert.equal(slangAssets.total, 0);
   assert.equal(slangAssets.exists, false);
+  const identityAssets = await (await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/assets/identities?limit=10`
+  )).json();
+  assert.equal(identityAssets.exists, true);
+  assert.ok(identityAssets.entries.some((person) => person.userId === '111'));
   const memoryAssets = await (await fetch(
     `http://127.0.0.1:${cfg.server.port}/api/assets/memory`
   )).json();
   assert.ok(Array.isArray(memoryAssets.items));
+  const missingStickerImage = await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/assets/stickers/image?id=missing`
+  );
+  assert.equal(missingStickerImage.status, 404);
   pass('AI 资产观测：表情包、黑话状态、人物和记忆接口');
 
   const dailyMomentsStatus = await (await fetch(

@@ -2060,7 +2060,7 @@ function renderAssetSummary(overview) {
       </button>
       <button type="button" class="asset-summary-item" data-asset-kind="identities">
         <span>统一人物</span><strong>${fmtTok(identity.people)}</strong>
-        <small>${identity.active ? '身份库运行中' : '实验开关关闭'}</small>
+        <small>${identity.active ? '身份库运行中' : identity.databaseExists ? '索引休眠' : '实验开关关闭'}</small>
       </button>
       <button type="button" class="asset-summary-item" data-asset-kind="memory">
         <span>会话印象</span><strong>${fmtTok(memory.impressions)}</strong>
@@ -2112,16 +2112,17 @@ function renderSlangAssets(data) {
   </table></div>`;
 }
 
-function renderIdentityAssets(data, overview) {
-  if (!overview?.identity?.active) {
-    return '<div class="empty-hint">统一身份库当前关闭</div>';
+function renderIdentityAssets(data) {
+  if (!data?.exists) {
+    return '<div class="empty-hint">尚未建立统一身份索引</div>';
   }
-  const people = data?.people || [];
+  const people = data?.entries || [];
   if (!people.length) return '<div class="empty-hint">统一身份库为空</div>';
   return `<div class="asset-table-wrap"><table class="asset-table">
     <thead><tr><th>QQ</th><th>首选名称</th><th>别名</th><th>会话</th><th>消息</th><th>好友</th><th>旧印象</th></tr></thead>
     <tbody>${people.map((person) => {
-      const aliases = [...new Set((person.aliases || []).map((item) => item.alias).filter(Boolean))];
+      const aliases = [...new Set((person.aliases || []).map((item) =>
+        typeof item === 'string' ? item : item?.alias).filter(Boolean))];
       return `<tr>
         <td><code>${esc(person.userId)}</code></td>
         <td>${esc(person.primaryName || '-')}</td>
@@ -2161,7 +2162,7 @@ function renderAssetObservatory() {
   if (state.assetDetail) {
     if (kind === 'stickers') content = renderStickerAssets(state.assetDetail);
     if (kind === 'slang') content = renderSlangAssets(state.assetDetail);
-    if (kind === 'identities') content = renderIdentityAssets(state.assetDetail, overview);
+    if (kind === 'identities') content = renderIdentityAssets(state.assetDetail);
     if (kind === 'memory') content = renderMemoryAssets(state.assetDetail);
   }
   box.innerHTML = `
@@ -2217,9 +2218,13 @@ async function loadAssetObservatory({ refreshStickers = false } = {}) {
   if (!box) return;
   if (!state.assetOverview) box.innerHTML = '<div class="empty-hint">加载中…</div>';
   try {
-    const overview = await api('/api/assets/overview');
+    const [overview, chats] = await Promise.all([
+      api('/api/assets/overview'),
+      api('/api/chats').catch(() => ({ chats: [] }))
+    ]);
     if (state.tab !== 'assets') return;
     state.assetOverview = overview;
+    if (chats.chats?.length) state.chats = chats.chats;
     const query = encodeURIComponent(state.assetQuery || '');
     if (state.assetKind === 'stickers') {
       state.assetDetail = await api(
@@ -2230,9 +2235,7 @@ async function loadAssetObservatory({ refreshStickers = false } = {}) {
         `/api/assets/slang?limit=500&query=${query}&status=${encodeURIComponent(state.assetSlangStatus || '')}`
       );
     } else if (state.assetKind === 'identities') {
-      state.assetDetail = overview.identity?.active
-        ? await api('/api/identity-pilot/people?limit=500')
-        : { people: [] };
+      state.assetDetail = await api('/api/assets/identities?limit=500');
     } else {
       state.assetDetail = await api('/api/assets/memory');
     }

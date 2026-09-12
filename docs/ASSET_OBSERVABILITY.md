@@ -14,8 +14,9 @@ the Agent runtime.
 
 Sticker metadata never exposes temporary QQ image URLs. Thumbnails are fetched
 through an authenticated same-origin endpoint with SSRF validation and an 8 MiB
-response limit. Opening the page reads the local sticker cache. Only the manual
-refresh button asks SnowLuma to refresh QQ favorites.
+response limit. Opening the page reads the local sticker cache. Expired
+AI-collected images refresh their temporary URL from the original message on
+demand; only the manual refresh button reloads the complete QQ favorites list.
 
 ## Slang status
 
@@ -36,6 +37,7 @@ GET /api/assets/overview
 GET /api/assets/stickers?query=&offset=0&limit=100&refresh=0
 GET /api/assets/stickers/image?id=<sticker-id>
 GET /api/assets/slang?query=&status=&offset=0&limit=200
+GET /api/assets/identities?limit=500
 GET /api/assets/memory
 ```
 
