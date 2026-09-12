@@ -209,7 +209,14 @@ export const DEFAULT_CONFIG = {
   // 跨会话人物画像与好友关系试点。第一阶段只提供总开关；
   // 关闭时不得注册工具、注入提示词、启动任务或创建实验数据文件。
   identityPilot: {
-    enabled: false
+    enabled: false,
+    friendProposal: {
+      enabled: false,
+      ownerUin: '',
+      minMessageCount: 50,
+      cooldownDays: 30,
+      maxPending: 10
+    }
   },
   // 表情包
   sticker: {
@@ -369,6 +376,10 @@ export function identityPilotEnabled(cfg = getConfig()) {
   return cfg?.identityPilot?.enabled === true;
 }
 
+export function friendProposalEnabled(cfg = getConfig()) {
+  return identityPilotEnabled(cfg) && cfg?.identityPilot?.friendProposal?.enabled === true;
+}
+
 /** 更新并持久化配置（浅合并到当前值；patch 里传对象字段则整体替换该字段）。 */
 export function updateConfig(patch) {
   const next = migrateConfig(deepMerge(getConfig(), patch));
@@ -439,10 +450,41 @@ export function updateConfig(patch) {
     actionDelayMaxMs: Math.min(15000, Math.max(0, Number(interactions.actionDelayMaxMs) || 0)),
     maxDecisionRounds: Math.min(5, Math.max(1, Number(interactions.maxDecisionRounds) || 3))
   };
+  const identity = next.identityPilot || {};
+  const friendProposal = identity.friendProposal || {};
   next.identityPilot = {
-    ...(next.identityPilot || {}),
-    enabled: next.identityPilot?.enabled === true
+    ...identity,
+    enabled: identity.enabled === true,
+    friendProposal: {
+      ...friendProposal,
+      enabled: friendProposal.enabled === true,
+      ownerUin: /^\d{5,15}$/.test(String(friendProposal.ownerUin || '').trim())
+        ? String(friendProposal.ownerUin).trim()
+        : '',
+      minMessageCount: Math.min(
+        10000,
+        Math.max(1, Math.round(Number(friendProposal.minMessageCount) || 50))
+      ),
+      cooldownDays: Math.min(
+        365,
+        Math.max(1, Math.round(Number(friendProposal.cooldownDays) || 30))
+      ),
+      maxPending: Math.min(
+        100,
+        Math.max(1, Math.round(Number(friendProposal.maxPending) || 10))
+      )
+    }
   };
+  if (next.identityPilot.enabled && next.identityPilot.friendProposal.enabled) {
+    const ownerUin = next.identityPilot.friendProposal.ownerUin;
+    if (!ownerUin) throw new Error('主动好友候选需要配置审批管理员 QQ');
+    if (
+      next.allowAllWhenEmpty !== true
+      && !(next.allow?.private || []).map(String).includes(ownerUin)
+    ) {
+      throw new Error('审批管理员 QQ 必须同时加入私聊白名单');
+    }
+  }
   if (!Number.isInteger(Number(next.server?.port)) || next.server.port < 1 || next.server.port > 65535) {
     throw new Error('Invalid server port');
   }

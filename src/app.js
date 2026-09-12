@@ -166,6 +166,18 @@ export function createApp({ log = console.log } = {}) {
       error: identityPilotError
     });
   }
+  async function sendIdentityAdminText(ownerUin, text, signal) {
+    const userId = String(ownerUin || '').trim();
+    if (!/^\d{5,15}$/.test(userId)) throw new Error('管理员 QQ 配置无效');
+    const data = await onebot.sendText('private', userId, text, { signal });
+    store.appendSelf(`private:${userId}`, {
+      mid: data?.message_id ?? null,
+      ts: Date.now(),
+      text
+    });
+    emit('chat-update', `private:${userId}`);
+    return data;
+  }
   async function syncIdentityPilot({ reindex = false } = {}) {
     if (!identityPilotEnabled()) {
       identityPilot?.stop();
@@ -173,7 +185,36 @@ export function createApp({ log = console.log } = {}) {
       identityPilotError = '';
       return identityPilotStatus();
     }
-    identityPilot ||= new IdentityPilotManager({ store, onebot, log });
+    identityPilot ||= new IdentityPilotManager({
+      store,
+      onebot,
+      log,
+      notifyFriendProposal: async (proposal, ownerUin, signal) => {
+        const reasonLabels = {
+          interest: '对这个人感兴趣',
+          frequent: '聊得比较频繁',
+          banter: '想继续互怼'
+        };
+        const verification = proposal.verificationMessage
+          ? `\n验证消息：${proposal.verificationMessage}`
+          : '';
+        signal?.throwIfAborted();
+        await sendIdentityAdminText(
+          ownerUin,
+          [
+            '【实验功能 · 主动好友候选】',
+            `对象：${proposal.primaryName || '未命名'}（${proposal.userId}）`,
+            `来源：${proposal.sourceChatKey}`,
+            `原因：${reasonLabels[proposal.reasonCode] || proposal.reasonCode}；${proposal.reason}`,
+            `编号：${proposal.id}${verification}`,
+            '',
+            `回复“同意好友 ${proposal.id}”或“拒绝好友 ${proposal.id}”，也可以在控制台“设置 → 实验功能”审批。`,
+            '说明：当前 OneBot 适配器不支持主动发起好友申请；批准后会进入待手动执行状态，不会伪报已发送。'
+          ].join('\n'),
+          signal
+        );
+      }
+    });
     try {
       const status = reindex && identityPilot.active
         ? await identityPilot.reindex()
@@ -333,7 +374,45 @@ export function createApp({ log = console.log } = {}) {
     if (stored.duplicate) return;
     if (!isSelf) identityPilot?.observeMessage(chatKey, stored);
     emit('chat-update', chatKey);
+    if (
+      !isSelf
+      && cfgNow.runtime?.mode === 'active'
+      && cfgNow.runtime?.paused !== true
+      && !arrivedInactive
+      && isTimeActive(chatKey)
+      && await handleFriendProposalAdminCommand(kind, id, text)
+    ) return;
     if (!isSelf) orchestrator.onIncoming(chatKey);
+  }
+
+  async function handleFriendProposalAdminCommand(kind, id, text) {
+    const settings = getConfig().identityPilot?.friendProposal || {};
+    if (kind !== 'private' || settings.enabled !== true || String(settings.ownerUin) !== String(id)) {
+      return false;
+    }
+    const match = /^\s*\/?(同意|拒绝)好友(?:申请)?\s+(fp_[a-f0-9]{12})\s*$/i.exec(String(text || ''));
+    if (!match) return false;
+    const decision = match[1] === '同意' ? 'approve' : 'reject';
+    let reply;
+    try {
+      const result = identityPilot?.decideFriendProposal(match[2], decision, {
+        decidedBy: String(id)
+      });
+      if (!result) throw new Error('统一身份库当前不可用');
+      const proposal = result.proposal;
+      reply = decision === 'approve'
+        ? `已批准 ${proposal.primaryName || proposal.userId}（${proposal.userId}）的好友候选。当前 OneBot 适配器不能主动发送申请，请在 QQ 客户端手动添加；收到好友成功事件后系统会自动闭环。`
+        : `已拒绝 ${proposal.primaryName || proposal.userId}（${proposal.userId}）的好友候选。`;
+      emit('identity-pilot-update', identityPilot.status());
+    } catch (error) {
+      reply = `好友候选审批失败：${String(error?.message ?? error)}`;
+    }
+    try {
+      await sendIdentityAdminText(id, reply);
+    } catch (error) {
+      log(`[identity-pilot] 审批结果通知失败：${error?.message ?? error}`);
+    }
+    return true;
   }
 
   async function ingestPoke(event, arrivedInactive = false) {
@@ -402,6 +481,11 @@ export function createApp({ log = console.log } = {}) {
     }
     if (event.post_type === 'notice' && event.notice_type === 'notify' && event.sub_type === 'poke') {
       return ingestPoke(event, arrivedInactive);
+    }
+    if (event.post_type === 'notice' && event.notice_type === 'friend_add' && event.user_id != null) {
+      const changed = identityPilot?.markFriendAdded(String(event.user_id)) || 0;
+      if (changed) emit('identity-pilot-update', identityPilot.status());
+      return;
     }
     // meta/心跳等事件忽略
   }
@@ -1193,6 +1277,41 @@ export function createApp({ log = console.log } = {}) {
           status: identityPilot.status(),
           people: identityPilot.listPeople(limit)
         });
+      }
+
+      if (pathname === '/api/identity-pilot/friend-proposals' && method === 'GET') {
+        if (!identityPilot?.active || getConfig().identityPilot?.friendProposal?.enabled !== true) {
+          return json(res, 409, { error: '主动好友候选功能未启用' });
+        }
+        return json(res, 200, {
+          status: identityPilot.status(),
+          proposals: identityPilot.listFriendProposals({
+            status: url.searchParams.get('status') || '',
+            limit: Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 100))
+          })
+        });
+      }
+
+      const friendProposalDecision = /^\/api\/identity-pilot\/friend-proposals\/(fp_[a-f0-9]{12})\/decision$/i.exec(pathname);
+      if (friendProposalDecision && method === 'POST') {
+        if (!identityPilot?.active || getConfig().identityPilot?.friendProposal?.enabled !== true) {
+          return json(res, 409, { error: '主动好友候选功能未启用' });
+        }
+        const body = await readBody(req);
+        if (!['approve', 'reject'].includes(body.decision)) {
+          return json(res, 400, { error: 'decision 必须是 approve 或 reject' });
+        }
+        try {
+          const result = identityPilot.decideFriendProposal(
+            friendProposalDecision[1],
+            body.decision,
+            { decidedBy: 'console' }
+          );
+          emit('identity-pilot-update', identityPilot.status());
+          return json(res, 200, result);
+        } catch (error) {
+          return json(res, 409, { error: String(error?.message ?? error) });
+        }
       }
 
       if (pathname === '/api/assets/overview' && method === 'GET') {

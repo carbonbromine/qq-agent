@@ -585,6 +585,24 @@ body {
 }
 .identity-pilot-table td:nth-child(n+4) { text-align: right; }
 .identity-pilot-table tr:last-child td { border-bottom: none; }
+.identity-pilot-table td small {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  white-space: normal;
+}
+#identity-friend-proposal-box {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+#identity-friend-proposal-box h4 {
+  margin: 0 0 12px;
+  font-size: 13px;
+}
+#identity-friend-proposals .proposal-decision + .proposal-decision {
+  margin-left: 6px;
+}
 .context-tab-body {
   min-height: 140px;
   max-height: 520px;

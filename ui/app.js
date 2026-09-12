@@ -91,6 +91,7 @@ const TOOL_META = {
   memory_append:     { name: '记一条',     cat: '记忆',   icon: '🧠' },
   memory_query:      { name: '查记忆',     cat: '记忆',   icon: '🧠' },
   person_memory_lookup: { name: '查人物记忆', cat: '记忆', icon: '🧠' },
+  friend_request_propose: { name: '提议加好友', cat: '记忆', icon: '＋' },
   memory_remove:     { name: '删记忆',     cat: '记忆',   icon: '🧹' },
   // 联网
   web_search:        { name: '联网搜索',   cat: '联网',   icon: '🌐' },
@@ -3486,6 +3487,8 @@ function renderMemorySettingsSection(c) {
 
 function renderExperimentalSettingsSection(c) {
   const enabled = c.identityPilot?.enabled === true;
+  const friend = c.identityPilot?.friendProposal || {};
+  const ownerUin = friend.ownerUin || c.allow?.private?.[0] || '';
   return `
     <section class="experimental-settings">
       <h3 id="settings-experiments">实验功能</h3>
@@ -3501,14 +3504,107 @@ function renderExperimentalSettingsSection(c) {
         <div class="field"><label>旧印象引用</label><div data-identity-stat="memories">-</div></div>
       </div>
       <div class="identity-pilot-people" id="identity-pilot-people" ${enabled ? '' : 'hidden'}></div>
+      <div id="identity-friend-proposal-box" ${enabled ? '' : 'hidden'}>
+        <h4>主动好友候选</h4>
+        <div class="checkbox-row">
+          <input type="checkbox" id="cfg-identity-friend-enabled" ${friend.enabled === true ? 'checked' : ''} />
+          <label for="cfg-identity-friend-enabled">允许 Agent 向管理员提交好友候选</label>
+        </div>
+        <div class="field-row">
+          <div class="field"><label>审批管理员 QQ</label><input type="text" id="cfg-identity-friend-owner" inputmode="numeric" value="${esc(ownerUin)}" /></div>
+          <div class="field"><label>最低互动消息数</label><input type="number" id="cfg-identity-friend-min-messages" min="1" max="10000" value="${esc(friend.minMessageCount ?? 50)}" /></div>
+          <div class="field"><label>同一用户冷却天数</label><input type="number" id="cfg-identity-friend-cooldown" min="1" max="365" value="${esc(friend.cooldownDays ?? 30)}" /></div>
+          <div class="field"><label>待审批上限</label><input type="number" id="cfg-identity-friend-max-pending" min="1" max="100" value="${esc(friend.maxPending ?? 10)}" /></div>
+        </div>
+        <div class="hint" id="identity-friend-protocol">读取协议能力中…</div>
+        <div class="identity-pilot-people" id="identity-friend-proposals"></div>
+      </div>
     </section>`;
 }
 
-function identityPilotSettingsPatch(c, enabled) {
+function identityPilotSettingsPatch(c, enabled, friendProposal = null) {
   return {
     ...(c.identityPilot || {}),
-    enabled: enabled === true
+    enabled: enabled === true,
+    friendProposal: {
+      ...(c.identityPilot?.friendProposal || {}),
+      ...(friendProposal || {})
+    }
   };
+}
+
+const FRIEND_PROPOSAL_STATUS = {
+  pending: '待审批',
+  approved_manual: '已批准 · 待手动执行',
+  accepted: '已成为好友',
+  rejected: '已拒绝'
+};
+
+const FRIEND_PROPOSAL_REASON = {
+  interest: '感兴趣',
+  frequent: '互动频繁',
+  banter: '想继续互怼'
+};
+
+async function decideFriendProposal(id, decision) {
+  if (decision === 'approve' && !confirm('批准这个好友候选？当前 OneBot 适配器不支持主动发送，批准后仍需在 QQ 客户端手动添加。')) {
+    return;
+  }
+  const result = await api(`/api/identity-pilot/friend-proposals/${encodeURIComponent(id)}/decision`, {
+    method: 'POST',
+    body: JSON.stringify({ decision })
+  });
+  await loadIdentityPilotStatus();
+  const status = $('#identity-pilot-state');
+  if (status) status.textContent = result.note;
+}
+
+async function loadFriendProposals(status) {
+  const box = $('#identity-friend-proposals');
+  const protocol = $('#identity-friend-protocol');
+  if (!box) return;
+  const feature = status?.friendProposal || {};
+  if (protocol) {
+    protocol.textContent = feature.protocolDispatchSupported
+      ? '当前 OneBot 支持主动发送好友申请。'
+      : `${feature.protocolNote || '当前 OneBot 不支持主动发送好友申请。'} 管理员批准后会保留为待手动执行，绝不伪报发送成功。`;
+  }
+  if (!feature.enabled) {
+    box.innerHTML = '<div class="empty-hint">主动好友候选当前关闭</div>';
+    return;
+  }
+  const data = await api('/api/identity-pilot/friend-proposals?limit=100');
+  const proposals = data.proposals || [];
+  if (!proposals.length) {
+    box.innerHTML = '<div class="empty-hint">当前没有好友候选</div>';
+    return;
+  }
+  box.innerHTML = `<table class="identity-pilot-table">
+    <thead><tr><th>对象</th><th>理由</th><th>来源</th><th>状态</th><th>时间</th><th>操作</th></tr></thead>
+    <tbody>${proposals.map((proposal) => `<tr>
+      <td><strong>${esc(proposal.primaryName || proposal.userId)}</strong><small><code>${esc(proposal.userId)}</code></small></td>
+      <td><strong>${esc(FRIEND_PROPOSAL_REASON[proposal.reasonCode] || proposal.reasonCode)}</strong><small>${esc(proposal.reason)}</small>${proposal.verificationMessage ? `<small>验证：${esc(proposal.verificationMessage)}</small>` : ''}</td>
+      <td><code>${esc(proposal.sourceChatKey)}</code></td>
+      <td>${esc(FRIEND_PROPOSAL_STATUS[proposal.status] || proposal.status)}</td>
+      <td>${esc(fmtTime(proposal.createdAt))}</td>
+      <td>${proposal.status === 'pending'
+        ? `<button type="button" class="btn btn-small proposal-decision" data-id="${esc(proposal.id)}" data-decision="approve">批准</button>
+           <button type="button" class="btn btn-small proposal-decision" data-id="${esc(proposal.id)}" data-decision="reject">拒绝</button>`
+        : '-'}</td>
+    </tr>`).join('')}</tbody>
+  </table>`;
+  box.querySelectorAll('.proposal-decision').forEach((button) => {
+    button.addEventListener('click', async () => {
+      button.disabled = true;
+      try {
+        await decideFriendProposal(button.dataset.id, button.dataset.decision);
+      } catch (error) {
+        const node = $('#identity-pilot-state');
+        if (node) node.textContent = `审批失败：${error.message}`;
+        button.disabled = false;
+      }
+    });
+  });
 }
 
 async function loadIdentityPilotStatus() {
@@ -3525,6 +3621,8 @@ async function loadIdentityPilotStatus() {
         people.hidden = true;
         people.innerHTML = '';
       }
+      const friendBox = $('#identity-friend-proposal-box');
+      if (friendBox) friendBox.hidden = true;
       return;
     }
     statusNode.textContent = status.active
@@ -3566,6 +3664,9 @@ async function loadIdentityPilotStatus() {
           </table>`
         : '<div class="empty-hint">当前没有可索引的身份</div>';
     }
+    const friendBox = $('#identity-friend-proposal-box');
+    if (friendBox) friendBox.hidden = !status.active;
+    if (status.active) await loadFriendProposals(status);
   } catch (error) {
     statusNode.textContent = `状态读取失败：${error.message}`;
   }
@@ -4400,6 +4501,15 @@ function bindSettingsEvents(c) {
     const toggle = $('#cfg-identity-pilot-enabled');
     const status = $('#identity-pilot-state');
     loadIdentityPilotStatus();
+    const friendToggle = $('#cfg-identity-friend-enabled');
+    friendToggle?.addEventListener('change', () => {
+      const protocol = $('#identity-friend-protocol');
+      if (protocol) {
+        protocol.textContent = friendToggle.checked
+          ? '保存后 Agent 才能提交候选；管理员仍拥有最终决定权。'
+          : '主动好友候选当前关闭。';
+      }
+    });
     toggle?.addEventListener('change', async () => {
       const requested = toggle.checked;
       toggle.disabled = true;
@@ -5771,7 +5881,44 @@ async function saveConfig({ quiet = false } = {}) {
   if (sec === 'experiments') {
     patch.identityPilot = identityPilotSettingsPatch(
       c,
-      chk('#cfg-identity-pilot-enabled', c.identityPilot?.enabled === true)
+      chk('#cfg-identity-pilot-enabled', c.identityPilot?.enabled === true),
+      {
+        enabled: chk(
+          '#cfg-identity-friend-enabled',
+          c.identityPilot?.friendProposal?.enabled === true
+        ),
+        ownerUin: val(
+          '#cfg-identity-friend-owner',
+          c.identityPilot?.friendProposal?.ownerUin || ''
+        ).trim(),
+        minMessageCount: clampInt(
+          val(
+            '#cfg-identity-friend-min-messages',
+            c.identityPilot?.friendProposal?.minMessageCount
+          ),
+          1,
+          10000,
+          50
+        ),
+        cooldownDays: clampInt(
+          val(
+            '#cfg-identity-friend-cooldown',
+            c.identityPilot?.friendProposal?.cooldownDays
+          ),
+          1,
+          365,
+          30
+        ),
+        maxPending: clampInt(
+          val(
+            '#cfg-identity-friend-max-pending',
+            c.identityPilot?.friendProposal?.maxPending
+          ),
+          1,
+          100,
+          10
+        )
+      }
     );
   }
 

@@ -44,5 +44,47 @@ While the pilot is enabled and its database is active, Agent sessions receive
   chat, raw text or message IDs.
 
 Disabling the pilot removes both the tool schema and its system-prompt guidance.
-This phase does not automatically inject unified identity data, generate new
-profiles, or create friend proposals.
+This phase does not automatically inject unified identity data or generate new
+profiles.
+
+## Proactive friend proposals
+
+`identityPilot.friendProposal.enabled` is a second, nested switch. It has no
+effect unless the identity pilot master switch is also enabled. When enabled:
+
+- Agent sessions receive `friend_request_propose`;
+- the target must be a numeric QQ ID already seen in the current chat;
+- existing friends, the approval administrator, low-activity identities,
+  duplicate open proposals and identities still in cooldown are rejected;
+- the Agent must choose `interest`, `frequent` or `banter` and provide a concrete
+  reason based on actual interaction;
+- proposals are stored in `friend_proposals` inside `identity-pilot.sqlite`;
+- the configured administrator receives a private approval message;
+- approval is accepted only through the authenticated console or an exact
+  administrator private command:
+  `同意好友 <proposal-id>` / `拒绝好友 <proposal-id>`.
+
+The Agent can only propose. It cannot approve its own proposal or tell the
+candidate that a friend request was sent. No background model scheduler is
+created: the tool is only available inside an already-running conversation, so
+idle checks consume no additional model tokens.
+
+### Protocol boundary
+
+OneBot v11 standardizes accepting or rejecting an inbound request through
+`set_friend_add_request`; it does not standardize initiating an outbound friend
+request. The deployed SnowLuma 1.14.15 runtime likewise has no outbound action.
+
+For that reason, an approved proposal enters `approved_manual` instead of being
+reported as sent. The console shows that manual QQ action is required. A later
+OneBot `friend_add` notice, or a friend-list reindex, changes the proposal to
+`accepted`. The application never calls `set_friend_add_request` with a made-up
+flag and never retries an unknown external write.
+
+Authenticated console endpoints:
+
+```text
+GET  /api/identity-pilot/friend-proposals?status=&limit=100
+POST /api/identity-pilot/friend-proposals/<proposal-id>/decision
+     {"decision":"approve"|"reject"}
+```

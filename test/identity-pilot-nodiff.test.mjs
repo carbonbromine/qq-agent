@@ -28,7 +28,16 @@ function configWithPilot(value) {
   config.wakeDelayMinMs = 0;
   config.wakeDelayMaxMs = 0;
   if (value === undefined) delete config.identityPilot;
-  else config.identityPilot = { enabled: value };
+  else config.identityPilot = {
+    enabled: value,
+    friendProposal: {
+      enabled: true,
+      ownerUin: '123456',
+      minMessageCount: 1,
+      cooldownDays: 30,
+      maxPending: 10
+    }
+  };
   return config;
 }
 
@@ -181,6 +190,9 @@ test('identity pilot defaults off and explicit off is strict runtime nodiff', as
   assert.equal(disabledRun.runningTasks, 0);
   assert.ok(!disabledRun.request.tools.some((tool) =>
     String(tool?.function?.name || '').startsWith('person_')));
+  assert.ok(!disabledRun.request.tools.some((tool) =>
+    tool?.function?.name === 'friend_request_propose'));
+  assert.doesNotMatch(disabledRun.request.messages[0].content, /好友候选/);
 
   const experimentalArtifacts = fs.readdirSync(root, { recursive: true })
     .map(String)

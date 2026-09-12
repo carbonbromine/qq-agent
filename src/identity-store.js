@@ -1,9 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { DATA_DIR } from './config.js';
 
 const DB_NAME = 'identity-pilot.sqlite';
+const FRIEND_PROPOSAL_REASONS = new Set(['interest', 'frequent', 'banter']);
+const OPEN_FRIEND_PROPOSAL_STATES = new Set(['pending', 'approved_manual']);
 
 function normalizeUin(value) {
   const uin = String(value ?? '').trim();
@@ -16,6 +19,27 @@ function cleanName(value) {
 
 function cleanMemory(value) {
   return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, 300);
+}
+
+function proposalView(row) {
+  if (!row) return null;
+  return {
+    id: String(row.id),
+    userId: String(row.uin),
+    primaryName: String(row.primary_name || ''),
+    sourceChatKey: String(row.source_chat_key || ''),
+    reasonCode: String(row.reason_code || ''),
+    reason: String(row.reason || ''),
+    verificationMessage: String(row.verification_message || ''),
+    status: String(row.status || ''),
+    createdAt: Number(row.created_at) || 0,
+    decidedAt: Number(row.decided_at) || 0,
+    decidedBy: String(row.decided_by || ''),
+    notifiedAt: Number(row.notified_at) || 0,
+    notifyError: String(row.notify_error || ''),
+    cooldownUntil: Number(row.cooldown_until) || 0,
+    updatedAt: Number(row.updated_at) || 0
+  };
 }
 
 function readJson(file) {
@@ -163,9 +187,29 @@ export class IdentityStore {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS friend_proposals (
+        id TEXT PRIMARY KEY,
+        uin TEXT NOT NULL,
+        source_chat_key TEXT NOT NULL,
+        reason_code TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        verification_message TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at INTEGER NOT NULL,
+        decided_at INTEGER NOT NULL DEFAULT 0,
+        decided_by TEXT NOT NULL DEFAULT '',
+        notified_at INTEGER NOT NULL DEFAULT 0,
+        notify_error TEXT NOT NULL DEFAULT '',
+        cooldown_until INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL
+      );
       CREATE INDEX IF NOT EXISTS identity_people_recent ON people(last_seen_at DESC);
       CREATE INDEX IF NOT EXISTS identity_sources_chat ON identity_sources(chat_key, last_seen_at DESC);
       CREATE INDEX IF NOT EXISTS identity_memories_person ON legacy_memory_refs(uin, observed_at DESC);
+      CREATE INDEX IF NOT EXISTS friend_proposals_recent
+        ON friend_proposals(status, created_at DESC);
+      CREATE INDEX IF NOT EXISTS friend_proposals_person
+        ON friend_proposals(uin, created_at DESC);
     `);
   }
 
@@ -301,6 +345,14 @@ export class IdentityStore {
           Number(old?.created_at) || now,
           now
         );
+      }
+      for (const uin of friendMap.keys()) {
+        this.db.prepare(`
+          UPDATE friend_proposals
+          SET status='accepted', decided_at=CASE WHEN decided_at=0 THEN ? ELSE decided_at END,
+            updated_at=?
+          WHERE uin=? AND status IN ('pending','approved_manual')
+        `).run(now, now, uin);
       }
 
       const insertSource = this.db.prepare(`
@@ -458,6 +510,172 @@ export class IdentityStore {
         lastSeenAt: Number(alias.lastSeenAt) || 0
       }))
     }));
+  }
+
+  listFriendProposals({ status = '', limit = 100 } = {}) {
+    const normalizedStatus = String(status || '').trim();
+    const size = Math.min(500, Math.max(1, Number(limit) || 100));
+    const rows = normalizedStatus
+      ? this.db.prepare(`
+          SELECT fp.*, p.primary_name
+          FROM friend_proposals fp
+          LEFT JOIN people p ON p.uin=fp.uin
+          WHERE fp.status=?
+          ORDER BY fp.created_at DESC
+          LIMIT ?
+        `).all(normalizedStatus, size)
+      : this.db.prepare(`
+          SELECT fp.*, p.primary_name
+          FROM friend_proposals fp
+          LEFT JOIN people p ON p.uin=fp.uin
+          ORDER BY fp.created_at DESC
+          LIMIT ?
+        `).all(size);
+    return rows.map(proposalView);
+  }
+
+  getFriendProposal(id) {
+    return proposalView(this.db.prepare(`
+      SELECT fp.*, p.primary_name
+      FROM friend_proposals fp
+      LEFT JOIN people p ON p.uin=fp.uin
+      WHERE fp.id=?
+    `).get(String(id || '').trim()));
+  }
+
+  createFriendProposal({
+    userId,
+    sourceChatKey,
+    reasonCode,
+    reason,
+    verificationMessage = '',
+    minMessageCount = 50,
+    cooldownDays = 30,
+    maxPending = 10,
+    now = Date.now()
+  }) {
+    const uin = normalizeUin(userId);
+    const source = String(sourceChatKey || '');
+    const code = FRIEND_PROPOSAL_REASONS.has(reasonCode) ? reasonCode : '';
+    const reasonText = cleanMemory(reason).slice(0, 240);
+    const verification = cleanMemory(verificationMessage).slice(0, 50);
+    if (!uin) throw new Error('好友候选必须使用数字 QQ 号');
+    if (!/^(group|private):\d+$/.test(source)) throw new Error('好友候选来源会话无效');
+    if (!code) throw new Error('好友候选原因必须是 interest、frequent 或 banter');
+    if (!reasonText) throw new Error('好友候选必须说明具体原因');
+
+    const person = this.db.prepare('SELECT * FROM people WHERE uin=?').get(uin);
+    if (!person || !this.hasSource(uin, source)) {
+      throw new Error('只能提议当前会话中已经出现过的人');
+    }
+    if (Number(person.is_friend)) throw new Error('对方已经是好友');
+    const threshold = Math.min(10000, Math.max(1, Number(minMessageCount) || 50));
+    if ((Number(person.message_count) || 0) < threshold) {
+      throw new Error(`互动消息不足：当前 ${Number(person.message_count) || 0}，至少需要 ${threshold}`);
+    }
+
+    const latest = this.db.prepare(`
+      SELECT fp.*, p.primary_name
+      FROM friend_proposals fp
+      LEFT JOIN people p ON p.uin=fp.uin
+      WHERE fp.uin=?
+      ORDER BY fp.created_at DESC
+      LIMIT 1
+    `).get(uin);
+    if (latest && OPEN_FRIEND_PROPOSAL_STATES.has(String(latest.status))) {
+      return { created: false, proposal: proposalView(latest), reason: 'already-open' };
+    }
+    if (latest && Number(latest.cooldown_until) > now) {
+      throw new Error(`该用户仍在好友提议冷却期，${new Date(Number(latest.cooldown_until)).toLocaleString('zh-CN', { hour12: false })} 后可再次提议`);
+    }
+    const pending = Number(this.db.prepare(
+      "SELECT COUNT(*) AS n FROM friend_proposals WHERE status='pending'"
+    ).get().n) || 0;
+    const pendingLimit = Math.min(100, Math.max(1, Number(maxPending) || 10));
+    if (pending >= pendingLimit) throw new Error(`待审批好友候选已达上限 ${pendingLimit}`);
+
+    const id = `fp_${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`;
+    const cooldownUntil = now + Math.min(365, Math.max(1, Number(cooldownDays) || 30))
+      * 86400000;
+    this.db.prepare(`
+      INSERT INTO friend_proposals (
+        id, uin, source_chat_key, reason_code, reason, verification_message,
+        status, created_at, cooldown_until, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+    `).run(
+      id,
+      uin,
+      source,
+      code,
+      reasonText,
+      verification,
+      now,
+      cooldownUntil,
+      now
+    );
+    return { created: true, proposal: this.getFriendProposal(id), reason: '' };
+  }
+
+  markFriendProposalNotification(id, { notified = false, error = '', now = Date.now() } = {}) {
+    this.db.prepare(`
+      UPDATE friend_proposals
+      SET notified_at=?, notify_error=?, updated_at=?
+      WHERE id=?
+    `).run(notified ? now : 0, String(error || '').slice(0, 500), now, String(id || ''));
+    return this.getFriendProposal(id);
+  }
+
+  decideFriendProposal(id, decision, {
+    decidedBy = '',
+    now = Date.now()
+  } = {}) {
+    const proposal = this.getFriendProposal(id);
+    if (!proposal) throw new Error('好友候选不存在');
+    if (proposal.status === 'accepted') return proposal;
+    if (decision === 'approve' && proposal.status === 'approved_manual') return proposal;
+    if (proposal.status !== 'pending') throw new Error(`好友候选已处理：${proposal.status}`);
+    const status = decision === 'approve'
+      ? 'approved_manual'
+      : decision === 'reject'
+        ? 'rejected'
+        : '';
+    if (!status) throw new Error('审批决定必须是 approve 或 reject');
+    this.db.prepare(`
+      UPDATE friend_proposals
+      SET status=?, decided_at=?, decided_by=?, updated_at=?
+      WHERE id=? AND status='pending'
+    `).run(status, now, String(decidedBy || ''), now, proposal.id);
+    return this.getFriendProposal(proposal.id);
+  }
+
+  markFriendAdded(userId, now = Date.now()) {
+    const uin = normalizeUin(userId);
+    if (!uin) return 0;
+    this.db.prepare('UPDATE people SET is_friend=1, updated_at=? WHERE uin=?').run(now, uin);
+    return this.db.prepare(`
+      UPDATE friend_proposals
+      SET status='accepted', decided_at=CASE WHEN decided_at=0 THEN ? ELSE decided_at END,
+        updated_at=?
+      WHERE uin=? AND status IN ('pending','approved_manual')
+    `).run(now, now, uin).changes;
+  }
+
+  friendProposalStats() {
+    const row = this.db.prepare(`
+      SELECT COUNT(*) AS total,
+        SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS pending,
+        SUM(CASE WHEN status='approved_manual' THEN 1 ELSE 0 END) AS approvedManual,
+        SUM(CASE WHEN status='accepted' THEN 1 ELSE 0 END) AS accepted,
+        SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END) AS rejected
+      FROM friend_proposals
+    `).get();
+    return {
+      total: Number(row.total) || 0,
+      pending: Number(row.pending) || 0,
+      approvedManual: Number(row.approvedManual) || 0,
+      accepted: Number(row.accepted) || 0,
+      rejected: Number(row.rejected) || 0
+    };
   }
 
   hasSource(userId, chatKey) {

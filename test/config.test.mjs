@@ -23,6 +23,7 @@ test('migrates legacy desktop and DSH keys into the Linux configuration', async 
   process.env.QQ_AGENT_DATA_DIR = dir;
   const {
     conversationConfigForChat,
+    friendProposalEnabled,
     getConfig,
     identityPilotEnabled,
     updateConfig
@@ -47,7 +48,10 @@ test('migrates legacy desktop and DSH keys into the Linux configuration', async 
   assert.equal(config.qzoneInteractions.feedIntervalMinutes, 60);
   assert.equal(config.qzoneInteractions.replyIntervalMinutes, 5);
   assert.equal(config.identityPilot.enabled, false);
+  assert.equal(config.identityPilot.friendProposal.enabled, false);
+  assert.equal(config.identityPilot.friendProposal.cooldownDays, 30);
   assert.equal(identityPilotEnabled(config), false);
+  assert.equal(friendProposalEnabled(config), false);
   assert.equal(config.wakeDelayMinMs, 8000);
   assert.equal(config.wakeDelayMaxMs, 12000);
   updateConfig({
@@ -59,7 +63,17 @@ test('migrates legacy desktop and DSH keys into the Linux configuration', async 
       replyIntervalMinutes: 10,
       maxBatchItems: 15
     },
-    identityPilot: { enabled: true },
+    identityPilot: {
+      enabled: true,
+      friendProposal: {
+        enabled: true,
+        ownerUin: '123456',
+        minMessageCount: 75,
+        cooldownDays: 45,
+        maxPending: 6
+      }
+    },
+    allow: { private: ['123456'] },
     wakeDelayMinMs: 14000,
     wakeDelayMaxMs: 6000,
     conversation: {
@@ -84,7 +98,13 @@ test('migrates legacy desktop and DSH keys into the Linux configuration', async 
   assert.equal(saved.qzoneInteractions.replyIntervalMinutes, 10);
   assert.equal(saved.qzoneInteractions.maxBatchItems, 15);
   assert.equal(saved.identityPilot.enabled, true);
+  assert.equal(saved.identityPilot.friendProposal.enabled, true);
+  assert.equal(saved.identityPilot.friendProposal.ownerUin, '123456');
+  assert.equal(saved.identityPilot.friendProposal.minMessageCount, 75);
+  assert.equal(saved.identityPilot.friendProposal.cooldownDays, 45);
+  assert.equal(saved.identityPilot.friendProposal.maxPending, 6);
   assert.equal(identityPilotEnabled(), true);
+  assert.equal(friendProposalEnabled(), true);
   assert.equal(saved.wakeDelayMinMs, 6000);
   assert.equal(saved.wakeDelayMaxMs, 14000);
   assert.equal(saved.wakeDelayMs, 10000);
@@ -97,6 +117,13 @@ test('migrates legacy desktop and DSH keys into the Linux configuration', async 
   const disabled = JSON.parse(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'));
   assert.equal(disabled.identityPilot.enabled, false);
   assert.equal(identityPilotEnabled(), false);
+  assert.equal(friendProposalEnabled(), false);
+  assert.throws(
+    () => updateConfig({
+      identityPilot: { enabled: true, friendProposal: { enabled: true, ownerUin: '' } }
+    }),
+    /管理员 QQ/
+  );
   assert.throws(() => updateConfig({ conversation: { mode: 'invalid' } }), /conversation mode/);
   assert.throws(
     () => updateConfig({ conversation: { groupModes: { 100: 'invalid' } } }),

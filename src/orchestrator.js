@@ -11,6 +11,7 @@
 import crypto from 'node:crypto';
 import {
   conversationConfigForChat,
+  friendProposalEnabled,
   getConfig,
   identityPilotEnabled,
   storeConfigForChat,
@@ -958,14 +959,19 @@ export class Orchestrator {
     const searchEnabled = cfg.webSearch?.enabled !== false;
     const identityPilot = this.getIdentityPilot();
     const identityAvailable = identityPilotEnabled(cfg) && identityPilot?.active === true;
+    const friendProposalAvailable = identityAvailable && friendProposalEnabled(cfg);
     const toolDefs = this.toolDefs.filter((d) => {
       if (!visionEnabled && (d.name === 'get_message_images' || d.name === 'get_sticker_image')) return false;
       if (!searchEnabled && (d.name === 'web_search' || d.name === 'web_fetch')) return false;
       if (d.feature === 'identityPilot' && !identityAvailable) return false;
+      if (d.feature === 'friendProposal' && !friendProposalAvailable) return false;
       return true;
     });
     const openAiTools = toOpenAiTools(toolDefs);
-    const systemPrompt = buildSystemPrompt({ identityPilotAvailable: identityAvailable });
+    const systemPrompt = buildSystemPrompt({
+      identityPilotAvailable: identityAvailable,
+      friendProposalAvailable
+    });
     const promptPrefixHash = crypto.createHash('sha256')
       .update(String(cfg.api.provider || ''))
       .update('\0')

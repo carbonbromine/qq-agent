@@ -232,7 +232,7 @@ async function main() {
     security: { allowPrivateImageHosts: false },
     onebot: { wsUrl: `ws://127.0.0.1:${PORTS.onebotWs}`, httpUrl: `http://127.0.0.1:${PORTS.onebotHttp}`, accessToken: '' },
     persona: { botName: '审计Bot', participation: 'medium', roleText: '你是审计群里的机器人。' },
-    allow: { groups: ['456'], private: ['777'] },
+    allow: { groups: ['456'], private: ['777', '777777'] },
     deny: { groups: [], private: [] },
     allowAllWhenEmpty: false,
     runtime: { mode: 'active', paused: false },
@@ -762,6 +762,86 @@ async function main() {
   assert.equal(peopleRes.status, 200);
   const peopleBody = await peopleRes.json();
   assert.ok(peopleBody.people.some((person) => person.userId === '111'));
+  const friendProposalEnable = await fetch(`http://127.0.0.1:${cfg.server.port}/api/config`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      identityPilot: {
+        enabled: true,
+        friendProposal: {
+          enabled: true,
+          ownerUin: '777777',
+          minMessageCount: 1,
+          cooldownDays: 30,
+          maxPending: 10
+        }
+      }
+    })
+  });
+  assert.equal(friendProposalEnable.status, 200);
+  const proposal = await app.identityPilot.proposeFriend({
+    userId: '111',
+    chatKey: 'group:456',
+    reasonCode: 'interest',
+    reason: '测试中的真实互动候选',
+    verificationMessage: '继续聊'
+  });
+  assert.equal(proposal.created, true);
+  assert.equal(proposal.adminNotified, true);
+  assert.ok(onebotHttp.state.sends.some((send) =>
+    send.action === 'send_private_msg'
+    && send.body.user_id === 777777
+    && JSON.stringify(send.body.message).includes('主动好友候选')));
+  const proposalList = await (await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/identity-pilot/friend-proposals?limit=10`
+  )).json();
+  assert.equal(proposalList.proposals[0].status, 'pending');
+  const llmCallsBeforeApproval = llm.state.requests.length;
+  onebotWs.push({
+    post_type: 'message', message_type: 'private', user_id: 777777, self_id: 888,
+    message_id: 9750, time: Math.floor(Date.now() / 1000),
+    sender: { user_id: 777777, nickname: '管理员' },
+    message: [{
+      type: 'text',
+      data: { text: `同意好友 ${proposal.proposal.id}` }
+    }]
+  });
+  await waitFor(async () => {
+    const data = await (await fetch(
+      `http://127.0.0.1:${cfg.server.port}/api/identity-pilot/friend-proposals?limit=10`
+    )).json();
+    return data.proposals[0]?.status === 'approved_manual';
+  }, 3000, '管理员好友审批命令');
+  assert.equal(llm.state.requests.length, llmCallsBeforeApproval, '管理员审批命令不得调用模型');
+  onebotWs.push({
+    post_type: 'notice',
+    notice_type: 'friend_add',
+    user_id: 111,
+    self_id: 888,
+    time: Math.floor(Date.now() / 1000)
+  });
+  await waitFor(async () => {
+    const data = await (await fetch(
+      `http://127.0.0.1:${cfg.server.port}/api/identity-pilot/friend-proposals?limit=10`
+    )).json();
+    return data.proposals[0]?.status === 'accepted';
+  }, 3000, '好友成功事件闭环');
+  const rejectedProposal = await app.identityPilot.proposeFriend({
+    userId: '113',
+    chatKey: 'group:456',
+    reasonCode: 'banter',
+    reason: '测试控制台拒绝路径'
+  });
+  const rejectResponse = await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/identity-pilot/friend-proposals/${rejectedProposal.proposal.id}/decision`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ decision: 'reject' })
+    }
+  );
+  assert.equal(rejectResponse.status, 200);
+  assert.equal((await rejectResponse.json()).proposal.status, 'rejected');
   await fetch(`http://127.0.0.1:${cfg.server.port}/api/config`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -772,7 +852,10 @@ async function main() {
   )).json();
   assert.equal(identityOff.enabled, false);
   assert.equal(identityOff.active, false);
-  pass('统一 QQ 身份库：默认无副作用、动态启用索引、关闭停止运行');
+  assert.equal((await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/identity-pilot/friend-proposals`
+  )).status, 409);
+  pass('统一 QQ 身份库：默认无副作用、主动好友审批闭环、关闭停止运行');
 
   const assetOverview = await (await fetch(
     `http://127.0.0.1:${cfg.server.port}/api/assets/overview`

@@ -221,7 +221,16 @@ try {
   const experimentalHtml = ctx.renderExperimentalSettingsSection(cfg);
   const experimentalOnHtml = ctx.renderExperimentalSettingsSection({
     ...cfg,
-    identityPilot: { enabled: true }
+    identityPilot: {
+      enabled: true,
+      friendProposal: {
+        enabled: true,
+        ownerUin: '2948771712',
+        minMessageCount: 50,
+        cooldownDays: 30,
+        maxPending: 10
+      }
+    }
   });
   if (
     experimentalHtml.includes('id="cfg-identity-pilot-enabled"')
@@ -233,6 +242,11 @@ try {
     && experimentalOnHtml.includes('正在读取统一身份库')
     && experimentalOnHtml.includes('data-identity-stat="people"')
     && experimentalOnHtml.includes('data-identity-stat="memories"')
+    && experimentalOnHtml.includes('id="cfg-identity-friend-enabled" checked')
+    && experimentalOnHtml.includes('id="cfg-identity-friend-owner"')
+    && experimentalOnHtml.includes('id="cfg-identity-friend-min-messages"')
+    && experimentalOnHtml.includes('id="cfg-identity-friend-cooldown"')
+    && experimentalOnHtml.includes('id="identity-friend-proposals"')
   ) {
     pass++;
     console.log('  OK    人物画像实验总开关默认关闭并可展示开启状态');
@@ -241,19 +255,27 @@ try {
     console.log('  FAIL  人物画像实验总开关缺失或默认状态错误');
   }
   const pilotPatchFn = ctx.identityPilotSettingsPatch || sandbox.identityPilotSettingsPatch;
-  const pilotOnPatch = pilotPatchFn(cfg, true);
+  const pilotOnPatch = pilotPatchFn(cfg, true, {
+    enabled: true,
+    ownerUin: '2948771712',
+    minMessageCount: 80
+  });
   const pilotOffPatch = pilotPatchFn({ ...cfg, identityPilot: { enabled: true } }, false);
   if (
     pilotOnPatch.enabled === true
     && pilotOffPatch.enabled === false
-    && Object.keys(pilotOnPatch).length === 1
-    && Object.keys(pilotOffPatch).length === 1
+    && pilotOnPatch.friendProposal.enabled === true
+    && pilotOnPatch.friendProposal.ownerUin === '2948771712'
+    && pilotOnPatch.friendProposal.minMessageCount === 80
+    && pilotOffPatch.friendProposal.enabled === undefined
+    && Object.keys(pilotOnPatch).length === 2
+    && Object.keys(pilotOffPatch).length === 2
   ) {
     pass++;
-    console.log('  OK    实验总开关独立生成最小配置补丁');
+    console.log('  OK    实验总开关与主动好友候选生成最小配置补丁');
   } else {
     fail++;
-    console.log('  FAIL  实验总开关保存补丁不正确');
+    console.log('  FAIL  实验功能保存补丁不正确');
   }
   const assetSummaryHtml = ctx.renderAssetSummary({
     generatedAt: Date.now(),

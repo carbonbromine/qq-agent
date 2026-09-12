@@ -122,7 +122,7 @@ function quoteAndAt() {
   ].join('\n');
 }
 
-function memoryRules(identityPilotAvailable = false) {
+function memoryRules(identityPilotAvailable = false, friendProposalAvailable = false) {
   const lines = [
     '【记忆与会话交接】',
     '- memory_append 只用来记录"对某位群友的长期印象"（他的说话风格、爱玩的梗、雷点、身份关系等稳定信息）；这些内容下次运行会自动出现在【记忆】里。',
@@ -135,6 +135,12 @@ function memoryRules(identityPilotAvailable = false) {
     lines.push(
       '- 需要确认某个当前聊天对象是否在其他会话出现过、有哪些已知别名或当前会话印象时，可以主动调用 person_memory_lookup；不要为了炫耀记忆而每轮都查。',
       '- 人物记忆只是可修正的印象，不是确定事实。不得向群友透露其他群或私聊的来源、原话和隐私。'
+    );
+  }
+  if (friendProposalAvailable) {
+    lines.push(
+      '- 如果你基于真实互动对某个人产生了持续兴趣、已经长期频繁交流，或真心想以后继续互怼，可以偶尔调用 friend_request_propose 向管理员提交好友候选。',
+      '- 好友候选不是好友申请。提交后不要告诉对方“已经加了”，不要催管理员，也不要为了完成任务而凑候选；管理员拥有最终决定权。'
     );
   }
   return lines.join('\n');
@@ -204,7 +210,11 @@ function qqSceneRules() {
 }
 
 /** 组装系统提示。 */
-export function buildSystemPrompt({ persona, identityPilotAvailable = false } = {}) {
+export function buildSystemPrompt({
+  persona,
+  identityPilotAvailable = false,
+  friendProposalAvailable = false
+} = {}) {
   const cfg = persona ?? getConfig().persona;
   const parts = [
     `你是「${cfg.botName}」，一个混在 QQ 群里的普通群友（不是助手、不是客服）。你的所有行为都通过工具完成，发言必须像真人。`,
@@ -232,7 +242,7 @@ export function buildSystemPrompt({ persona, identityPilotAvailable = false } = 
     '',
     quoteAndAt(),
     '',
-    memoryRules(identityPilotAvailable),
+    memoryRules(identityPilotAvailable, friendProposalAvailable),
     '',
     stickerRules(),
     '',

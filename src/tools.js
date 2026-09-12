@@ -452,6 +452,64 @@ export function buildToolDefs() {
       }
     },
     {
+      name: 'friend_request_propose',
+      feature: 'friendProposal',
+      description: '把当前聊天对象或群成员列为“想主动添加好友”的候选，并请求管理员审批。仅在你对对方确实感兴趣、长期聊得频繁，或真心想以后继续互怼时使用；这不会直接发送好友申请，也不能替管理员批准。',
+      parameters: {
+        type: 'object',
+        properties: {
+          userId: {
+            type: ['integer', 'string'],
+            description: '候选人的数字 QQ 号；必须是当前私聊对象或当前群里出现过的成员'
+          },
+          reasonCode: {
+            type: 'string',
+            enum: ['interest', 'frequent', 'banter'],
+            description: 'interest=对这个人感兴趣；frequent=聊得比较频繁；banter=想继续互怼'
+          },
+          reason: {
+            type: 'string',
+            description: '给管理员看的具体理由，必须基于真实互动，不能编造'
+          },
+          verificationMessage: {
+            type: 'string',
+            description: '可选：好友申请验证消息，最多 50 字'
+          }
+        },
+        required: ['userId', 'reasonCode', 'reason']
+      },
+      async execute(ctx, args) {
+        const userId = String(args.userId ?? '').trim();
+        if (!/^\d{1,15}$/.test(userId)) {
+          return err(`userId 必须是数字 QQ 号（收到：${JSON.stringify(args.userId)}）。${memberHint(ctx)}`);
+        }
+        if (!ctx.identityPilot?.active) return err('统一 QQ 身份库当前不可用');
+        try {
+          const result = await ctx.identityPilot.proposeFriend({
+            userId,
+            chatKey: ctx.chatKey,
+            reasonCode: String(args.reasonCode || ''),
+            reason: String(args.reason || ''),
+            verificationMessage: String(args.verificationMessage || ''),
+            signal: ctx.signal
+          });
+          return ok({
+            proposalId: result.proposal.id,
+            created: result.created,
+            status: result.proposal.status,
+            adminNotified: result.adminNotified,
+            note: result.created
+              ? result.adminNotified
+                ? '候选已提交管理员审批。不要向对方声称好友申请已经发出。'
+                : '候选已保存到控制台，但管理员私聊通知失败。不要重复提交，也不要向对方声称好友申请已经发出。'
+              : '该用户已有待处理候选，不重复提交。'
+          });
+        } catch (error) {
+          return err(error?.message ?? error);
+        }
+      }
+    },
+    {
       name: 'memory_remove',
       description: '删除一条过时/不再准确的对群友印象。userId 优先按 QQ 号删；target 按名字删；两者都不传则删全部印象。',
       parameters: {

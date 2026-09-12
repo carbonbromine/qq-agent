@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import {
   DATA_DIR,
+  friendProposalEnabled,
   getConfig,
   identityPilotEnabled
 } from './config.js';
@@ -28,12 +29,14 @@ export class IdentityPilotManager {
     onebot,
     dataDir = DATA_DIR,
     config = getConfig,
+    notifyFriendProposal = null,
     log = console.log
   }) {
     this.store = store;
     this.onebot = onebot;
     this.dataDir = dataDir;
     this.config = config;
+    this.notifyFriendProposal = notifyFriendProposal;
     this.log = log;
     this.identityStore = null;
     this.starting = null;
@@ -141,14 +144,110 @@ export class IdentityPilotManager {
     return this.identityStore.getPerson(uin, { chatKey: source });
   }
 
+  async proposeFriend({
+    userId,
+    chatKey,
+    reasonCode,
+    reason,
+    verificationMessage = '',
+    signal
+  }) {
+    const cfg = this.config();
+    const settings = cfg.identityPilot?.friendProposal || {};
+    if (!this.identityStore || !friendProposalEnabled(cfg)) {
+      throw new Error('主动好友候选功能当前未启用');
+    }
+    const ownerUin = String(settings.ownerUin || '').trim();
+    if (!/^\d{5,15}$/.test(ownerUin)) {
+      throw new Error('尚未配置接收好友审批的管理员 QQ');
+    }
+    const targetUin = String(userId || '').trim();
+    if (targetUin === ownerUin) throw new Error('不能把审批管理员本人列为好友候选');
+    const result = this.identityStore.createFriendProposal({
+      userId: targetUin,
+      sourceChatKey: chatKey,
+      reasonCode,
+      reason,
+      verificationMessage,
+      minMessageCount: settings.minMessageCount,
+      cooldownDays: settings.cooldownDays,
+      maxPending: settings.maxPending
+    });
+    if (!result.created) {
+      return {
+        ...result,
+        adminNotified: Boolean(result.proposal.notifiedAt),
+        protocolDispatchSupported: false
+      };
+    }
+    let adminNotified = false;
+    let notifyError = '';
+    try {
+      if (this.notifyFriendProposal) {
+        await this.notifyFriendProposal(result.proposal, ownerUin, signal);
+        adminNotified = true;
+      } else {
+        notifyError = '管理员通知通道未配置';
+      }
+    } catch (error) {
+      notifyError = String(error?.message ?? error);
+      this.log(`[identity-pilot] 好友候选 ${result.proposal.id} 通知管理员失败：${notifyError}`);
+    }
+    const proposal = this.identityStore.markFriendProposalNotification(
+      result.proposal.id,
+      { notified: adminNotified, error: notifyError }
+    );
+    return {
+      created: true,
+      proposal,
+      adminNotified,
+      protocolDispatchSupported: false
+    };
+  }
+
+  listFriendProposals(options = {}) {
+    return this.identityStore ? this.identityStore.listFriendProposals(options) : [];
+  }
+
+  decideFriendProposal(id, decision, { decidedBy = '' } = {}) {
+    if (!this.identityStore || !friendProposalEnabled(this.config())) {
+      throw new Error('主动好友候选功能当前未启用');
+    }
+    return {
+      proposal: this.identityStore.decideFriendProposal(id, decision, { decidedBy }),
+      protocolDispatchSupported: false,
+      execution: decision === 'approve' ? 'manual-required' : 'none',
+      note: decision === 'approve'
+        ? '管理员已批准；当前 OneBot 适配器不支持主动发送好友申请，请在 QQ 客户端手动发起。'
+        : '管理员已拒绝该好友候选。'
+    };
+  }
+
+  markFriendAdded(userId) {
+    if (!this.identityStore) return 0;
+    return this.identityStore.markFriendAdded(userId);
+  }
+
   status() {
+    const cfg = this.config();
+    const proposalConfig = cfg.identityPilot?.friendProposal || {};
+    const friendProposal = {
+      enabled: friendProposalEnabled(cfg),
+      ownerConfigured: /^\d{5,15}$/.test(String(proposalConfig.ownerUin || '').trim()),
+      protocolDispatchSupported: false,
+      protocolNote: '当前 OneBot 适配器未提供主动发起好友申请 action',
+      counts: this.identityStore
+        ? this.identityStore.friendProposalStats()
+        : { total: 0, pending: 0, approvedManual: 0, accepted: 0, rejected: 0 }
+    };
     const base = {
       enabled: identityPilotEnabled(this.config()),
       active: this.active,
       databaseExists: fs.existsSync(identityDatabasePath(this.dataDir)),
       databaseFile: DB_DISPLAY_NAME,
       friendSyncError: this.friendSyncError,
-      error: this.lastError
+      error: this.lastError,
+      friendProposal
     };
     if (!this.identityStore) {
       return {
@@ -178,6 +277,13 @@ export function inactiveIdentityPilotStatus({
     databaseFile: DB_DISPLAY_NAME,
     friendSyncError: '',
     error: String(error || ''),
+    friendProposal: {
+      enabled: false,
+      ownerConfigured: false,
+      protocolDispatchSupported: false,
+      protocolNote: '统一身份库未运行',
+      counts: { total: 0, pending: 0, approvedManual: 0, accepted: 0, rejected: 0 }
+    },
     people: 0,
     messages: 0,
     friends: 0,

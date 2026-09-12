@@ -477,6 +477,82 @@ describe('Orchestrator', () => {
       message.toolCall?.name === 'person_memory_lookup'));
   });
 
+  it('exposes friend proposals only when the nested pilot switch is enabled', async (t) => {
+    const { cfg, runner, append } = fixture(t);
+    cfg.identityPilot = {
+      enabled: true,
+      friendProposal: {
+        enabled: true,
+        ownerUin: '900001',
+        minMessageCount: 1,
+        cooldownDays: 30,
+        maxPending: 10
+      }
+    };
+    const proposals = [];
+    runner.getIdentityPilot = () => ({
+      active: true,
+      proposeFriend: async (input) => {
+        proposals.push(input);
+        return {
+          created: true,
+          adminNotified: true,
+          proposal: { id: 'fp_123456789abc', status: 'pending' }
+        };
+      }
+    });
+    const requests = [];
+    globalThis.fetch = async (_url, options) => {
+      const body = JSON.parse(options.body);
+      requests.push(body);
+      if (requests.length === 1) {
+        assert.ok(body.tools.some((tool) =>
+          tool.function.name === 'friend_request_propose'));
+        assert.match(body.messages[0].content, /好友候选/);
+        return Response.json({
+          choices: [{
+            message: {
+              tool_calls: [{
+                id: 'friend-proposal-1',
+                type: 'function',
+                function: {
+                  name: 'friend_request_propose',
+                  arguments: JSON.stringify({
+                    userId: '42',
+                    reasonCode: 'interest',
+                    reason: '长期聊下来确实感兴趣',
+                    verificationMessage: '以后继续聊'
+                  })
+                }
+              }]
+            }
+          }],
+          usage: { prompt_tokens: 100, total_tokens: 110 }
+        });
+      }
+      const toolResult = body.messages.find((message) =>
+        message.role === 'tool' && message.name === 'friend_request_propose');
+      assert.match(String(toolResult?.content || ''), /fp_123456789abc/);
+      assert.match(String(toolResult?.content || ''), /不要向对方声称/);
+      return Response.json({
+        choices: [{ message: { content: 'done' } }],
+        usage: { prompt_tokens: 120, total_tokens: 130 }
+      });
+    };
+
+    append(1, '以后还能继续聊吗', '42');
+    await runner.wake('group:1');
+
+    assert.equal(requests.length, 2);
+    assert.deepEqual(proposals, [{
+      userId: '42',
+      chatKey: 'group:1',
+      reasonCode: 'interest',
+      reason: '长期聊下来确实感兴趣',
+      verificationMessage: '以后继续聊'
+    }]);
+  });
+
   it('deterministically wakes the same participant inside the threaded continuation window', async (t) => {
     const { cfg, runner, store, append } = fixture(t);
     cfg.conversation.mode = 'threaded';
