@@ -12,6 +12,7 @@ import crypto from 'node:crypto';
 import {
   conversationConfigForChat,
   getConfig,
+  identityPilotEnabled,
   storeConfigForChat,
   updateConfig
 } from './config.js';
@@ -132,7 +133,17 @@ export function randomWakeDelay(config = getConfig(), random = Math.random) {
 }
 
 export class Orchestrator {
-  constructor({ store, memory, stickers, sender, sessions, onebot, emit = null, random = Math.random }) {
+  constructor({
+    store,
+    memory,
+    stickers,
+    sender,
+    sessions,
+    onebot,
+    emit = null,
+    random = Math.random,
+    getIdentityPilot = null
+  }) {
     this.store = store;
     this.memory = memory;
     this.stickers = stickers;
@@ -140,6 +151,7 @@ export class Orchestrator {
     this.sessions = sessions;
     this.onebot = onebot;
     this.random = random;
+    this.getIdentityPilot = typeof getIdentityPilot === 'function' ? getIdentityPilot : (() => null);
     this.emit = typeof emit === 'function' ? emit : ((b) => b.emit.bind(b))(createEventBus());
     this.toolDefs = buildToolDefs();
 
@@ -944,13 +956,16 @@ export class Orchestrator {
     const visionEnabled = cfg.api.vision !== false
       && modelImageVerdict(cfg.api.provider, cfg.api.model) !== 'no-vision';
     const searchEnabled = cfg.webSearch?.enabled !== false;
+    const identityPilot = this.getIdentityPilot();
+    const identityAvailable = identityPilotEnabled(cfg) && identityPilot?.active === true;
     const toolDefs = this.toolDefs.filter((d) => {
       if (!visionEnabled && (d.name === 'get_message_images' || d.name === 'get_sticker_image')) return false;
       if (!searchEnabled && (d.name === 'web_search' || d.name === 'web_fetch')) return false;
+      if (d.feature === 'identityPilot' && !identityAvailable) return false;
       return true;
     });
     const openAiTools = toOpenAiTools(toolDefs);
-    const systemPrompt = buildSystemPrompt();
+    const systemPrompt = buildSystemPrompt({ identityPilotAvailable: identityAvailable });
     const promptPrefixHash = crypto.createHash('sha256')
       .update(String(cfg.api.provider || ''))
       .update('\0')
@@ -1080,6 +1095,7 @@ export class Orchestrator {
       onebot: this.onebot,
       store: this.store,
       memory: this.memory,
+      identityPilot,
       stickers: this.stickers,
       sender: this.sender,
       session,

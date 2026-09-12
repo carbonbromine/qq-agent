@@ -85,6 +85,7 @@ const TOOL_META = {
   // 记忆
   memory_append:     { name: '记一条',     cat: '记忆',   icon: '🧠' },
   memory_query:      { name: '查记忆',     cat: '记忆',   icon: '🧠' },
+  person_memory_lookup: { name: '查人物记忆', cat: '记忆', icon: '🧠' },
   memory_remove:     { name: '删记忆',     cat: '记忆',   icon: '🧹' },
   // 联网
   web_search:        { name: '联网搜索',   cat: '联网',   icon: '🌐' },

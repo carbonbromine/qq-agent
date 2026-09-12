@@ -411,6 +411,72 @@ describe('Orchestrator', () => {
     assert.ok(session.inputPayloadChars > 0);
   });
 
+  it('exposes and executes the unified person lookup only while the pilot is active', async (t) => {
+    const { cfg, runner, append } = fixture(t);
+    cfg.identityPilot.enabled = true;
+    const lookups = [];
+    runner.getIdentityPilot = () => ({
+      active: true,
+      lookupPerson: (userId, options) => {
+        lookups.push({ userId, ...options });
+        return {
+          userId,
+          primaryName: '成员42',
+          aliases: ['成员42', '旧昵称'],
+          isFriend: true,
+          messageCount: 80,
+          chatCount: 2,
+          currentChatMessageCount: 50,
+          currentContextMemories: [{ content: '喜欢讨论架构', observedAt: 1 }],
+          otherContextMemoryCount: 1,
+          safeProfile: {}
+        };
+      }
+    });
+    const requests = [];
+    globalThis.fetch = async (_url, options) => {
+      const body = JSON.parse(options.body);
+      requests.push(body);
+      if (requests.length === 1) {
+        assert.ok(body.tools.some((tool) =>
+          tool.function.name === 'person_memory_lookup'));
+        assert.match(body.messages[0].content, /person_memory_lookup/);
+        return Response.json({
+          choices: [{
+            message: {
+              tool_calls: [{
+                id: 'person-1',
+                type: 'function',
+                function: {
+                  name: 'person_memory_lookup',
+                  arguments: JSON.stringify({ userId: '42' })
+                }
+              }]
+            }
+          }],
+          usage: { prompt_tokens: 100, total_tokens: 110 }
+        });
+      }
+      const toolResult = body.messages.find((message) =>
+        message.role === 'tool' && message.name === 'person_memory_lookup');
+      assert.match(String(toolResult?.content || ''), /喜欢讨论架构/);
+      assert.match(String(toolResult?.content || ''), /"chatCount": 2/);
+      return Response.json({
+        choices: [{ message: { content: 'done' } }],
+        usage: { prompt_tokens: 120, total_tokens: 130 }
+      });
+    };
+
+    append(1, '你还记得我吗', '42');
+    await runner.wake('group:1');
+
+    assert.equal(requests.length, 2);
+    assert.deepEqual(lookups, [{ userId: '42', chatKey: 'group:1' }]);
+    const session = runner.sessions.get(runner.sessions.listSummaries(1)[0].id);
+    assert.ok(session.messages.some((message) =>
+      message.toolCall?.name === 'person_memory_lookup'));
+  });
+
   it('deterministically wakes the same participant inside the threaded continuation window', async (t) => {
     const { cfg, runner, store, append } = fixture(t);
     cfg.conversation.mode = 'threaded';

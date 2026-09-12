@@ -122,15 +122,22 @@ function quoteAndAt() {
   ].join('\n');
 }
 
-function memoryRules() {
-  return [
+function memoryRules(identityPilotAvailable = false) {
+  const lines = [
     '【记忆与会话交接】',
     '- memory_append 只用来记录"对某位群友的长期印象"（他的说话风格、爱玩的梗、雷点、身份关系等稳定信息）；这些内容下次运行会自动出现在【记忆】里。',
     '- 不要记临时话题、临时想法；只记以后跟这个人打交道还用得上的。印象过时/不再准确时用 memory_remove 删掉。',
     '- 每次扫一眼【记忆】，只有自然相关才主动提起；不要为了用记忆而硬聊旧话题。',
     '- 跨运行仍需继续的话题，用 finish 保存当前假设、关键证据、确认事实、决定、已排除方向、未决问题和下一步。只保存简洁可检查的工作状态，不保存逐步推理、草稿或隐藏思维。',
     '- 【上次会话交接】可能过期或被新消息纠正；冲突时以最新消息和可验证事实为准。话题真正结束后用 clearHandoff 清除。'
-  ].join('\n');
+  ];
+  if (identityPilotAvailable) {
+    lines.push(
+      '- 需要确认某个当前聊天对象是否在其他会话出现过、有哪些已知别名或当前会话印象时，可以主动调用 person_memory_lookup；不要为了炫耀记忆而每轮都查。',
+      '- 人物记忆只是可修正的印象，不是确定事实。不得向群友透露其他群或私聊的来源、原话和隐私。'
+    );
+  }
+  return lines.join('\n');
 }
 
 function stickerRules() {
@@ -197,7 +204,7 @@ function qqSceneRules() {
 }
 
 /** 组装系统提示。 */
-export function buildSystemPrompt({ persona } = {}) {
+export function buildSystemPrompt({ persona, identityPilotAvailable = false } = {}) {
   const cfg = persona ?? getConfig().persona;
   const parts = [
     `你是「${cfg.botName}」，一个混在 QQ 群里的普通群友（不是助手、不是客服）。你的所有行为都通过工具完成，发言必须像真人。`,
@@ -225,7 +232,7 @@ export function buildSystemPrompt({ persona } = {}) {
     '',
     quoteAndAt(),
     '',
-    memoryRules(),
+    memoryRules(identityPilotAvailable),
     '',
     stickerRules(),
     '',

@@ -126,7 +126,18 @@ export function createApp({ log = console.log } = {}) {
     onebot, store,
     onSent: ({ chatKey, text }) => log(`[发送 -> ${chatKey}] ${String(text).slice(0, 60)}`)
   });
-  const orchestrator = new Orchestrator({ store, memory, stickers, sender, sessions, onebot, emit });
+  let identityPilot = null;
+  let identityPilotError = '';
+  const orchestrator = new Orchestrator({
+    store,
+    memory,
+    stickers,
+    sender,
+    sessions,
+    onebot,
+    emit,
+    getIdentityPilot: () => identityPilot
+  });
   const dailyMoments = new DailyMomentsManager({
     store,
     memory,
@@ -147,8 +158,6 @@ export function createApp({ log = console.log } = {}) {
     emit,
     log
   });
-  let identityPilot = null;
-  let identityPilotError = '';
   function identityPilotStatus() {
     return identityPilot?.status() || inactiveIdentityPilotStatus({
       enabled: identityPilotEnabled(),

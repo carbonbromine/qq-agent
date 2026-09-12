@@ -459,4 +459,77 @@ export class IdentityStore {
       }))
     }));
   }
+
+  hasSource(userId, chatKey) {
+    const uin = normalizeUin(userId);
+    const source = String(chatKey || '');
+    if (!uin || !source) return false;
+    return Boolean(this.db.prepare(
+      'SELECT 1 FROM identity_sources WHERE uin=? AND chat_key=?'
+    ).get(uin, source));
+  }
+
+  /**
+   * 返回适合模型使用的受限人物视图。
+   * 原始跨会话记忆不会返回；模型只能看到当前会话的旧印象和聚合计数。
+   */
+  getPerson(userId, { chatKey, maxAliases = 8, maxMemories = 6 } = {}) {
+    const uin = normalizeUin(userId);
+    const source = String(chatKey || '');
+    if (!uin || !source) return null;
+    const row = this.db.prepare('SELECT * FROM people WHERE uin=?').get(uin);
+    if (!row) return null;
+    const sourceRow = this.db.prepare(`
+      SELECT message_count AS messageCount, first_seen_at AS firstSeenAt,
+        last_seen_at AS lastSeenAt
+      FROM identity_sources WHERE uin=? AND chat_key=?
+    `).get(uin, source);
+    if (!sourceRow) return null;
+    const aliases = this.db.prepare(`
+      SELECT alias, chat_key AS chatKey, seen_count AS seenCount, last_seen_at AS lastSeenAt
+      FROM identity_aliases WHERE uin=?
+      ORDER BY last_seen_at DESC, seen_count DESC
+    `).all(uin);
+    const currentMemories = this.db.prepare(`
+      SELECT content, observed_at AS observedAt
+      FROM legacy_memory_refs
+      WHERE uin=? AND chat_key=?
+      ORDER BY observed_at DESC, id DESC
+      LIMIT ?
+    `).all(uin, source, Math.min(12, Math.max(1, Number(maxMemories) || 6)));
+    let profile = {};
+    try { profile = JSON.parse(row.profile_json || '{}'); } catch { profile = {}; }
+    const uniqueAliases = [];
+    const seenAliases = new Set();
+    for (const alias of aliases) {
+      const name = cleanName(alias.alias);
+      if (!name || seenAliases.has(name)) continue;
+      seenAliases.add(name);
+      uniqueAliases.push(name);
+      if (uniqueAliases.length >= Math.min(20, Math.max(1, Number(maxAliases) || 8))) break;
+    }
+    const currentMemoryCount = this.db.prepare(`
+      SELECT COUNT(*) AS count FROM legacy_memory_refs WHERE uin=? AND chat_key=?
+    `).get(uin, source);
+    return {
+      userId: uin,
+      primaryName: String(row.primary_name || ''),
+      aliases: uniqueAliases,
+      isFriend: Boolean(row.is_friend),
+      firstSeenAt: Number(row.first_seen_at) || 0,
+      lastSeenAt: Number(row.last_seen_at) || 0,
+      messageCount: Number(row.message_count) || 0,
+      chatCount: Number(row.chat_count) || 0,
+      currentChatMessageCount: Number(sourceRow.messageCount) || 0,
+      currentContextMemories: currentMemories.map((memory) => ({
+        content: cleanMemory(memory.content).slice(0, 160),
+        observedAt: Number(memory.observedAt) || 0
+      })),
+      otherContextMemoryCount: Math.max(
+        0,
+        (Number(row.legacy_memory_count) || 0) - (Number(currentMemoryCount.count) || 0)
+      ),
+      safeProfile: profile && typeof profile === 'object' ? profile : {}
+    };
+  }
 }

@@ -31,8 +31,18 @@ The database is separate from `messages.sqlite` and the existing `memory/`
 layout. Disabling closes its handle and stops incremental updates; indexed data
 is retained for a later re-enable.
 
-## Current boundary
+## Person lookup tool
 
-This phase does not inject unified identity data into model prompts, register a
-person-memory tool, generate profiles, or create friend proposals. Those
-behaviors must remain behind the same master switch in later phases.
+While the pilot is enabled and its database is active, Agent sessions receive
+`person_memory_lookup`. The tool:
+
+- requires a numeric QQ ID;
+- only accepts the current private peer or a member indexed in the current group;
+- returns unified aliases, friend status and aggregate activity counts;
+- returns legacy memory text only from the current chat;
+- reports only a count for memories from other contexts, never their source
+  chat, raw text or message IDs.
+
+Disabling the pilot removes both the tool schema and its system-prompt guidance.
+This phase does not automatically inject unified identity data, generate new
+profiles, or create friend proposals.

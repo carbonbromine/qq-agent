@@ -425,6 +425,33 @@ export function buildToolDefs() {
       }
     },
     {
+      name: 'person_memory_lookup',
+      feature: 'identityPilot',
+      description: '按 QQ 号查询当前聊天对象/群成员的统一身份与人物记忆。适合想确认“这个人是不是以前在别处聊过”“我对他有什么印象”时主动调用。只返回当前会话可见的旧印象和跨会话聚合统计，不会泄露其他群或私聊原文。',
+      parameters: {
+        type: 'object',
+        properties: {
+          userId: {
+            type: ['integer', 'string'],
+            description: '要查询的数字 QQ 号；必须是当前私聊对象或当前群里出现过的成员'
+          }
+        },
+        required: ['userId']
+      },
+      async execute(ctx, args) {
+        const userId = String(args.userId ?? '').trim();
+        if (!/^\d{1,15}$/.test(userId)) {
+          return err(`userId 必须是数字 QQ 号（收到：${JSON.stringify(args.userId)}）。${memberHint(ctx)}`);
+        }
+        if (!ctx.identityPilot?.active) return err('统一 QQ 身份库当前不可用');
+        const person = ctx.identityPilot.lookupPerson(userId, { chatKey: ctx.chatKey });
+        if (!person) {
+          return err('只能查询当前私聊对象或当前群中已经出现过的成员');
+        }
+        return ok(person);
+      }
+    },
+    {
       name: 'memory_remove',
       description: '删除一条过时/不再准确的对群友印象。userId 优先按 QQ 号删；target 按名字删；两者都不传则删全部印象。',
       parameters: {

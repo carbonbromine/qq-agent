@@ -77,6 +77,15 @@ test('unifies the same QQ across chats and indexes legacy memory without modifyi
       { content: '喜欢讨论系统设计', createdAt: now - 4000 }
     ]
   }, null, 2));
+  const privateMemoryDir = path.join(dir, 'memory', 'private_123456');
+  fs.mkdirSync(privateMemoryDir, { recursive: true });
+  fs.writeFileSync(path.join(privateMemoryDir, '123456.json'), JSON.stringify({
+    userId: '123456',
+    name: '私聊昵称',
+    impressions: [
+      { content: '只应在私聊上下文可见的印象', createdAt: now - 3500 }
+    ]
+  }, null, 2));
   const beforeHash = fileDigest(memoryFile);
   const beforeMtime = fs.statSync(memoryFile).mtimeMs;
 
@@ -107,7 +116,7 @@ test('unifies the same QQ across chats and indexes legacy memory without modifyi
   assert.equal(status.people, 1);
   assert.equal(status.sources, 2);
   assert.equal(status.friends, 1);
-  assert.equal(status.legacyMemories, 1);
+  assert.equal(status.legacyMemories, 2);
   assert.equal(friendCalls, 1);
   assert.equal(fs.statSync(identityDatabasePath(dir)).mode & 0o777, 0o600);
 
@@ -117,13 +126,21 @@ test('unifies the same QQ across chats and indexes legacy memory without modifyi
   assert.equal(people[0].primaryName, '好友备注');
   assert.equal(people[0].chatCount, 2);
   assert.equal(people[0].messageCount, 2);
-  assert.equal(people[0].legacyMemoryCount, 1);
+  assert.equal(people[0].legacyMemoryCount, 2);
   assert.deepEqual(
     new Set(people[0].aliases.map((item) => item.alias)),
     new Set(['群名片甲', '私聊昵称'])
   );
   assert.equal(fileDigest(memoryFile), beforeHash);
   assert.equal(fs.statSync(memoryFile).mtimeMs, beforeMtime);
+  const groupView = manager.lookupPerson('123456', { chatKey: 'group:100' });
+  assert.equal(groupView.currentContextMemories.length, 1);
+  assert.equal(groupView.currentContextMemories[0].content, '喜欢讨论系统设计');
+  assert.equal(groupView.otherContextMemoryCount, 1);
+  assert.ok(!JSON.stringify(groupView).includes('只应在私聊上下文可见的印象'));
+  const privateView = manager.lookupPerson('123456', { chatKey: 'private:123456' });
+  assert.equal(privateView.currentContextMemories[0].content, '只应在私聊上下文可见的印象');
+  assert.equal(manager.lookupPerson('777777', { chatKey: 'group:100' }), null);
 
   const stored = store.appendIncoming('group:100', {
     mid: 5, ts: now + 1000, senderId: '123456', senderName: '新群名片', text: '增量消息'

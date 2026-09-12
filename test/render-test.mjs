@@ -621,7 +621,7 @@ try {
           send_message: 133, finish: 149, send_sticker: 7, send_poke: 6,
           get_recent_messages: 3, get_message_images: 70, get_message_detail: 7,
           list_stickers: 4, collect_sticker: 2,
-          memory_append: 2, memory_remove: 2,
+          memory_append: 2, person_memory_lookup: 4, memory_remove: 2,
           web_search: 39, web_fetch: 7,
           some_unknown_tool: 5
         }
@@ -637,6 +637,8 @@ try {
         const ok = captured.length > 0
           && captured.includes('tool-breakdown')
           && captured.includes('send_message')
+          && captured.includes('person_memory_lookup')
+          && captured.includes('查人物记忆')
           && captured.includes('联网搜索')
           && captured.includes('some_unknown_tool');
         ok ? pass++ : fail++;

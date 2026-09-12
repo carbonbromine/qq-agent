@@ -132,6 +132,15 @@ export class IdentityPilotManager {
     return this.identityStore ? this.identityStore.listPeople(limit) : [];
   }
 
+  lookupPerson(userId, { chatKey } = {}) {
+    if (!this.identityStore || !identityPilotEnabled(this.config())) return null;
+    const source = String(chatKey || '');
+    const uin = String(userId ?? '').trim();
+    if (!sourceAllowed(source, uin, this.config())) return null;
+    if (!this.identityStore.hasSource(uin, source)) return null;
+    return this.identityStore.getPerson(uin, { chatKey: source });
+  }
+
   status() {
     const base = {
       enabled: identityPilotEnabled(this.config()),
