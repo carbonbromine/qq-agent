@@ -108,7 +108,8 @@ try {
   // 取出渲染函数并执行
   const sections = [
     'renderSettingsSection', 'renderApiSection', 'renderSearchSection',
-    'renderMemorySettingsSection', 'renderDailyMomentsSection',
+    'renderMemorySettingsSection', 'renderExperimentalSettingsSection',
+    'renderDailyMomentsSection',
     'renderQzoneInteractionSection', 'renderTimeControlSection',
     'renderPersonaSection', 'renderAllowSection',
     'renderChatSection', 'renderDesktopSection', 'renderOnebotSection',
@@ -213,6 +214,39 @@ try {
   } else {
     fail++;
     console.log('  FAIL  动态互动设置控件缺失或默认状态错误');
+  }
+  const experimentalHtml = ctx.renderExperimentalSettingsSection(cfg);
+  const experimentalOnHtml = ctx.renderExperimentalSettingsSection({
+    ...cfg,
+    identityPilot: { enabled: true }
+  });
+  if (
+    experimentalHtml.includes('id="cfg-identity-pilot-enabled"')
+    && experimentalHtml.includes('已关闭 · 当前系统行为不变')
+    && !/id="cfg-identity-pilot-enabled" checked/.test(experimentalHtml)
+    && /id="cfg-identity-pilot-enabled" checked/.test(experimentalOnHtml)
+    && experimentalOnHtml.includes('总开关已开启（阶段 1）')
+  ) {
+    pass++;
+    console.log('  OK    人物画像实验总开关默认关闭并可展示开启状态');
+  } else {
+    fail++;
+    console.log('  FAIL  人物画像实验总开关缺失或默认状态错误');
+  }
+  const pilotPatchFn = ctx.identityPilotSettingsPatch || sandbox.identityPilotSettingsPatch;
+  const pilotOnPatch = pilotPatchFn(cfg, true);
+  const pilotOffPatch = pilotPatchFn({ ...cfg, identityPilot: { enabled: true } }, false);
+  if (
+    pilotOnPatch.enabled === true
+    && pilotOffPatch.enabled === false
+    && Object.keys(pilotOnPatch).length === 1
+    && Object.keys(pilotOffPatch).length === 1
+  ) {
+    pass++;
+    console.log('  OK    实验总开关独立生成最小配置补丁');
+  } else {
+    fail++;
+    console.log('  FAIL  实验总开关保存补丁不正确');
   }
   const timeHtml = ctx.renderTimeControlSection({
     ...cfg, allow: { groups: ['123'], private: ['456'] }

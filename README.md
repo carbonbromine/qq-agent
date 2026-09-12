@@ -125,6 +125,10 @@ bash manage.sh backup /path/to/new-backup-dir
 - `qzone-interactions.json`：好友动态未读队列、评论回复和外部写入状态
 - `console-access.txt`：控制台地址和 Token，权限 `0600`
 
+“设置 -> 实验功能”中的“跨会话人物画像与好友关系”总开关默认关闭。
+当前阶段仅建立配置闸门；关闭时不注册额外工具、不修改模型提示词、不启动后台任务，
+也不会创建实验数据文件。
+
 每次 Agent 运行仍有独立的审计记录。`lifecycle` 模式会按 `threadId`
 持久化 provider transcript（包括工具轨迹和供应商返回的
 `reasoning_content`），并在下一批消息中按原顺序续接；结构化 handoff

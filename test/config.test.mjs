@@ -21,7 +21,12 @@ test('migrates legacy desktop and DSH keys into the Linux configuration', async 
     ui: { theme: '?' }
   }));
   process.env.QQ_AGENT_DATA_DIR = dir;
-  const { conversationConfigForChat, getConfig, updateConfig } = await import('../src/config.js');
+  const {
+    conversationConfigForChat,
+    getConfig,
+    identityPilotEnabled,
+    updateConfig
+  } = await import('../src/config.js');
   const config = getConfig();
   assert.deepEqual(config.onebot, {
     wsUrl: 'ws://127.0.0.1:13001', httpUrl: 'http://127.0.0.1:13000',
@@ -41,6 +46,8 @@ test('migrates legacy desktop and DSH keys into the Linux configuration', async 
   assert.equal(config.qzoneInteractions.enabled, false);
   assert.equal(config.qzoneInteractions.feedIntervalMinutes, 60);
   assert.equal(config.qzoneInteractions.replyIntervalMinutes, 5);
+  assert.equal(config.identityPilot.enabled, false);
+  assert.equal(identityPilotEnabled(config), false);
   assert.equal(config.wakeDelayMinMs, 8000);
   assert.equal(config.wakeDelayMaxMs, 12000);
   updateConfig({
@@ -52,6 +59,7 @@ test('migrates legacy desktop and DSH keys into the Linux configuration', async 
       replyIntervalMinutes: 10,
       maxBatchItems: 15
     },
+    identityPilot: { enabled: true },
     wakeDelayMinMs: 14000,
     wakeDelayMaxMs: 6000,
     conversation: {
@@ -75,6 +83,8 @@ test('migrates legacy desktop and DSH keys into the Linux configuration', async 
   assert.equal(saved.qzoneInteractions.feedIntervalMinutes, 90);
   assert.equal(saved.qzoneInteractions.replyIntervalMinutes, 10);
   assert.equal(saved.qzoneInteractions.maxBatchItems, 15);
+  assert.equal(saved.identityPilot.enabled, true);
+  assert.equal(identityPilotEnabled(), true);
   assert.equal(saved.wakeDelayMinMs, 6000);
   assert.equal(saved.wakeDelayMaxMs, 14000);
   assert.equal(saved.wakeDelayMs, 10000);
@@ -83,6 +93,10 @@ test('migrates legacy desktop and DSH keys into the Linux configuration', async 
   assert.equal(conversationConfigForChat('group:200').mode, 'legacy');
   assert.equal(conversationConfigForChat('group:300').mode, 'threaded');
   assert.equal(conversationConfigForChat('private:100').mode, 'threaded');
+  updateConfig({ identityPilot: { enabled: false } });
+  const disabled = JSON.parse(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'));
+  assert.equal(disabled.identityPilot.enabled, false);
+  assert.equal(identityPilotEnabled(), false);
   assert.throws(() => updateConfig({ conversation: { mode: 'invalid' } }), /conversation mode/);
   assert.throws(
     () => updateConfig({ conversation: { groupModes: { 100: 'invalid' } } }),

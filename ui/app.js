@@ -2976,6 +2976,7 @@ function renderSettingsSidebar() {
     ['api', '模型 API'],
     ['search', '搜索服务'],
     ['memory', '记忆'],
+    ['experiments', '实验功能'],
     ['moments', '每日动态'],
     ['qzone-interactions', '动态互动'],
     ['time-control', '时间控制'],
@@ -3018,6 +3019,7 @@ function renderSettingsSection(c) {
     api: () => renderApiSection(c),
     search: () => renderSearchSection(c),
     memory: () => renderMemorySettingsSection(c),
+    experiments: () => renderExperimentalSettingsSection(c),
     moments: () => renderDailyMomentsSection(c),
     'qzone-interactions': () => renderQzoneInteractionSection(c),
     'time-control': () => renderTimeControlSection(c),
@@ -3254,6 +3256,26 @@ function renderMemorySettingsSection(c) {
     </div>
     <div class="field"><label>整理冷却时间（毫秒）</label><input type="number" id="cfg-mem-interval" min="1800000" step="600000" value="${esc(mem.consolidateMinIntervalMs ?? 21600000)}" /></div>
     <div class="hint">条数超过阈值且距上次整理超过该冷却时间后，才会在运行结束后后台整理。默认 6 小时（21600000 毫秒）。</div>`;
+}
+
+function renderExperimentalSettingsSection(c) {
+  const enabled = c.identityPilot?.enabled === true;
+  return `
+    <section class="experimental-settings">
+      <h3 id="settings-experiments">实验功能</h3>
+      <div class="checkbox-row">
+        <input type="checkbox" id="cfg-identity-pilot-enabled" ${enabled ? 'checked' : ''} />
+        <label for="cfg-identity-pilot-enabled">跨会话人物画像与好友关系</label>
+        <span class="muted" id="identity-pilot-state">${enabled ? '总开关已开启（阶段 1）' : '已关闭 · 当前系统行为不变'}</span>
+      </div>
+    </section>`;
+}
+
+function identityPilotSettingsPatch(c, enabled) {
+  return {
+    ...(c.identityPilot || {}),
+    enabled: enabled === true
+  };
 }
 
 const TIME_RULE_LABELS = {
@@ -4080,6 +4102,27 @@ function bindSettingsEvents(c) {
       $('#cfg-save-result').textContent = `保存失败：${e.message}`;
     }
   });
+
+  if ((state.settingsSection || 'api') === 'experiments') {
+    const toggle = $('#cfg-identity-pilot-enabled');
+    const status = $('#identity-pilot-state');
+    toggle?.addEventListener('change', async () => {
+      const requested = toggle.checked;
+      toggle.disabled = true;
+      status.textContent = '保存中…';
+      try {
+        await saveConfig({ quiet: true });
+        status.textContent = requested
+          ? '总开关已开启（阶段 1）'
+          : '已关闭 · 当前系统行为不变';
+      } catch (error) {
+        toggle.checked = !requested;
+        status.textContent = `保存失败：${error.message}`;
+      } finally {
+        toggle.disabled = false;
+      }
+    });
+  }
 
   if ((state.settingsSection || 'api') === 'moments') {
     loadDailyMomentsStatus();
@@ -5431,6 +5474,13 @@ async function saveConfig({ quiet = false } = {}) {
       model: val('#cfg-mem-model', c.memory?.model || '').trim(),
       consolidateMinIntervalMs: Number(val('#cfg-mem-interval', c.memory?.consolidateMinIntervalMs ?? 21600000)) || 21600000
     };
+  }
+
+  if (sec === 'experiments') {
+    patch.identityPilot = identityPilotSettingsPatch(
+      c,
+      chk('#cfg-identity-pilot-enabled', c.identityPilot?.enabled === true)
+    );
   }
 
   if (sec === 'moments') {
