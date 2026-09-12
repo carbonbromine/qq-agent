@@ -55,6 +55,11 @@ export class StickerManager {
     return formatStickerList(synced.entries, query, limit);
   }
 
+  /** 只读查看当前本地快照，不触发 QQ 同步或刷新临时 URL。 */
+  peek(ref) {
+    return findSticker(this.entries, ref);
+  }
+
   async find(ref) {
     const synced = await this.sync(false);
     return findSticker(synced.entries, ref);

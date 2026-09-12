@@ -28,6 +28,11 @@ const state = {
   settingsSection: 'api',
   memoryView: 'events',
   currentMemoryChatKey: null,
+  assetKind: 'stickers',
+  assetQuery: '',
+  assetSlangStatus: '',
+  assetOverview: null,
+  assetDetail: null,
   groupMembers: [],
   groupMembersLoaded: false,
   // 记忆整理状态：按 chatKey 存，不依赖 DOM。
@@ -405,6 +410,7 @@ function switchTab(name) {
   if (name === 'sessions') loadSessions();
   if (name === 'chats') loadChats();
   if (name === 'memory') loadMemoryView();
+  if (name === 'assets') loadAssetObservatory();
   if (name === 'usage') loadUsageView({ force: true });
   if (name === 'settings') loadSettings();
 }
@@ -2021,6 +2027,219 @@ function openUsageBreakdown(dim, key) {
   overlay.querySelector('#ub-close').addEventListener('click', () => closeModelModal(overlay));
   overlay.querySelectorAll('#ub-tabs [data-by]').forEach((x) => x.classList.toggle('btn-primary', x.dataset.by === activeBy));
   load();
+}
+
+// ── AI 资产观测 ──
+const ASSET_KINDS = [
+  ['stickers', '表情包'],
+  ['slang', '黑话'],
+  ['identities', '人物'],
+  ['memory', '记忆']
+];
+
+function assetStateText(active, exists, activeText = '运行中') {
+  if (active) return activeText;
+  if (exists) return '已存储 · 未接入';
+  return '未接入';
+}
+
+function renderAssetSummary(overview) {
+  const stickers = overview.stickers || {};
+  const slang = overview.slang || {};
+  const identity = overview.identity || {};
+  const memory = overview.memory || {};
+  return `
+    <div class="asset-summary">
+      <button type="button" class="asset-summary-item" data-asset-kind="stickers">
+        <span>表情包</span><strong>${fmtTok(stickers.total)}</strong>
+        <small>${stickers.enabled ? `已备注 ${fmtTok(stickers.annotated)}` : '功能已关闭'}</small>
+      </button>
+      <button type="button" class="asset-summary-item" data-asset-kind="slang">
+        <span>黑话</span><strong>${fmtTok(slang.total)}</strong>
+        <small>${assetStateText(slang.active, slang.exists)}</small>
+      </button>
+      <button type="button" class="asset-summary-item" data-asset-kind="identities">
+        <span>统一人物</span><strong>${fmtTok(identity.people)}</strong>
+        <small>${identity.active ? '身份库运行中' : '实验开关关闭'}</small>
+      </button>
+      <button type="button" class="asset-summary-item" data-asset-kind="memory">
+        <span>会话印象</span><strong>${fmtTok(memory.impressions)}</strong>
+        <small>${fmtTok(memory.people)} 人 · ${fmtTok(memory.chats)} 个会话</small>
+      </button>
+    </div>`;
+}
+
+function renderStickerAssets(data) {
+  const entries = data?.entries || [];
+  if (!entries.length) {
+    return '<div class="empty-hint">当前表情包库为空</div>';
+  }
+  return `<div class="asset-sticker-grid">${entries.map((entry) => {
+    const title = entry.localNote || entry.desc || entry.id;
+    const tags = (entry.tags || []).map((tag) => `<span>${esc(tag)}</span>`).join('');
+    return `<article class="asset-sticker">
+      <div class="asset-sticker-media">
+        ${entry.hasImage
+          ? `<img loading="lazy" src="/api/assets/stickers/image?id=${encodeURIComponent(entry.id)}" alt="${esc(title)}" />`
+          : '<span class="muted">无图片</span>'}
+      </div>
+      <div class="asset-sticker-body">
+        <strong title="${esc(entry.id)}">${esc(title)}</strong>
+        ${entry.desc && entry.localNote ? `<span>${esc(entry.desc)}</span>` : ''}
+        ${tags ? `<div class="asset-tags">${tags}</div>` : ''}
+        <small>${entry.source === 'qq' ? 'QQ 收藏' : entry.source === 'ai' ? 'AI 收藏' : '手动'} · 使用 ${fmtTok(entry.useCount)} 次</small>
+      </div>
+    </article>`;
+  }).join('')}</div>`;
+}
+
+function renderSlangAssets(data) {
+  if (!data?.exists) {
+    return '<div class="empty-hint">当前 Agent 没有黑话库</div>';
+  }
+  const entries = data.entries || [];
+  if (!entries.length) return '<div class="empty-hint">黑话库为空</div>';
+  const statusText = { candidate: '候选', confirmed: '已确认', rejected: '已拒绝' };
+  return `<div class="asset-table-wrap"><table class="asset-table">
+    <thead><tr><th>词条</th><th>含义</th><th>状态</th><th>出现</th><th>证据</th></tr></thead>
+    <tbody>${entries.map((entry) => `<tr>
+      <td><strong>${esc(entry.content)}</strong>${entry.risk ? `<small>${esc(entry.risk)}</small>` : ''}</td>
+      <td>${esc(entry.meaning || '-')}</td>
+      <td>${esc(statusText[entry.status] || entry.status)}</td>
+      <td class="r">${fmtTok(entry.count)}</td>
+      <td class="r">${fmtTok(entry.evidenceCount)}</td>
+    </tr>`).join('')}</tbody>
+  </table></div>`;
+}
+
+function renderIdentityAssets(data, overview) {
+  if (!overview?.identity?.active) {
+    return '<div class="empty-hint">统一身份库当前关闭</div>';
+  }
+  const people = data?.people || [];
+  if (!people.length) return '<div class="empty-hint">统一身份库为空</div>';
+  return `<div class="asset-table-wrap"><table class="asset-table">
+    <thead><tr><th>QQ</th><th>首选名称</th><th>别名</th><th>会话</th><th>消息</th><th>好友</th><th>旧印象</th></tr></thead>
+    <tbody>${people.map((person) => {
+      const aliases = [...new Set((person.aliases || []).map((item) => item.alias).filter(Boolean))];
+      return `<tr>
+        <td><code>${esc(person.userId)}</code></td>
+        <td>${esc(person.primaryName || '-')}</td>
+        <td title="${esc(aliases.join(' / '))}">${esc(aliases.slice(0, 3).join(' / ') || '-')}</td>
+        <td class="r">${fmtTok(person.chatCount)}</td>
+        <td class="r">${fmtTok(person.messageCount)}</td>
+        <td>${person.isFriend ? '是' : '否'}</td>
+        <td class="r">${fmtTok(person.legacyMemoryCount)}</td>
+      </tr>`;
+    }).join('')}</tbody>
+  </table></div>`;
+}
+
+function renderMemoryAssets(data) {
+  const items = data?.items || [];
+  if (!items.length) return '<div class="empty-hint">当前没有会话记忆</div>';
+  return `<div class="asset-table-wrap"><table class="asset-table">
+    <thead><tr><th>会话</th><th>人物</th><th>印象</th><th>交接</th><th>最近更新</th></tr></thead>
+    <tbody>${items.map((item) => `<tr>
+      <td>${esc(formatChatTitle(item.chatKey, chatNameOf(item.chatKey)))}</td>
+      <td class="r">${fmtTok(item.people)}</td>
+      <td class="r">${fmtTok(item.impressions)}</td>
+      <td>${item.hasHandoff ? '有' : '无'}</td>
+      <td>${item.updatedAt ? esc(fmtTime(item.updatedAt)) : '-'}</td>
+    </tr>`).join('')}</tbody>
+  </table></div>`;
+}
+
+function renderAssetObservatory() {
+  const box = $('#asset-page');
+  if (!box) return;
+  const overview = state.assetOverview || {};
+  const kind = state.assetKind || 'stickers';
+  const searchable = kind === 'stickers' || kind === 'slang';
+  const slangStatus = state.assetSlangStatus || '';
+  let content = '<div class="empty-hint">加载中…</div>';
+  if (state.assetDetail) {
+    if (kind === 'stickers') content = renderStickerAssets(state.assetDetail);
+    if (kind === 'slang') content = renderSlangAssets(state.assetDetail);
+    if (kind === 'identities') content = renderIdentityAssets(state.assetDetail, overview);
+    if (kind === 'memory') content = renderMemoryAssets(state.assetDetail);
+  }
+  box.innerHTML = `
+    <div class="asset-head">
+      <div><h2>AI 资产观测</h2><span class="muted">更新于 ${overview.generatedAt ? esc(fmtTime(overview.generatedAt)) : '-'}</span></div>
+      <button type="button" class="icon-btn" id="asset-refresh" title="刷新当前资产" aria-label="刷新当前资产">↻</button>
+    </div>
+    ${renderAssetSummary(overview)}
+    <div class="asset-toolbar">
+      <div class="asset-kinds">
+        ${ASSET_KINDS.map(([value, label]) =>
+          `<button type="button" class="${kind === value ? 'active' : ''}" data-asset-kind="${value}">${label}</button>`
+        ).join('')}
+      </div>
+      ${searchable ? `<div class="asset-search">
+        <input type="search" id="asset-query" value="${esc(state.assetQuery)}" placeholder="搜索" />
+        ${kind === 'slang' ? `<select id="asset-slang-status">
+          <option value="" ${slangStatus ? '' : 'selected'}>全部状态</option>
+          <option value="confirmed" ${slangStatus === 'confirmed' ? 'selected' : ''}>已确认</option>
+          <option value="candidate" ${slangStatus === 'candidate' ? 'selected' : ''}>候选</option>
+          <option value="rejected" ${slangStatus === 'rejected' ? 'selected' : ''}>已拒绝</option>
+        </select>` : ''}
+        <button type="button" class="btn btn-small" id="asset-search-btn">搜索</button>
+      </div>` : ''}
+    </div>
+    <div id="asset-content">${content}</div>`;
+
+  $$('#asset-page [data-asset-kind]').forEach((button) => {
+    button.addEventListener('click', () => {
+      state.assetKind = button.dataset.assetKind;
+      state.assetQuery = '';
+      state.assetSlangStatus = '';
+      state.assetDetail = null;
+      loadAssetObservatory();
+    });
+  });
+  $('#asset-refresh')?.addEventListener('click', () =>
+    loadAssetObservatory({ refreshStickers: kind === 'stickers' }));
+  const search = () => {
+    state.assetQuery = $('#asset-query')?.value || '';
+    state.assetSlangStatus = $('#asset-slang-status')?.value || '';
+    loadAssetObservatory();
+  };
+  $('#asset-search-btn')?.addEventListener('click', search);
+  $('#asset-query')?.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') search();
+  });
+  $('#asset-slang-status')?.addEventListener('change', search);
+}
+
+async function loadAssetObservatory({ refreshStickers = false } = {}) {
+  const box = $('#asset-page');
+  if (!box) return;
+  if (!state.assetOverview) box.innerHTML = '<div class="empty-hint">加载中…</div>';
+  try {
+    const overview = await api('/api/assets/overview');
+    if (state.tab !== 'assets') return;
+    state.assetOverview = overview;
+    const query = encodeURIComponent(state.assetQuery || '');
+    if (state.assetKind === 'stickers') {
+      state.assetDetail = await api(
+        `/api/assets/stickers?limit=200&query=${query}${refreshStickers ? '&refresh=1' : ''}`
+      );
+    } else if (state.assetKind === 'slang') {
+      state.assetDetail = await api(
+        `/api/assets/slang?limit=500&query=${query}&status=${encodeURIComponent(state.assetSlangStatus || '')}`
+      );
+    } else if (state.assetKind === 'identities') {
+      state.assetDetail = overview.identity?.active
+        ? await api('/api/identity-pilot/people?limit=500')
+        : { people: [] };
+    } else {
+      state.assetDetail = await api('/api/assets/memory');
+    }
+    if (state.tab === 'assets') renderAssetObservatory();
+  } catch (error) {
+    box.innerHTML = `<div class="empty-hint">资产读取失败：${esc(error.message)}</div>`;
+  }
 }
 
 // ── 记忆视图 ──

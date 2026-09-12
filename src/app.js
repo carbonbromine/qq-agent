@@ -26,6 +26,8 @@ import { assertCanSend } from './access.js';
 import { isTimeActive } from './time-gate.js';
 import { timeControlState, TIME_ZONE } from './time-control.js';
 import { IdentityPilotManager, inactiveIdentityPilotStatus } from './identity-pilot.js';
+import { AssetObserver } from './asset-observer.js';
+import { safeFetchBinary } from './safe-fetch.js';
 
 // 全局 fetch（undici）默认连接建立超时只有 10 秒，openrouter.ai 这类海外端点
 // 握手慢时会直接报 "Connect Timeout Error ... timeout: 10000ms"（注意这不是
@@ -186,6 +188,10 @@ export function createApp({ log = console.log } = {}) {
       throw error;
     }
   }
+  const assetObserver = new AssetObserver({
+    stickers,
+    getIdentityStatus: identityPilotStatus
+  });
   let timeControlTimer = null;
   function refreshTimeControl() {
     clearTimeout(timeControlTimer);
@@ -1189,6 +1195,57 @@ export function createApp({ log = console.log } = {}) {
         });
       }
 
+      if (pathname === '/api/assets/overview' && method === 'GET') {
+        return json(res, 200, assetObserver.overview());
+      }
+
+      if (pathname === '/api/assets/stickers' && method === 'GET') {
+        const result = await assetObserver.listStickers({
+          query: url.searchParams.get('query') || '',
+          offset: url.searchParams.get('offset') || 0,
+          limit: url.searchParams.get('limit') || 100,
+          refresh: url.searchParams.get('refresh') === '1'
+        });
+        return json(res, 200, result);
+      }
+
+      if (pathname === '/api/assets/stickers/image' && method === 'GET') {
+        const id = String(url.searchParams.get('id') || '').trim();
+        if (!id) return json(res, 400, { error: '缺少表情 ID' });
+        const sticker = stickers.peek(id);
+        if (!sticker?.url) return json(res, 404, { error: '表情图片不存在' });
+        try {
+          const image = await safeFetchBinary(sticker.url, 8 * 1024 * 1024);
+          const contentType = String(image.contentType || '').split(';')[0].trim().toLowerCase();
+          if (!contentType.startsWith('image/')) {
+            return json(res, 502, { error: '表情资源不是图片' });
+          }
+          res.writeHead(200, {
+            'content-type': contentType,
+            'content-length': image.buffer.length,
+            'cache-control': 'private, max-age=60',
+            'x-content-type-options': 'nosniff'
+          });
+          res.end(image.buffer);
+          return;
+        } catch (error) {
+          return json(res, 502, { error: `表情图片读取失败：${String(error?.message ?? error)}` });
+        }
+      }
+
+      if (pathname === '/api/assets/slang' && method === 'GET') {
+        return json(res, 200, assetObserver.listSlang({
+          query: url.searchParams.get('query') || '',
+          status: url.searchParams.get('status') || '',
+          offset: url.searchParams.get('offset') || 0,
+          limit: url.searchParams.get('limit') || 200
+        }));
+      }
+
+      if (pathname === '/api/assets/memory' && method === 'GET') {
+        return json(res, 200, assetObserver.memorySummary());
+      }
+
       if (pathname === '/api/qzone-interactions/run' && method === 'POST') {
         const body = await readBody(req);
         if (body.confirm !== true) {
@@ -1693,6 +1750,7 @@ export function createApp({ log = console.log } = {}) {
     orchestrator,
     dailyMoments,
     qzoneInteractions,
+    assetObserver,
     get identityPilot() { return identityPilot; },
     identityPilotStatus,
     start,

@@ -133,6 +133,10 @@ bash manage.sh backup /path/to/new-backup-dir
 统一身份自动注入模型，但启用后会开放受限的 `person_memory_lookup` 查询工具。
 实现边界见[统一身份试点](docs/IDENTITY_PILOT.md)。
 
+“观测”页集中展示当前表情包、黑话状态、统一人物和会话记忆资产。页面默认只读本地
+快照；表情图片通过控制台鉴权的同源代理加载，临时 QQ 图片 URL 不会返回给浏览器。
+详细口径见[资产观测](docs/ASSET_OBSERVABILITY.md)。
+
 每次 Agent 运行仍有独立的审计记录。`lifecycle` 模式会按 `threadId`
 持久化 provider transcript（包括工具轨迹和供应商返回的
 `reasoning_content`），并在下一批消息中按原顺序续接；结构化 handoff

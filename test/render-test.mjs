@@ -10,6 +10,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const SRC = path.join(ROOT, 'ui', 'app.js');
 const code = fs.readFileSync(SRC, 'utf8');
+const indexHtml = fs.readFileSync(path.join(ROOT, 'ui', 'index.html'), 'utf8');
 
 // ── 极简 DOM 桩 ──
 function makeEl(id = '', cls = '') {
@@ -113,7 +114,9 @@ try {
     'renderQzoneInteractionSection', 'renderTimeControlSection',
     'renderPersonaSection', 'renderAllowSection',
     'renderChatSection', 'renderDesktopSection', 'renderOnebotSection',
-    'renderPersonaPicker', 'renderHealthCard'
+    'renderPersonaPicker', 'renderHealthCard',
+    'renderAssetSummary', 'renderStickerAssets', 'renderSlangAssets',
+    'renderIdentityAssets', 'renderMemoryAssets'
   ];
 
   // 直接用后端的 DEFAULT_CONFIG 做桩 —— 不要手敲字段名，
@@ -251,6 +254,41 @@ try {
   } else {
     fail++;
     console.log('  FAIL  实验总开关保存补丁不正确');
+  }
+  const assetSummaryHtml = ctx.renderAssetSummary({
+    generatedAt: Date.now(),
+    stickers: { enabled: true, total: 3, annotated: 2, used: 1 },
+    slang: { exists: true, active: false, total: 4 },
+    identity: { enabled: true, active: true, people: 5 },
+    memory: { chats: 2, people: 3, impressions: 6 }
+  });
+  const stickerAssetHtml = ctx.renderStickerAssets({
+    entries: [{
+      id: 'sticker-1', desc: '开心', localNote: '庆祝', tags: ['开心'],
+      source: 'qq', useCount: 2, hasImage: true
+    }]
+  });
+  const slangAssetHtml = ctx.renderSlangAssets({
+    exists: true,
+    entries: [{
+      content: '开香槟', meaning: '提前庆祝', status: 'confirmed',
+      risk: '', count: 3, evidenceCount: 1
+    }]
+  });
+  const assetUiOk =
+    indexHtml.includes('data-tab="assets"')
+    && indexHtml.includes('id="view-assets"')
+    && assetSummaryHtml.includes('统一人物')
+    && stickerAssetHtml.includes('/api/assets/stickers/image?id=sticker-1')
+    && !stickerAssetHtml.includes('https://')
+    && slangAssetHtml.includes('开香槟')
+    && slangAssetHtml.includes('已确认');
+  if (assetUiOk) {
+    pass++;
+    console.log('  OK    AI 资产观测入口、概览、表情和黑话视图完整');
+  } else {
+    fail++;
+    console.log('  FAIL  AI 资产观测视图缺失或泄露了图片源 URL');
   }
   const timeHtml = ctx.renderTimeControlSection({
     ...cfg, allow: { groups: ['123'], private: ['456'] }

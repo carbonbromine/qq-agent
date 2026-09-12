@@ -37,6 +37,10 @@ test('refreshes a collected QQ image URL from its source message before sending'
     }
   });
 
+  const cached = manager.peek('collected_1701183958');
+  assert.equal(cached.id, 'collected_1701183958');
+  assert.deepEqual(calls, [], '只读观测本地快照不应触发 OneBot');
+
   const sticker = await manager.findForSend('collected_1701183958');
 
   assert.deepEqual(calls, [1701183958]);

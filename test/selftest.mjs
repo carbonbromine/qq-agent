@@ -774,6 +774,29 @@ async function main() {
   assert.equal(identityOff.active, false);
   pass('统一 QQ 身份库：默认无副作用、动态启用索引、关闭停止运行');
 
+  const assetOverview = await (await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/assets/overview`
+  )).json();
+  assert.ok(assetOverview.stickers.total >= 1, '资产观测应统计当前表情包');
+  assert.equal(assetOverview.slang.active, false, '未接入的黑话库不得标记为运行中');
+  assert.ok(assetOverview.memory.chats >= 1, '资产观测应统计会话记忆');
+  const stickerAssets = await (await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/assets/stickers?limit=20`
+  )).json();
+  assert.ok(stickerAssets.entries.length >= 1);
+  assert.ok(stickerAssets.entries.every((entry) => !Object.hasOwn(entry, 'url')),
+    '表情观测 API 不暴露临时图片 URL');
+  const slangAssets = await (await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/assets/slang`
+  )).json();
+  assert.equal(slangAssets.total, 0);
+  assert.equal(slangAssets.exists, false);
+  const memoryAssets = await (await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/assets/memory`
+  )).json();
+  assert.ok(Array.isArray(memoryAssets.items));
+  pass('AI 资产观测：表情包、黑话状态、人物和记忆接口');
+
   const dailyMomentsStatus = await (await fetch(
     `http://127.0.0.1:${cfg.server.port}/api/daily-moments/status`
   )).json();

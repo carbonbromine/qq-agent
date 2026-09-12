@@ -991,6 +991,14 @@ body {
   #view-settings .settings-pane {
     padding: 16px; min-width: 0; flex: 0 0 auto; overflow: visible;
   }
+  .asset-pane { padding: 16px; }
+  .asset-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .asset-toolbar { align-items: stretch; flex-direction: column; }
+  .asset-kinds { overflow-x: auto; }
+  .asset-kinds button { flex: 0 0 auto; }
+  .asset-search input { width: 100%; min-width: 0; }
+  .asset-sticker-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .asset-table-wrap { max-height: none; }
   .time-control-settings .field { min-width: 0; }
 }
 .save-bar { position: sticky; bottom: 0; background: var(--bg); padding: 12px 0; border-top: 1px solid var(--border); display: flex; gap: 10px; align-items: center; }
@@ -1379,6 +1387,137 @@ body {
 
 /* ── 用量/成本看板 ── */
 .usage-pane { flex: 1; overflow-y: auto; padding: 22px 26px 40px; }
+
+/* ── AI 资产观测 ── */
+.asset-pane {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 22px 26px 40px;
+}
+.asset-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.asset-head h2 { margin: 0 0 3px; font-size: 18px; }
+.asset-head > div > span { font-size: 11px; }
+.asset-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+.asset-summary-item {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-2);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.asset-summary-item:hover { border-color: var(--accent); background: var(--bg-3); }
+.asset-summary-item span,
+.asset-summary-item small { display: block; color: var(--muted); font-size: 10px; }
+.asset-summary-item strong { display: block; margin: 3px 0; font-size: 20px; }
+.asset-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 16px 0 12px;
+}
+.asset-kinds {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+}
+.asset-kinds button {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  padding: 6px 11px;
+  cursor: pointer;
+}
+.asset-kinds button.active { background: var(--active); color: var(--accent); }
+.asset-search { display: flex; gap: 6px; min-width: 0; }
+.asset-search input { width: min(240px, 32vw); }
+.asset-sticker-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
+}
+.asset-sticker {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--bg-2);
+}
+.asset-sticker-media {
+  display: grid;
+  place-items: center;
+  aspect-ratio: 1;
+  overflow: hidden;
+  background: var(--bg-3);
+}
+.asset-sticker-media img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.asset-sticker-body { padding: 8px; }
+.asset-sticker-body strong,
+.asset-sticker-body > span,
+.asset-sticker-body small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+.asset-sticker-body strong { font-size: 12px; }
+.asset-sticker-body > span { margin-top: 3px; color: var(--muted); font-size: 10px; }
+.asset-sticker-body small { margin-top: 6px; color: var(--faint); font-size: 10px; }
+.asset-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.asset-tags span {
+  padding: 2px 5px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 9px;
+}
+.asset-table-wrap {
+  max-height: calc(100vh - 330px);
+  overflow: auto;
+  border: 1px solid var(--border);
+}
+.asset-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.asset-table th,
+.asset-table td {
+  padding: 7px 9px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+.asset-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg-3);
+  color: var(--muted);
+  font-weight: 500;
+}
+.asset-table td small { display: block; margin-top: 3px; color: var(--faint); }
+.asset-table .r { text-align: right; }
+.asset-table tr:last-child td { border-bottom: 0; }
+
 .usage-wrap { max-width: 940px; margin: 0 auto; }
 .usage-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; gap: 12px; flex-wrap: wrap; }
 .usage-head h2 { font-size: 17px; font-weight: 600; }
