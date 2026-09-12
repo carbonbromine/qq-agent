@@ -270,6 +270,7 @@ export function inactiveIdentityPilotStatus({
   dataDir = DATA_DIR,
   error = ''
 } = {}) {
+  const proposalConfig = getConfig().identityPilot?.friendProposal || {};
   return {
     enabled,
     active: false,
@@ -278,10 +279,12 @@ export function inactiveIdentityPilotStatus({
     friendSyncError: '',
     error: String(error || ''),
     friendProposal: {
-      enabled: false,
-      ownerConfigured: false,
+      enabled: enabled && proposalConfig.enabled === true,
+      ownerConfigured: /^\d{5,15}$/.test(String(proposalConfig.ownerUin || '').trim()),
       protocolDispatchSupported: false,
-      protocolNote: '统一身份库未运行',
+      protocolNote: enabled
+        ? '统一身份库未运行'
+        : '统一身份库总开关已关闭',
       counts: { total: 0, pending: 0, approvedManual: 0, accepted: 0, rejected: 0 }
     },
     people: 0,
