@@ -1,4 +1,5 @@
 import { getConfig } from './config.js';
+import { isTimeActive } from './time-gate.js';
 
 export function chatAllowed(chatKey, cfg = getConfig()) {
   const [kind, id] = String(chatKey).split(':');
@@ -11,10 +12,12 @@ export function chatAllowed(chatKey, cfg = getConfig()) {
 
 export function canRun(chatKey) {
   const cfg = getConfig();
-  return cfg.runtime?.mode === 'active' && !cfg.runtime?.paused && chatAllowed(chatKey, cfg);
+  return cfg.runtime?.mode === 'active' && !cfg.runtime?.paused
+    && chatAllowed(chatKey, cfg) && isTimeActive(chatKey);
 }
 
 export function assertCanSend(chatKey, signal) {
   signal?.throwIfAborted();
+  if (!isTimeActive(chatKey)) throw new Error('非活跃时间，禁止发送消息');
   if (!canRun(chatKey)) throw new Error('Send blocked: observe/paused mode or chat not allowed');
 }

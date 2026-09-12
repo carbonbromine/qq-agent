@@ -70,6 +70,8 @@ test('summarizes once, publishes an optional refreshed image, and prevents dupli
   ];
   let completionCalls = 0;
   const searches = [];
+  const suppressionEvents = [];
+  let firstSystemPrompt = '';
   const manager = new DailyMomentsManager({
     store: {
       listChats: () => ['group:1'],
@@ -98,7 +100,8 @@ test('summarizes once, publishes an optional refreshed image, and prevents dupli
       }
     },
     resolveChatName: async () => '测试群',
-    complete: async () => {
+    complete: async ({ messages }) => {
+      if (!firstSystemPrompt) firstSystemPrompt = String(messages[0]?.content || '');
       const step = toolSteps[completionCalls++];
       return {
         model: 'test-model',
@@ -131,6 +134,7 @@ test('summarizes once, publishes an optional refreshed image, and prevents dupli
       ]),
       contentType: 'image/png'
     }),
+    setProactiveSuppressed: (suppressed) => suppressionEvents.push(suppressed),
     now: () => now,
     random: () => 0
   });
@@ -141,6 +145,8 @@ test('summarizes once, publishes an optional refreshed image, and prevents dupli
   assert.equal(preview.record.groupSummaries[0].summary, '讨论了一个新话题');
   assert.deepEqual(searches, ['测试研究问题']);
   assert.equal(preview.record.researchCalls, 1);
+  assert.ok(firstSystemPrompt.includes(cfg.persona.roleText));
+  assert.match(firstSystemPrompt, /不得向任何群聊或私聊发送消息/);
 
   const result = await manager.runNow({ publish: true });
   assert.equal(result.record.status, 'published');
@@ -158,6 +164,7 @@ test('summarizes once, publishes an optional refreshed image, and prevents dupli
   assert.equal(duplicate.alreadyAttempted, true);
   assert.equal(published.length, 1);
   assert.equal(completionCalls, 4);
+  assert.deepEqual(suppressionEvents, [true, false, true, false, true, false]);
 
   const saved = JSON.parse(fs.readFileSync(path.join(root, 'daily-moments.json'), 'utf8'));
   assert.equal(saved.records[0].status, 'published');

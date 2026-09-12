@@ -607,7 +607,13 @@ export function buildUserPrompt(ctx) {
 
   // 最新消息始终位于动态输入末端，兼顾注意力与前缀缓存。
   const triggerBlock = buildTriggerBlock(ctx.triggerEntries, ctx);
-  parts.push(`【本次唤醒】以下是你还没看过的最新消息（每条前的 #数字 是消息 id，引用回复/看图时用它）：\n${triggerBlock}`);
+  if (ctx.manual) {
+    parts.push(triggerBlock
+      ? `【本次唤醒】管理员从控制台主动要求你立即处理以下未读消息，不受普通响应档位限制。请结合上下文自行决定是否发言：\n${triggerBlock}`
+      : '【本次唤醒】管理员从控制台主动唤醒了你。当前没有未读消息，请查看最近聊天状态，自行决定是否需要发言；不需要时可以直接结束。');
+  } else {
+    parts.push(`【本次唤醒】以下是你还没看过的最新消息（每条前的 #数字 是消息 id，引用回复/看图时用它）：\n${triggerBlock}`);
+  }
 
   return parts.join('\n\n');
 }

@@ -6,12 +6,51 @@ import path from 'node:path';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-orchestrator-'));
 process.env.QQ_AGENT_DATA_DIR = root;
-const { Orchestrator } = await import('../src/orchestrator.js');
+const {
+  Orchestrator,
+  estimateNextPromptTokens,
+  randomWakeDelay
+} = await import('../src/orchestrator.js');
 const { ChatStore } = await import('../src/store.js');
 const { SessionRegistry } = await import('../src/sessions.js');
 const { setRuntimeConfig, DEFAULT_CONFIG } = await import('../src/config.js');
 
 describe('Orchestrator', () => {
+  it('draws the debounce delay inside the configured range', () => {
+    const cfg = { wakeDelayMinMs: 8000, wakeDelayMaxMs: 12000, wakeDelayMs: 10000 };
+    assert.equal(randomWakeDelay(cfg, () => 0), 8000);
+    assert.equal(randomWakeDelay(cfg, () => 0.5), 10000);
+    assert.equal(randomWakeDelay(cfg, () => 1), 12000);
+    assert.equal(randomWakeDelay({ wakeDelayMinMs: 12000, wakeDelayMaxMs: 8000 }, () => 0), 8000);
+  });
+
+  it('omits inline image bytes from next-round Token estimation', () => {
+    const image = `data:image/png;base64,${'A'.repeat(12 * 1024 * 1024)}`;
+    const messages = [
+      { role: 'system', content: 'system' },
+      { role: 'user', content: 'look at this image' },
+      {
+        role: 'tool',
+        tool_call_id: 'image',
+        content: [
+          { type: 'text', text: 'image result' },
+          { type: 'image_url', image_url: { url: image } }
+        ]
+      }
+    ];
+    const result = estimateNextPromptTokens({
+      messages,
+      tools: [{ type: 'function', function: { name: 'finish', parameters: {} } }],
+      previousPromptTokens: 12360,
+      previousEstimateChars: 23400,
+      previousImageCount: 0
+    });
+    assert.ok(JSON.stringify({ messages }).length > 12 * 1024 * 1024);
+    assert.ok(result.estimateChars < 2000);
+    assert.equal(result.imageCount, 1);
+    assert.ok(result.estimatedPromptTokens < 10000);
+  });
+
   function fixture(t) {
     const cfg = structuredClone(DEFAULT_CONFIG);
     cfg.runtime.mode = 'active';
@@ -21,6 +60,8 @@ describe('Orchestrator', () => {
     cfg.sticker.enabled = false;
     cfg.memory.consolidateEnabled = false;
     cfg.wakeDelayMs = 30;
+    cfg.wakeDelayMinMs = 30;
+    cfg.wakeDelayMaxMs = 30;
     cfg.maxBatchWaitMs = 120;
     cfg.drainDelayMs = 200;
     setRuntimeConfig(cfg);
@@ -126,6 +167,65 @@ describe('Orchestrator', () => {
       t.after(() => clearInterval(timer));
     });
     assert.ok(elapsed >= 100 && elapsed < 300, `elapsed=${elapsed}`);
+  });
+
+  it('manual wake bypasses trigger rules and can run from read archive context', async (t) => {
+    const { cfg, runner, store, sessions, append } = fixture(t);
+    cfg.store.contextTier = 1;
+    const prompts = [];
+    globalThis.fetch = async (_url, options) => {
+      prompts.push(JSON.parse(options.body).messages.at(-1)?.content || '');
+      return Response.json({
+        choices: [{ message: { content: '无需发言' } }],
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 10,
+          total_tokens: 110
+        }
+      });
+    };
+
+    append(1, '没有艾特机器人的普通消息');
+    const unreadWake = runner.requestManualWake('group:1');
+    assert.deepEqual(unreadWake, { ok: true, mode: 'unread' });
+    await Promise.allSettled([...runner.runTasks]);
+    assert.equal(prompts.length, 1);
+    assert.equal(store.findByMid('group:1', 1).state, 'acked');
+    assert.match(prompts[0], /管理员从控制台主动要求你立即处理以下未读消息/);
+    assert.match(prompts[0], /没有艾特机器人的普通消息/);
+
+    const contextWake = runner.requestManualWake('group:1');
+    assert.deepEqual(contextWake, { ok: true, mode: 'context' });
+    await Promise.allSettled([...runner.runTasks]);
+    assert.equal(prompts.length, 2);
+    assert.match(prompts[1], /当前没有未读消息/);
+    assert.match(prompts[1], /没有艾特机器人的普通消息/);
+    assert.equal(sessions.listSummaries(1)[0].trigger, '控制台主动唤醒');
+  });
+
+  it('attaches a waiting lifecycle batch to its existing thread immediately', async (t) => {
+    const { cfg, runner, store, sessions, append } = fixture(t);
+    cfg.conversation.mode = 'lifecycle';
+    cfg.wakeDelayMinMs = 5000;
+    cfg.wakeDelayMaxMs = 5000;
+    const thread = store.updateLifecycleThread('group:1', {
+      disposition: 'active',
+      participantIds: ['42'],
+      activeIdleMs: 1200000,
+      hardLifetimeMs: 1800000,
+      rolloverArmedMs: 600000,
+      now: Date.now()
+    });
+    append(1, '继续刚才的话题', '42');
+
+    runner.scheduleWake('group:1');
+
+    const waiting = sessions.listSummaries().find((session) => session.status === 'waiting');
+    assert.ok(waiting);
+    assert.equal(waiting.conversationMode, 'lifecycle');
+    assert.equal(waiting.threadId, thread.threadId);
+    assert.equal(waiting.threadState, 'active');
+    assert.equal(waiting.lifecycleContinuation, true);
   });
 
   it('cancels a running request and releases the batch for a later attempt', async (t) => {
@@ -474,6 +574,100 @@ describe('Orchestrator', () => {
       requests[2].messages,
       'Session 应保存当前轮发送给模型的完整 messages'
     );
+  });
+
+  it('rolls a lifecycle generation before the next request when actual input reaches 32K', async (t) => {
+    const { cfg, runner, store, sessions, append } = fixture(t);
+    cfg.conversation.mode = 'lifecycle';
+    cfg.conversation.lifecycleRolloverInputTokens = 32000;
+    let calls = 0;
+    const requests = [];
+    globalThis.fetch = async (_url, options) => {
+      calls += 1;
+      requests.push(JSON.parse(options.body));
+      return Response.json({
+        choices: [{
+          message: {
+            tool_calls: [{
+              id: `finish-${calls}`,
+              type: 'function',
+              function: {
+                name: 'finish',
+                arguments: JSON.stringify({
+                  summary: `checkpoint-${calls}`,
+                  threadDisposition: 'active'
+                })
+              }
+            }]
+          }
+        }],
+        usage: {
+          prompt_tokens: calls === 1 ? 32000 : 15000,
+          completion_tokens: 100,
+          total_tokens: calls === 1 ? 32100 : 15100
+        }
+      });
+    };
+
+    append(1, '@bot start');
+    await runner.wake('group:1');
+    const firstThread = store.getConversationThread('group:1');
+    assert.equal(firstThread.promptTokens, 32000);
+    assert.ok(store.getThreadTurns(firstThread.threadId).length > 0);
+
+    append(2, 'continue');
+    await runner.wake('group:1');
+
+    const secondThread = store.getConversationThread('group:1');
+    assert.notEqual(secondThread.threadId, firstThread.threadId);
+    assert.equal(secondThread.promptTokens, 15000);
+    assert.equal(requests[1].messages.length, 2, '换代后的请求不应携带旧 provider transcript');
+    assert.match(requests[1].messages[1].content, /上次生命周期检查点/);
+    const latest = sessions.get(sessions.listSummaries(1)[0].id);
+    assert.equal(latest.contextRollover.reason, 'input-token-budget');
+    assert.equal(latest.contextRollover.promptTokens, 32000);
+    assert.equal(latest.lifecycleContinuation, false);
+  });
+
+  it('stops safely before a projected 160K run without holding confirmed sends', async (t) => {
+    const { cfg, runner, store, sessions, append } = fixture(t);
+    cfg.conversation.mode = 'lifecycle';
+    cfg.api.maxRunTokens = 160000;
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls += 1;
+      const tool = calls === 1
+        ? { id: 'members', type: 'function', function: { name: 'get_active_members', arguments: '{}' } }
+        : {
+            id: `send-${calls}`,
+            type: 'function',
+            function: {
+              name: 'send_message',
+              arguments: JSON.stringify({ messages: [`reply-${calls}`] })
+            }
+          };
+      const usage = [
+        { prompt_tokens: 40879, completion_tokens: 304, total_tokens: 41183 },
+        { prompt_tokens: 41598, completion_tokens: 104, total_tokens: 41702 },
+        { prompt_tokens: 41757, completion_tokens: 69, total_tokens: 41826 }
+      ][calls - 1];
+      if (!usage) assert.fail('预算保护前应停止第四次模型调用');
+      return Response.json({ choices: [{ message: { tool_calls: [tool] } }], usage });
+    };
+
+    append(1, '@bot reply');
+    await runner.wake('group:1');
+
+    assert.equal(calls, 3);
+    assert.equal(store.findByMid('group:1', 1).state, 'acked');
+    assert.equal(store.getChatMeta('group:1').held, 0);
+    const latest = sessions.get(sessions.listSummaries(1)[0].id);
+    assert.equal(latest.status, 'done');
+    assert.equal(latest.sent.length, 2);
+    assert.equal(latest.budgetStopped, true);
+    assert.equal(latest.budgetStopReason, 'next-call-budget');
+    assert.equal(latest.usage.totalTokens, 124711);
+    assert.equal(latest.error, null);
   });
 
   it('consumes rollover-armed state with the next arbitrary message', async (t) => {

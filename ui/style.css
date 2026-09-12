@@ -303,8 +303,8 @@ body {
 }
 
 /* ── 布局 ── */
-#layout { flex: 1; display: flex; min-height: 0; }
-.view { display: none; flex: 1; min-height: 0; }
+#layout { flex: 1; display: flex; min-width: 0; min-height: 0; overflow: hidden; }
+.view { display: none; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
 .view.active { display: flex; }
 
 .list-pane {
@@ -326,7 +326,7 @@ body {
   z-index: 2;
 }
 
-.detail-pane { flex: 1; overflow-y: auto; padding: 20px 24px; }
+.detail-pane { flex: 1; min-width: 0; overflow-x: hidden; overflow-y: auto; padding: 20px 24px; }
 /* 空状态：用 flex 居中而非固定 vh 偏移，窗口高度变化时始终居中 */
 .empty-hint {
   color: var(--muted);
@@ -411,6 +411,7 @@ body {
 .session-mode-detail { color: var(--muted); min-width: 0; }
 .session-mode-ref { color: var(--faint); font-family: var(--mono); font-size: 11px; white-space: nowrap; }
 .thread-timeline {
+  min-width: 0;
   margin: 0 0 16px;
   padding-bottom: 12px;
   border-bottom: 1px solid var(--border);
@@ -435,10 +436,19 @@ body {
 .thread-timeline-head > span { color: var(--muted); font-size: 11px; white-space: nowrap; }
 .thread-run-list {
   display: flex;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   gap: 7px;
   overflow-x: auto;
-  padding: 1px 0 4px;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
+  scrollbar-gutter: stable;
+  touch-action: pan-x pan-y;
+  padding: 1px 0 7px;
 }
+.thread-run-list::-webkit-scrollbar { height: 7px; }
+.thread-run-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 7px; }
 .thread-run {
   flex: 0 0 116px;
   min-width: 0;
@@ -489,7 +499,9 @@ body {
 }
 .context-metrics {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--border);
   border: 1px solid var(--border);
   border-radius: 8px;
   overflow: hidden;
@@ -497,9 +509,8 @@ body {
 .context-metrics > div {
   min-width: 0;
   padding: 9px 10px;
-  border-left: 1px solid var(--border);
+  background: var(--bg);
 }
-.context-metrics > div:first-child { border-left: none; }
 .context-metrics span,
 .context-metrics small { display: block; color: var(--muted); font-size: 10px; }
 .context-metrics strong {
@@ -509,6 +520,12 @@ body {
   font-family: var(--mono);
   font-size: 14px;
   overflow-wrap: anywhere;
+}
+.context-request-summary {
+  margin-top: 8px;
+  color: var(--faint);
+  font-size: 10.5px;
+  line-height: 1.5;
 }
 .context-call-table-wrap { margin-top: 10px; overflow-x: auto; }
 .context-call-table { width: 100%; border-collapse: collapse; font-size: 11px; }
@@ -639,7 +656,8 @@ body {
 .member-table td, .member-table th { padding: 5px 6px; border-bottom: 1px solid var(--border); text-align: left; }
 .member-table th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--bg-2); }
 
-.chat-toolbar { display: flex; gap: 8px; margin-bottom: 12px; }
+.chat-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.chat-action-result { max-width: 220px; font-size: 11px; overflow-wrap: anywhere; }
 #test-send-text {
   background: var(--bg-2);
   border: 1px solid var(--border);
@@ -913,6 +931,40 @@ body {
 .settings-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 14px 0; }
 .daily-moments-status { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
 .daily-moments-content { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
+.daily-moments-status .field { min-width: 0; margin-bottom: 12px; overflow-wrap: anywhere; }
+.daily-moments-status .table-wrap { overflow-x: auto; }
+.moment-error { color: var(--red); overflow-wrap: anywhere; margin: 12px 0; font-size: 13px; }
+.moment-summaries { padding: 12px 0; border-top: 1px solid var(--border); }
+.moment-summaries summary { cursor: pointer; font-size: 13px; margin-bottom: 12px; }
+.time-control-settings { max-width: 960px; min-width: 0; }
+.time-control-settings > .field, #tc-rule-editor > .field { margin: 14px 0; }
+.time-control-summary { display: flex; gap: 16px; flex-wrap: wrap; color: var(--muted); font-size: 12px; margin: 12px 0; }
+.time-control-preset { display: grid; grid-template-columns: 100px minmax(0, 1fr); gap: 10px; font-size: 13px; }
+.time-control-preset dd { margin: 0; overflow-wrap: anywhere; }
+.tc-window { display: grid; grid-template-columns: minmax(0, 1fr) 130px 110px 28px; align-items: end; gap: 12px; padding: 16px 0; border-top: 1px solid var(--border); }
+.tc-window .field { min-width: 0; }
+.tc-days { display: flex; flex-wrap: wrap; gap: 10px; align-self: center; }
+.tc-days label { display: flex; align-items: center; gap: 4px; font-size: 12px; white-space: nowrap; }
+.tc-window input[type=time] { width: 100%; min-width: 0; background: var(--bg-2); color: var(--text); border: 1px solid var(--border); padding: 7px 10px; border-radius: 7px; font: inherit; }
+@media (max-width: 900px) {
+  .tc-window { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 28px; }
+  .tc-days { grid-column: 1 / -1; }
+}
+@media (max-width: 600px) {
+  #view-settings { flex-direction: column; overflow-y: auto; }
+  #view-settings .settings-sidebar {
+    width: 100%; flex: 0 0 auto; border-right: 0; border-bottom: 1px solid var(--border);
+  }
+  #view-settings .settings-runstate { display: none; }
+  #view-settings .settings-menu {
+    flex-direction: row; overflow-x: auto; gap: 6px;
+  }
+  #view-settings .settings-menu-item { flex: 0 0 auto; width: auto; }
+  #view-settings .settings-pane {
+    padding: 16px; min-width: 0; flex: 0 0 auto; overflow: visible;
+  }
+  .time-control-settings .field { min-width: 0; }
+}
 .save-bar { position: sticky; bottom: 0; background: var(--bg); padding: 12px 0; border-top: 1px solid var(--border); display: flex; gap: 10px; align-items: center; }
 
 /* ── 动效 ── */
@@ -1785,8 +1837,6 @@ body, .btn, .tab, .model-modal, .price-card, .tier-btn, .icon-btn {
   .thread-timeline-head { display: block; }
   .thread-timeline-head > span { margin-top: 5px; white-space: normal; }
   .context-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .context-metrics > div:nth-child(odd) { border-left: none; }
-  .context-metrics > div:nth-child(n+3) { border-top: 1px solid var(--border); }
   .context-tabs { gap: 12px; overflow-x: auto; }
   .context-tabs button { flex: 0 0 auto; }
   .context-layout { max-width: 56%; }

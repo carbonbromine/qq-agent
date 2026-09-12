@@ -109,6 +109,7 @@ try {
   const sections = [
     'renderSettingsSection', 'renderApiSection', 'renderSearchSection',
     'renderMemorySettingsSection', 'renderDailyMomentsSection',
+    'renderQzoneInteractionSection', 'renderTimeControlSection',
     'renderPersonaSection', 'renderAllowSection',
     'renderChatSection', 'renderDesktopSection', 'renderOnebotSection',
     'renderPersonaPicker', 'renderHealthCard'
@@ -146,6 +147,17 @@ try {
     }
   }
   const desktopHtml = ctx.renderDesktopSection(cfg);
+  const apiHtml = ctx.renderApiSection(cfg);
+  if (apiHtml.includes('id="cfg-max-run-tokens"')
+      && apiHtml.includes('value="160000"')
+      && apiHtml.includes('id="cfg-context-window-tokens"')
+      && apiHtml.includes('value="1000000"')) {
+    pass++;
+    console.log('  OK    运行预算与模型上下文窗口控件完整');
+  } else {
+    fail++;
+    console.log('  FAIL  运行预算或模型上下文窗口控件缺失');
+  }
   const tokenControls = [
     'cfg-console-token-current', 'cfg-console-token-new',
     'cfg-console-token-confirm', 'change-console-token-btn'
@@ -186,6 +198,53 @@ try {
     fail++;
     console.log('  FAIL  每日动态设置控件缺失');
   }
+  const interactionsHtml = ctx.renderQzoneInteractionSection(cfg);
+  const interactionControls = [
+    'cfg-qzi-enabled', 'cfg-qzi-catchup',
+    'cfg-qzi-feed-interval', 'cfg-qzi-reply-interval', 'cfg-qzi-max-age',
+    'cfg-qzi-feed-count', 'cfg-qzi-own-count', 'cfg-qzi-batch-items',
+    'cfg-qzi-likes', 'cfg-qzi-comments', 'cfg-qzi-replies',
+    'cfg-qzi-max-likes', 'cfg-qzi-max-comments', 'cfg-qzi-max-replies',
+    'qzi-run-feed-btn', 'qzi-run-reply-btn', 'qzone-interactions-status'
+  ].every((id) => interactionsHtml.includes(`id="${id}"`));
+  if (interactionControls && !/id="cfg-qzi-enabled" checked/.test(interactionsHtml)) {
+    pass++;
+    console.log('  OK    动态互动默认关闭，调度、限额和手动执行控件完整');
+  } else {
+    fail++;
+    console.log('  FAIL  动态互动设置控件缺失或默认状态错误');
+  }
+  const timeHtml = ctx.renderTimeControlSection({
+    ...cfg, allow: { groups: ['123'], private: ['456'] }
+  });
+  if (['tc-enabled', 'tc-target', 'tc-mode', 'tc-live-state'].every((id) =>
+    timeHtml.includes(`id="${id}"`)) && timeHtml.includes('group:123')
+    && timeHtml.includes('private:456') && timeHtml.includes('DS 低峰时段')
+    && !/id="tc-enabled" checked/.test(timeHtml)) {
+    pass++;
+    console.log('  OK    时间控制默认关闭，支持群聊及私聊规则');
+  } else {
+    fail++;
+    console.log('  FAIL  时间控制设置不完整');
+  }
+  const customTimeHtml = ctx.renderTimeControlSection({
+    ...cfg,
+    timeControl: {
+      enabled: true,
+      schedule: { mode: 'custom', windows: [{ days: [1, 7], start: '22:00', end: '06:00' }] },
+      overrides: {}
+    }
+  });
+  if (customTimeHtml.includes('value="22:00"') && customTimeHtml.includes('value="06:00"')
+    && customTimeHtml.includes('data-day="7" checked')
+    && customTimeHtml.includes('aria-label="删除时间段"')
+    && customTimeHtml.includes('id="tc-add"')) {
+    pass++;
+    console.log('  OK    自定义时段、星期与增删控件完整');
+  } else {
+    fail++;
+    console.log('  FAIL  自定义时间段控件缺失');
+  }
   const conversationHtml = ctx.renderChatSection({
     ...cfg,
     allow: { ...cfg.allow, groups: ['123'] },
@@ -201,10 +260,13 @@ try {
     'conversation-group-select', 'conversation-group-mode',
     'cfg-cont-window', 'cfg-thread-ttl', 'cfg-cont-history',
     'cfg-life-silent', 'cfg-life-active', 'cfg-life-hard',
-    'cfg-life-rollover', 'cfg-life-history', 'cfg-life-chars'
+    'cfg-life-rollover', 'cfg-life-history', 'cfg-life-tokens', 'cfg-life-chars',
+    'cfg-wakedelay-min', 'cfg-wakedelay-max'
   ].every((id) => conversationHtml.includes(`id="${id}"`));
   if (conversationControls
       && conversationHtml.includes('id="cfg-conversation-mode" value="lifecycle"')
+      && conversationHtml.includes('id="cfg-life-tokens"')
+      && conversationHtml.includes('value="32000"')
       && ['legacy', 'threaded', 'lifecycle'].every((mode) =>
         conversationHtml.includes(`data-conversation-mode="${mode}"`)
         && conversationHtml.includes(`data-conversation-panel="${mode}"`))) {
@@ -274,6 +336,12 @@ try {
   const threadTimeline = ctx.renderSessionThreadTimeline || sandbox.renderSessionThreadTimeline;
   const groupedRuns = [
     {
+      id: 'life-wait', chatKey: 'group:1', startedAt: 3, status: 'waiting',
+      conversationMode: 'lifecycle', threadId: 'thread-1', threadState: 'active',
+      trigger: '等待第三批', rounds: 0, webSearchCount: 0, waitUntil: Date.now() + 5000,
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, cachedTokens: 0, calls: 0 }
+    },
+    {
       id: 'life-2', chatKey: 'group:1', startedAt: 2, status: 'done',
       conversationMode: 'lifecycle', threadId: 'thread-1', threadState: 'listening',
       trigger: '第二批', rounds: 2, webSearchCount: 1,
@@ -297,11 +365,11 @@ try {
   const lifecycleGroup = groupedView.find((item) => item.threadId === 'thread-1');
   if (
     groupedView.length === 2
-    && lifecycleGroup?.runCount === 2
+    && lifecycleGroup?.runCount === 3
     && lifecycleGroup?.usage?.totalTokens === 33
-    && lifecycleGroup?.latestSessionId === 'life-2'
-    && (timelineHtml.match(/data-thread-session-id=/g) || []).length === 2
-    && timelineHtml.includes('2 批 · 3 次调用')
+    && lifecycleGroup?.latestSessionId === 'life-wait'
+    && (timelineHtml.match(/data-thread-session-id=/g) || []).length === 3
+    && timelineHtml.includes('3 批 · 3 次调用')
   ) {
     pass++;
     console.log('  OK    生命周期 Session 按 threadId 聚合并保留批次时间线');
@@ -327,6 +395,15 @@ try {
     ],
     inputTools: [{ type: 'function', function: { name: 'finish' } }],
     inputRequestOptions: { toolChoice: 'auto', temperature: 0.8 },
+    usage: {
+      promptTokens: 2400,
+      completionTokens: 180,
+      totalTokens: 2580,
+      cachedTokens: 1800,
+      calls: 2
+    },
+    webSearchCount: 2,
+    sessionMetrics: { estimatedCost: 0.0123 },
     callUsage: [
       { round: 1, promptTokens: 1000, cachedTokens: 700, completionTokens: 100, totalTokens: 1100 },
       { round: 2, promptTokens: 1400, cachedTokens: 1100, completionTokens: 80, totalTokens: 1480 }
@@ -343,8 +420,35 @@ try {
   const injectedInspector = contextInspector(contextSession);
   vm.runInContext("state.sessionInspectorTab = 'reasoning';", ctx);
   const reasoningInspector = contextInspector(contextSession);
+  const contextMetrics = (ctx.sessionMetricsOf || sandbox.sessionMetricsOf)(contextSession);
   const contextInspectorOk =
-    inputInspector.includes('完整输入 · 3')
+    contextMetrics.firstCallCacheHitRate === 0.7
+    && contextMetrics.cacheHitRate === 0.75
+    && contextMetrics.promptTokens === 2400
+    && contextMetrics.completionTokens === 180
+    && contextMetrics.cachedTokens === 1800
+    && contextMetrics.toolCalls === 1
+    && contextMetrics.webSearchCount === 2
+    && contextMetrics.estimatedCost === 0.0123
+    && inputInspector.includes('完整输入 · 3')
+    && inputInspector.includes('Session 全局统计 · 2 次模型调用')
+    && inputInspector.includes('首轮缓存命中率')
+    && inputInspector.includes('70.0%')
+    && inputInspector.includes('总缓存命中率')
+    && inputInspector.includes('75.0%')
+    && inputInspector.includes('总输出 Token')
+    && inputInspector.includes('180')
+    && inputInspector.includes('总输入 Token')
+    && inputInspector.includes('2,400')
+    && inputInspector.includes('总缓存 Token')
+    && inputInspector.includes('1,800')
+    && inputInspector.includes('总工具次数')
+    && inputInspector.includes('总联网次数')
+    && inputInspector.includes('预估成本')
+    && inputInspector.includes('¥0.0123')
+    && inputInspector.includes('当前展示第 2 轮请求快照')
+    && inputInspector.includes('第 1 轮')
+    && inputInspector.includes('第 2 轮')
     && inputInspector.includes('1,400')
     && inputInspector.includes('1,100')
     && inputInspector.includes('&quot;tools&quot;')
@@ -721,6 +825,26 @@ try {
     const okFinal = html2.includes('最终发言');
     okFinal ? pass++ : fail++;
     console.log('  ' + (okFinal ? 'OK   ' : 'FAIL ') + 'session-end 后详情自动刷出最终 sent（不用手动刷新）' + (okFinal ? '' : ' -> ' + html2.slice(0, 100)));
+
+    // ③ 新 Session 只刷新列表，不能抢占用户当前正在阅读的详情。
+    const incoming = { id: 's_sse_2', chatKey: 'group:2', status: 'waiting', startedAt: 3,
+      messages: [], sent: [], usage: { calls: 0 }, rounds: 0 };
+    sandbox.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes('/api/sessions')) {
+        return { ok: true, json: async () => ({ sessions: [incoming, finalSession] }) };
+      }
+      if (u.includes('/api/status')) {
+        return { ok: true, json: async () => ({ onebot: {}, orchestrator: {}, usage: {}, cost: {} }) };
+      }
+      return origFetch2(url);
+    };
+    fireSse('session-start', { sessionId: incoming.id, chatKey: incoming.chatKey, status: 'waiting' });
+    await sleepMs(250);
+    sandbox.fetch = origFetch2;
+    const keptSelection = vm.runInContext('state.currentSessionId', ctx) === 's_sse_1';
+    keptSelection ? pass++ : fail++;
+    console.log('  ' + (keptSelection ? 'OK   ' : 'FAIL ') + '新 Session 不抢占当前查看窗口');
   } catch (e) {
     fail++; console.log('  FAIL SSE 实时性测试抛错: ' + (e && e.message));
   }

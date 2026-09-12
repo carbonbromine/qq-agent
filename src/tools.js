@@ -87,6 +87,9 @@ export function buildToolDefs() {
         try {
           const messages = normalizeMessageList(args.messages);
           if (!messages.length) return err('消息内容为空');
+          // #region debug-point A-B:send-message-owner
+          if (!String(process.argv[1]).includes('/test/')) (() => { try { const body = JSON.stringify({ sessionId: 'daily-summary-group-send', runId: 'post-fix', hypothesisId: 'A,B', location: 'src/tools.js:send_message', msg: '[DEBUG] QQ send_message attributed to Agent Session', data: { agentSessionId: ctx.session?.id || null, chatKey: ctx.chatKey, trigger: ctx.session?.trigger || null, triggerSummary: ctx.session?.triggerSummary || '', conversationMode: ctx.session?.conversationMode || null, leaseId: ctx.session?.leaseId || null, messageCount: messages.length, previews: messages.map((text) => String(text).slice(0, 80)) }, ts: Date.now() }); const req = process.getBuiltinModule('node:http').request('http://192.168.31.10:7777/event', { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } }, (res) => res.resume()); req.on('error', () => {}); req.on('socket', (socket) => socket.unref()); req.setTimeout(500, () => req.destroy()); req.end(body); } catch {} })();
+          // #endregion
           const result = await ctx.sender.sendTextBatch(ctx.chatKey, messages, {
             runId: ctx.session.leaseId, signal: ctx.signal,
             replyToMessageId: args.replyToMessageId ?? null,
@@ -116,9 +119,12 @@ export function buildToolDefs() {
       },
       async execute(ctx, args) {
         try {
-          const sticker = await ctx.stickers.find(unquoteJsonString(args.stickerId));
+          const sticker = await ctx.stickers.findForSend(unquoteJsonString(args.stickerId));
           if (!sticker) return err(`找不到表情 ${args.stickerId}，请先用 list_stickers 获取有效 id`);
           if (!sticker.url) return err(`表情 ${sticker.id} 没有可发送的图片地址`);
+          // #region debug-point C-D:sticker-resolution
+          if (!String(process.argv[1]).includes('/test/')) (() => { try { const parsed = new URL(sticker.url); const body = JSON.stringify({ sessionId: 'agent-time-sticker-download', runId: 'post-fix', hypothesisId: 'C,D', location: 'src/tools.js:send_sticker', msg: '[DEBUG] Resolved sticker before OneBot delivery', data: { stickerId: sticker.id, source: sticker.source, host: parsed.host, pathname: parsed.pathname, queryKeys: [...parsed.searchParams.keys()], urlLength: sticker.url.length, replyToMessageId: args.replyToMessageId ?? null }, ts: Date.now() }); const req = process.getBuiltinModule('node:http').request('http://192.168.31.10:7777/event', { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } }, (res) => res.resume()); req.on('error', () => {}); req.on('socket', (socket) => socket.unref()); req.setTimeout(500, () => req.destroy()); req.end(body); } catch {} })();
+          // #endregion
           try {
             await validateImageUrl(sticker.url); // 只允许公网 http(s)，防止本地库被污染后诱导 OneBot 抓内网
           } catch (error) {
@@ -167,7 +173,7 @@ export function buildToolDefs() {
       },
       async execute(ctx, args) {
         try {
-          const sticker = await ctx.stickers.find(args.stickerId);
+          const sticker = await ctx.stickers.findForSend(args.stickerId);
           if (!sticker) return err(`找不到表情 ${args.stickerId}`);
           if (!sticker.url) return err('该表情没有图片地址');
           const dataUrl = await downloadImageAsDataUrl(sticker.url, ctx.signal);

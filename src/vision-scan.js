@@ -6,6 +6,7 @@
 // 结果持久化在 config.modelVision["providerId|||model"]，运行时用它门控看图工具。
 import { getConfig, updateConfig } from './config.js';
 import { builtinVisionResults } from './model-vision-docs.js';
+import { withTimeWindow, assertTimeAllowed } from './time-gate.js';
 
 // 1×1 像素 PNG（70 字节），足够让视觉模型"看到点什么"，也不会浪费 token。
 const TINY_PNG =
@@ -47,7 +48,11 @@ export function modelImageVerdict(providerId, modelId) {
  * 探测单个模型。返回 { verdict, note, httpStatus, latencyMs }。
  * verdict: 'vision' 接受图片内容；'no-vision' 明确拒绝图片内容；'unknown' 无法判定。
  */
-export async function detectModelVision({ baseUrl, apiKey, model }, timeoutMs = 25000) {
+export function detectModelVision(options, timeoutMs = 25000) {
+  return withTimeWindow((signal) => detectModelVisionRequest(options, timeoutMs, signal));
+}
+
+async function detectModelVisionRequest({ baseUrl, apiKey, model }, timeoutMs, signal) {
   const started = Date.now();
   const base = { verdict: 'unknown', note: '', httpStatus: null, latencyMs: null };
   if (!baseUrl || !model) return { ...base, note: '缺端点地址或模型名' };
@@ -69,7 +74,7 @@ export async function detectModelVision({ baseUrl, apiKey, model }, timeoutMs = 
         max_tokens: 24,
         stream: false
       }),
-      signal: AbortSignal.timeout(timeoutMs)
+      signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
     });
   } catch (error) {
     return { ...base, note: error?.name === 'TimeoutError' ? '探测请求超时' : `网络错误：${error?.message ?? error}` };
@@ -101,6 +106,7 @@ export async function detectModelVision({ baseUrl, apiKey, model }, timeoutMs = 
  * 返回 { total, results }。
  */
 export async function scanModelsVision({ providers, emit = null, limit = 3, timeoutMs = 25000, onlyProviderIds = null } = {}) {
+  assertTimeAllowed('');
   const tasks = [];
   for (const p of providers || []) {
     if (onlyProviderIds && !onlyProviderIds.includes(p.id)) continue;

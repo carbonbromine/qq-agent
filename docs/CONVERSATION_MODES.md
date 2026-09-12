@@ -52,7 +52,17 @@ The transcript is also rolled over when:
 
 - the system prompt or tool schema changes;
 - a turn contains inline image data;
+- the preceding request reached the configured input-token threshold (32000 by default);
 - the configured transcript character budget is exceeded.
+
+The input-token threshold is checked before the next message batch, using the
+provider's actual previous `prompt_tokens`. It is the primary lifecycle budget;
+the character limit is retained as a format-independent fallback.
+
+The default cumulative Agent-run budget is 160000 tokens. Before another tool
+round, the orchestrator estimates its input from the preceding request and reserves
+output headroom. If the projected run would cross the limit, it commits the completed
+work as a budget stop rather than throwing after confirmed sends.
 
 ## Persistence And Recovery
 
@@ -83,7 +93,7 @@ One lifecycle therefore normally contains multiple Session records:
 
 ```text
 QQ messages
-  -> debounced message batch
+  -> randomized debounced message batch
   -> one Agent Session
   -> read prior thread_turns by threadId
   -> call model and tools
@@ -99,7 +109,18 @@ idle part of a lifecycle. It does not reset model context.
 The console keeps those execution boundaries but groups `threaded` and
 `lifecycle` Sessions by `threadId`. One thread appears as one list item with an
 internal batch timeline. Selecting a batch shows that run's exact audit data.
+The waiting Session is attached to the current thread as soon as its debounce
+window starts, so it does not appear as a temporary standalone window. New
+Sessions refresh the list without replacing the Session currently being read.
+The batch timeline scrolls horizontally and preserves both its horizontal
+position and the detail pane's vertical position when another batch is selected.
 Legacy Sessions remain one item per run because they do not share a thread.
+
+The pre-run debounce is a random duration between `wakeDelayMinMs` and
+`wakeDelayMaxMs` for each newly scheduled batch. The defaults are 8000 and
+12000 milliseconds. Repeated messages redraw the delay while
+`maxBatchWaitMs=20000` still caps total aggregation time from the first pending
+message. Explicit manual and drain delays remain deterministic.
 
 ## Context Inspector
 
@@ -109,6 +130,12 @@ Each new Session audit records:
 - the latest complete model request (`messages`, tool schemas and request options);
 - exact provider token usage for every tool round, including cached input tokens;
 - provider `reasoning_content` when the selected model returns it.
+
+The context inspector's top metrics are totals for the selected Session, not the
+last model round: first-call and overall cache hit rates, total input/output/cache
+tokens, tool calls, web operations and estimated cost. The table below remains
+the per-round view. Session cost uses the same per-call model, provider and
+peak/off-peak pricing logic as the Usage page.
 
 The request snapshot omits inline image bytes to avoid duplicating large base64
 payloads in every Session file. The message structure, MIME type and original

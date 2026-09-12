@@ -432,6 +432,14 @@ async function refreshStatus() {
     state.pauseReason = s.pauseReason;
     $('#pause-btn').textContent = state.paused ? '恢复' : '暂停';
     if ($('#runtime-mode')) $('#runtime-mode').value = s.orchestrator.mode || 'observe';
+    if (s.timeControl?.enabled) {
+      $('#model-label').textContent += s.timeControl.active ? ' · 活跃时段' : ' · 非活跃时段';
+    }
+    if (state.tab === 'settings' && state.settingsSection === 'time-control') loadTimeControlStatus();
+    if (state.tab === 'settings' && state.settingsSection === 'moments') loadDailyMomentsStatus();
+    if (state.tab === 'settings' && state.settingsSection === 'qzone-interactions') {
+      loadQzoneInteractionStatus();
+    }
     renderBanner();
   } catch (e) { /* 忽略瞬时错误 */ }
 }
@@ -518,15 +526,10 @@ function scheduleSessionRender() {
 function connectSSE() {
   const es = new EventSource('/api/events');
   es.addEventListener('session-start', () => {
-    loadSessions();
+    // 新运行只刷新列表。用户已经在阅读某个 Session 时绝不抢占右侧详情；
+    // currentSessionId 为空的首屏场景由 loadSessions 自行选择活动会话。
+    loadSessions({ quiet: true });
     refreshStatus();
-    // 自动跟随新会话（等待中/运行中）
-    if (state.autoFollowRunning) {
-      loadSessions({ quiet: true }).then(() => {
-        const active = state.sessions.find((s) => s.status === 'waiting' || s.status === 'running');
-        if (active && active.id !== state.currentSessionId) selectSession(active.id);
-      });
-    }
   });
   es.addEventListener('session-update', (ev) => {
     let data;
@@ -550,6 +553,7 @@ function connectSSE() {
       promptLayout: data.promptLayout || '',
       lifecycleContinuation: data.lifecycleContinuation === true,
       callUsage: data.callUsage || [],
+      sessionMetrics: data.sessionMetrics || null,
       triggerSummary: data.triggerSummary ?? '',
       startedAt: data.startedAt ?? 0
     };
@@ -848,7 +852,7 @@ function renderSessionList() {
     const runLabel = s.runCount > 1 ? `${s.runCount} 批` : '';
     return `
       <div class="session-item mode-${mode} ${s.runCount > 1 ? 'session-thread-group' : ''} ${selected ? 'selected' : ''} ${s.status === 'waiting' ? 'session-waiting-row' : ''} ${isNew ? 'new-item' : ''}"
-        data-id="${s.latestSessionId}" role="button" tabindex="0">
+        data-id="${s.latestSessionId}" data-display-key="${esc(s.displayKey)}" role="button" tabindex="0">
         <div class="session-title">
           <span class="session-chat">${esc(chatName)}</span>
           <span class="session-time">${fmtTime(s.startedAt)}</span>
@@ -891,6 +895,14 @@ function renderSessionList() {
   if ($$('.session-wait[data-until]', box).length) startWaitTicker();
 }
 
+function updateSessionListSelection() {
+  const selected = buildSessionDisplayItems(state.sessions || [])
+    .find((item) => item.sessionIds.includes(state.currentSessionId));
+  $$('.session-item', $('#session-items')).forEach((element) => {
+    element.classList.toggle('selected', element.dataset.displayKey === selected?.displayKey);
+  });
+}
+
 function fmtWaitRemain(untilMs) {
   const remain = Math.max(0, Number(untilMs) - Date.now());
   return `${(remain / 1000).toFixed(1)}s`;
@@ -914,24 +926,43 @@ function startWaitTicker() {
   }, 100);
 }
 
-async function selectSession(id) {
+async function selectSession(id, { preserveDetail = false } = {}) {
+  if (!id || id === state.currentSessionId) return;
+  const detail = $('#session-detail');
+  const scrollTop = preserveDetail ? detail?.scrollTop ?? 0 : 0;
+  const timelineScrollLeft = preserveDetail
+    ? detail?.querySelector('.thread-run-list')?.scrollLeft ?? 0
+    : 0;
   state.currentSessionId = id;
   state.sessionDetail = null;
-  state.sessionInspectorTab = 'input';
   lastDetailFp = null;
-  renderSessionList();
-  $('#session-detail').innerHTML = '<div class="empty-hint">加载中…</div>';
-  await loadSessionDetail(id);
+  updateSessionListSelection();
+  if (!preserveDetail && detail) {
+    detail.innerHTML = '<div class="empty-hint">加载中…</div>';
+  }
+  await loadSessionDetail(id, {
+    scrollMode: preserveDetail ? 'preserve' : 'top',
+    scrollTop,
+    timelineScrollLeft
+  });
 }
 
 // 上次渲染会话详情的指纹：内容没变就不重渲染（轮询期间避免闪烁与滚动重置）
 let lastDetailFp = null;
 
-async function loadSessionDetail(id, { quiet = false } = {}) {
+async function loadSessionDetail(id, {
+  quiet = false,
+  scrollMode = null,
+  scrollTop = null,
+  timelineScrollLeft = null
+} = {}) {
   try {
     const s = await api(`/api/sessions/${id}`);
+    if (state.currentSessionId !== id) return;
     state.sessionDetail = s;
-    if (state.currentSessionId === id && state.tab === 'sessions') renderSessionDetail(s);
+    if (state.tab === 'sessions') {
+      renderSessionDetail(s, { scrollMode, scrollTop, timelineScrollLeft });
+    }
   } catch (e) {
     if (!quiet) $('#session-detail').innerHTML = `<div class="empty-hint">加载失败：${esc(e.message)}</div>`;
   }
@@ -956,6 +987,46 @@ function sessionModelRequest(s) {
   };
 }
 
+function sessionMetricsOf(s) {
+  const usage = s.usage || {};
+  const calls = Array.isArray(s.callUsage) ? s.callUsage : [];
+  const supplied = s.sessionMetrics || {};
+  const promptTokens = Number(supplied.promptTokens ?? usage.promptTokens) || 0;
+  const completionTokens = Number(supplied.completionTokens ?? usage.completionTokens) || 0;
+  const cachedTokens = Math.min(
+    promptTokens,
+    Number(supplied.cachedTokens ?? usage.cachedTokens) || 0
+  );
+  const first = calls[0] || {};
+  const firstPromptTokens = Number(first.promptTokens) || 0;
+  const firstCachedTokens = Math.min(
+    firstPromptTokens,
+    Number(first.cachedTokens) || 0
+  );
+  return {
+    modelCalls: Number(supplied.modelCalls ?? usage.calls) || calls.length,
+    firstCallCacheHitRate: Number.isFinite(Number(supplied.firstCallCacheHitRate))
+      ? Number(supplied.firstCallCacheHitRate)
+      : (firstPromptTokens ? firstCachedTokens / firstPromptTokens : 0),
+    cacheHitRate: Number.isFinite(Number(supplied.cacheHitRate))
+      ? Number(supplied.cacheHitRate)
+      : (promptTokens ? cachedTokens / promptTokens : 0),
+    promptTokens,
+    completionTokens,
+    cachedTokens,
+    totalTokens: Number(supplied.totalTokens ?? usage.totalTokens)
+      || promptTokens + completionTokens,
+    toolCalls: Number(supplied.toolCalls)
+      || (s.messages || []).filter((message) => message?.toolCall).length,
+    webSearchCount: Number(supplied.webSearchCount ?? s.webSearchCount) || 0,
+    estimatedCost: Number(supplied.estimatedCost) || 0
+  };
+}
+
+function fmtRate(rate, available) {
+  return available ? `${(Math.min(1, Math.max(0, Number(rate) || 0)) * 100).toFixed(1)}%` : '-';
+}
+
 function renderSessionContextInspector(s) {
   const tabs = ['injected', 'input', 'reasoning'];
   const active = tabs.includes(state.sessionInspectorTab) ? state.sessionInspectorTab : 'input';
@@ -963,10 +1034,7 @@ function renderSessionContextInspector(s) {
   const request = sessionModelRequest(s);
   const tools = Array.isArray(s.inputTools) ? s.inputTools : [];
   const calls = Array.isArray(s.callUsage) ? s.callUsage : [];
-  const latestCall = calls.at(-1) || {};
-  const promptTokens = Number(latestCall.promptTokens) || 0;
-  const cachedTokens = Math.min(promptTokens, Number(latestCall.cachedTokens) || 0);
-  const freshTokens = Math.max(0, promptTokens - cachedTokens);
+  const metrics = sessionMetricsOf(s);
   const payloadChars = Number(s.inputPayloadChars)
     || JSON.stringify({ messages: request.messages, tools }).length;
   const reasoning = (s.messages || [])
@@ -1015,26 +1083,34 @@ function renderSessionContextInspector(s) {
       <div class="context-inspector-head">
         <div>
           <strong>模型上下文</strong>
-          <span>第 ${Number(s.inputRound) || Math.max(1, calls.length)} 轮请求快照</span>
+          <span>Session 全局统计 · ${fmtTok(metrics.modelCalls)} 次模型调用</span>
         </div>
         <span class="context-layout">${esc(s.promptLayout || 'stable-prefix-v2')}</span>
       </div>
       <div class="context-metrics">
-        <div><span>实际输入</span><strong>${promptTokens ? fmtTok(promptTokens) : '-'}</strong><small>token</small></div>
-        <div><span>缓存命中</span><strong>${promptTokens ? fmtTok(cachedTokens) : '-'}</strong><small>${promptTokens ? `${Math.round(cachedTokens / promptTokens * 100)}%` : 'token'}</small></div>
-        <div><span>未缓存输入</span><strong>${promptTokens ? fmtTok(freshTokens) : '-'}</strong><small>token</small></div>
-        <div><span>请求体积</span><strong>${fmtTok(payloadChars)}</strong><small>字符</small></div>
-        <div><span>注入历史</span><strong>${fmtTok(injected.length)}</strong><small>条消息</small></div>
-        <div><span>工具定义</span><strong>${fmtTok(tools.length)}</strong><small>个</small></div>
+        <div><span>首轮缓存命中率</span><strong>${fmtRate(metrics.firstCallCacheHitRate, metrics.modelCalls > 0)}</strong><small>首轮输入</small></div>
+        <div><span>总缓存命中率</span><strong>${fmtRate(metrics.cacheHitRate, metrics.promptTokens > 0)}</strong><small>全部模型调用</small></div>
+        <div><span>总输出 Token</span><strong>${fmtTok(metrics.completionTokens)}</strong><small>token</small></div>
+        <div><span>总输入 Token</span><strong>${fmtTok(metrics.promptTokens)}</strong><small>token</small></div>
+        <div><span>总缓存 Token</span><strong>${fmtTok(metrics.cachedTokens)}</strong><small>token</small></div>
+        <div><span>总工具次数</span><strong>${fmtTok(metrics.toolCalls)}</strong><small>次</small></div>
+        <div><span>总联网次数</span><strong>${fmtTok(metrics.webSearchCount)}</strong><small>次</small></div>
+        <div><span>预估成本</span><strong>${fmtYuan(metrics.estimatedCost)}</strong><small>与用量页同口径</small></div>
+      </div>
+      <div class="context-request-summary">
+        当前展示第 ${Number(s.inputRound) || Math.max(1, calls.length)} 轮请求快照
+        · 请求体 ${fmtTok(payloadChars)} 字符
+        · 注入历史 ${fmtTok(injected.length)} 条
+        · 工具定义 ${fmtTok(tools.length)} 个
       </div>
       ${calls.length ? `
         <div class="context-call-table-wrap">
           <table class="context-call-table">
-            <thead><tr><th>轮次</th><th>输入</th><th>缓存</th><th>未缓存</th><th>输出</th><th>总量</th></tr></thead>
+            <thead><tr><th>轮次</th><th>输入</th><th>缓存</th><th>命中率</th><th>未缓存</th><th>输出</th><th>总量</th></tr></thead>
             <tbody>${calls.map((call) => {
               const input = Number(call.promptTokens) || 0;
               const cached = Math.min(input, Number(call.cachedTokens) || 0);
-              return `<tr><td>${Number(call.round) || '-'}</td><td>${fmtTok(input)}</td><td>${fmtTok(cached)}</td><td>${fmtTok(Math.max(0, input - cached))}</td><td>${fmtTok(call.completionTokens)}</td><td>${fmtTok(call.totalTokens)}</td></tr>`;
+              return `<tr><td>第 ${Number(call.round) || '-'} 轮</td><td>${fmtTok(input)}</td><td>${fmtTok(cached)}</td><td>${fmtRate(input ? cached / input : 0, input > 0)}</td><td>${fmtTok(Math.max(0, input - cached))}</td><td>${fmtTok(call.completionTokens)}</td><td>${fmtTok(call.totalTokens)}</td></tr>`;
             }).join('')}</tbody>
           </table>
         </div>` : ''}
@@ -1047,7 +1123,11 @@ function renderSessionContextInspector(s) {
     </section>`;
 }
 
-function renderSessionDetail(s) {
+function renderSessionDetail(s, {
+  scrollMode = null,
+  scrollTop = null,
+  timelineScrollLeft = null
+} = {}) {
   const detail = $('#session-detail');
   if (!detail) return;
   // 内容没变（轮询/SSE 重复推送）→ 完全不动 DOM，保住滚动位置和展开状态
@@ -1060,10 +1140,12 @@ function renderSessionDetail(s) {
   // 保留用户的阅读位置；仅当用户本来就贴着底部时才跟随新内容（聊天式）
   const wasAtBottom = detail.scrollHeight - detail.scrollTop - detail.clientHeight < 48;
   const keepScroll = detail.scrollTop;
+  const keepTimelineScroll = timelineScrollLeft
+    ?? detail.querySelector('.thread-run-list')?.scrollLeft
+    ?? 0;
   const chatName = formatChatTitle(s.chatKey, chatNameOf(s.chatKey));
   const statusBadge = `<span class="status-badge status-${s.status}">${esc(sessionStatusText(s))}</span>`;
-  const usage = s.usage || {};
-  const firstCall = Array.isArray(s.callUsage) ? s.callUsage[0] : null;
+  const metrics = sessionMetricsOf(s);
 
   const html = [];
   html.push(`
@@ -1075,10 +1157,7 @@ function renderSessionDetail(s) {
         <span>触发：${esc(s.triggerSummary || (s.trigger === 'proactive' ? '主动机会' : '-'))}</span>
         <span>开始 ${fmtClock(s.startedAt)}${s.endedAt ? ` · ${s.conversationMode === 'lifecycle' ? '本轮结束' : '结束'} ${fmtClock(s.endedAt)}` : ' · 进行中'}</span>
         <span>模型 ${esc(s.model || '-')}</span>
-        ${firstCall ? `<span>首轮缓存 ${((Number(firstCall.cacheHitRate) || 0) * 100).toFixed(0)}%</span>` : ''}
-        <span>${usage.calls || 0} 次调用 · ${fmtTokens(usage.promptTokens)} 入 / ${fmtTokens(usage.completionTokens)} 出 / ${fmtTokens(usage.totalTokens)} 总</span>
-        <span>${s.rounds || 0} 轮工具</span>
-        <span>联网搜索 ${Number(s.webSearchCount) || 0} 次</span>
+        <span>${fmtTok(metrics.modelCalls)} 次模型调用 · ${fmtTok(metrics.toolCalls)} 次工具调用</span>
       </div>
     </div>
     ${renderSessionModeBand(s)}
@@ -1096,6 +1175,7 @@ function renderSessionDetail(s) {
       threadState: s.threadState || null,
       promptLayout: s.promptLayout || '',
       callUsage: s.callUsage || [],
+      sessionMetrics: metrics,
       systemPrompt: s.systemPrompt || '',
       userPrompt: s.userPrompt || '',
       injectedMessages: sessionInjectedMessages(s),
@@ -1187,12 +1267,33 @@ function renderSessionDetail(s) {
   detail.querySelectorAll('[data-thread-session-id]').forEach((button) => {
     button.addEventListener('click', () => {
       if (button.dataset.threadSessionId !== state.currentSessionId) {
-        selectSession(button.dataset.threadSessionId);
+        selectSession(button.dataset.threadSessionId, { preserveDetail: true });
       }
     });
   });
-  if (firstRender || (s.status === 'running' && wasAtBottom)) {
-    detail.scrollTop = detail.scrollHeight;      // 首次打开 / 贴底跟随新内容
+  const threadRunList = detail.querySelector('.thread-run-list');
+  if (threadRunList) {
+    threadRunList.scrollLeft = keepTimelineScroll;
+    threadRunList.addEventListener('wheel', (event) => {
+      if (threadRunList.scrollWidth <= threadRunList.clientWidth
+        || Math.abs(event.deltaX) >= Math.abs(event.deltaY)) return;
+      const next = Math.min(
+        threadRunList.scrollWidth - threadRunList.clientWidth,
+        Math.max(0, threadRunList.scrollLeft + event.deltaY)
+      );
+      if (next === threadRunList.scrollLeft) return;
+      event.preventDefault();
+      threadRunList.scrollLeft = next;
+    }, { passive: false });
+  }
+  if (scrollMode === 'top') {
+    detail.scrollTop = 0;
+  } else if (scrollMode === 'preserve') {
+    detail.scrollTop = Number(scrollTop) || 0;
+  } else if (s.status === 'running' && wasAtBottom) {
+    detail.scrollTop = detail.scrollHeight;      // 用户原本贴底时才跟随新增内容
+  } else if (firstRender) {
+    detail.scrollTop = 0;
   } else {
     detail.scrollTop = keepScroll;               // 保留阅读位置
   }
@@ -1239,6 +1340,7 @@ function renderChatList() {
       <div class="chat-item ${c.key === state.currentChatKey ? 'selected' : ''} ${c.unread ? 'unread-row' : ''} ${isNew ? 'new-item' : ''}" data-key="${c.key}">
         <div class="chat-item-title">
           <span class="session-chat">${esc(name)}</span>
+          ${c.timeControl?.enabled ? `<span class="thread-pill">${c.timeControl.active ? '活跃时段' : '仅记录'}</span>` : ''}
           ${threadLabel ? `<span class="thread-pill mode-${mode}">${threadLabel}</span>` : ''}
           ${c.unread ? `<span class="unread-pill">${c.unread}</span>` : ''}
         </div>
@@ -1325,7 +1427,8 @@ function renderChatMessages() {
       <div class="sub"><span data-field="chat-msg-count"></span><span>${esc(threadStatus)}</span></div>
     </div>
     <div class="chat-toolbar">
-      <button class="btn btn-small" id="chat-wake-btn">唤醒一次处理</button>
+      <button class="btn btn-small" id="chat-wake-btn">主动唤醒</button>
+      <span class="muted chat-action-result" id="chat-wake-result" role="status"></span>
       <button class="btn btn-small" id="chat-read-btn">全部标为已读</button>
       <button class="btn btn-small" id="chat-retry-btn">重试失败批次</button>
       <button class="btn btn-small" id="chat-resolve-btn">确认发送结果</button>
@@ -1338,8 +1441,24 @@ function renderChatMessages() {
 
   // 工具栏事件：只在这里绑一次
   $('#chat-wake-btn').addEventListener('click', async () => {
-    await api(`/api/chats/${key.replace(':', '_')}/wake`, { method: 'POST', body: '{}' });
-    refreshStatus();
+    const button = $('#chat-wake-btn');
+    const result = $('#chat-wake-result');
+    button.disabled = true;
+    result.textContent = '正在唤醒…';
+    try {
+      const response = await api(`/api/chats/${key.replace(':', '_')}/wake`, {
+        method: 'POST',
+        body: '{}'
+      });
+      result.textContent = response.mode === 'unread'
+        ? '已开始处理未读消息'
+        : '已基于最近存档开始思考';
+      await refreshStatus();
+    } catch (error) {
+      result.textContent = `唤醒失败：${error.message}`;
+    } finally {
+      button.disabled = false;
+    }
   });
   $('#chat-read-btn').addEventListener('click', async () => {
     await api(`/api/chats/${key.replace(':', '_')}/mark-read`, { method: 'POST', body: '{}' });
@@ -2858,6 +2977,8 @@ function renderSettingsSidebar() {
     ['search', '搜索服务'],
     ['memory', '记忆'],
     ['moments', '每日动态'],
+    ['qzone-interactions', '动态互动'],
+    ['time-control', '时间控制'],
     ['persona', '人设'],
     ['allow', '聊天白名单'],
     ['chat', '聊天设置'],
@@ -2898,6 +3019,8 @@ function renderSettingsSection(c) {
     search: () => renderSearchSection(c),
     memory: () => renderMemorySettingsSection(c),
     moments: () => renderDailyMomentsSection(c),
+    'qzone-interactions': () => renderQzoneInteractionSection(c),
+    'time-control': () => renderTimeControlSection(c),
     persona: () => renderPersonaSection(c),
     allow: () => renderAllowSection(c),
     chat: () => renderChatSection(c),
@@ -2944,6 +3067,8 @@ function renderApiSection(c) {
     <div class="field-row">
       <div class="field"><label>温度</label><input type="number" id="cfg-temperature" step="0.1" min="0" max="2" value="${esc(c.api.temperature)}" /></div>
       <div class="field"><label>单次运行最大工具轮数</label><input type="number" id="cfg-maxrounds" min="1" max="40" value="${esc(c.api.maxRounds)}" /></div>
+      <div class="field"><label>单次运行累计 Token 上限</label><input type="number" id="cfg-max-run-tokens" min="20000" max="1000000" step="10000" value="${esc(c.api.maxRunTokens ?? 160000)}" /></div>
+      <div class="field"><label>模型上下文窗口（Token）</label><input type="number" id="cfg-context-window-tokens" min="16000" max="2000000" step="10000" value="${esc(c.api.contextWindowTokens ?? 1000000)}" /></div>
     </div>
     <div class="checkbox-row"><input type="checkbox" id="cfg-vision" ${c.api.vision !== false ? 'checked' : ''} />
       <label for="cfg-vision">图片输入（关闭则移除看图工具，模型只会看到 [图片] 占位符）</label>
@@ -3131,6 +3256,164 @@ function renderMemorySettingsSection(c) {
     <div class="hint">条数超过阈值且距上次整理超过该冷却时间后，才会在运行结束后后台整理。默认 6 小时（21600000 毫秒）。</div>`;
 }
 
+const TIME_RULE_LABELS = {
+  inherit: '继承全局', 'deepseek-offpeak': 'DS 低峰时段',
+  custom: '自定义时段', always: '全天活跃'
+};
+const TIME_DAYS = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+
+function renderTimeControlSection(c) {
+  if (state.timeControlConfig !== c) {
+    state.timeControlConfig = c;
+    state.timeControlDraft = structuredClone(c.timeControl || {
+      enabled: false, schedule: { mode: 'deepseek-offpeak', windows: [] }, overrides: {}
+    });
+  }
+  state.timeControlTarget ||= '';
+  return `
+    <section class="time-control-settings">
+      <h3>时间控制</h3>
+      <div class="checkbox-row">
+        <input type="checkbox" id="tc-enabled" ${state.timeControlDraft.enabled ? 'checked' : ''} />
+        <label for="tc-enabled">启用时间控制</label>
+      </div>
+      <div class="time-control-summary">
+        <span>Asia/Shanghai · UTC+8</span><span id="tc-live-state"></span>
+      </div>
+      <div class="field"><label for="tc-target">配置对象</label>
+        <select id="tc-target">${timeControlTargetOptions()}</select>
+      </div>
+      <div id="tc-rule-editor">${renderTimeRuleEditor()}</div>
+      <div class="time-control-summary" id="tc-next-change"></div>
+    </section>`;
+}
+
+function timeControlTargetOptions() {
+  const c = state.config || state.timeControlConfig || {};
+  const keys = [...new Set([
+    ...(state.chats || []).map((chat) => chat.key),
+    ...(state.timeControlStatus?.chats || []).map((chat) => chat.chatKey),
+    ...(c.allow?.groups || []).map((id) => `group:${id}`),
+    ...(c.allow?.private || []).map((id) => `private:${id}`),
+    ...Object.keys(state.timeControlDraft?.overrides || {})
+  ])].filter((key) => /^(group|private):\d+$/.test(key)).sort();
+  if (state.timeControlTarget && !keys.includes(state.timeControlTarget)) keys.push(state.timeControlTarget);
+  return [['', '全局默认（含每日动态）'], ...keys.map((key) => [key, formatChatTitle(key, chatNameOf(key))])]
+    .map(([key, label]) => `<option value="${esc(key)}" ${state.timeControlTarget === key ? 'selected' : ''}>${esc(label)}</option>`)
+    .join('');
+}
+
+function renderTimeRuleEditor() {
+  const draft = state.timeControlDraft;
+  const key = state.timeControlTarget;
+  const rule = key ? draft.overrides[key] || { mode: 'inherit', windows: [] } : draft.schedule;
+  const modes = key ? Object.keys(TIME_RULE_LABELS) : Object.keys(TIME_RULE_LABELS).filter((mode) => mode !== 'inherit');
+  const preset = rule.mode === 'deepseek-offpeak' ? `
+    <dl class="time-control-preset">
+      <dt>周一至周五</dt><dd>00:00–09:00 / 12:00–14:00 / 18:00–24:00</dd>
+      <dt>周六、周日</dt><dd>全天</dd>
+    </dl>` : '';
+  return `
+    <div class="field"><label for="tc-mode">活跃规则</label>
+      <select id="tc-mode">${modes.map((mode) =>
+        `<option value="${mode}" ${rule.mode === mode ? 'selected' : ''}>${TIME_RULE_LABELS[mode]}</option>`
+      ).join('')}</select>
+    </div>
+    ${preset}
+    ${rule.mode === 'custom' ? `
+      <div id="tc-windows">
+        ${(rule.windows || []).map((window, index) => `
+          <div class="tc-window" data-index="${index}">
+            <div class="tc-days">${TIME_DAYS.map((label, i) =>
+              `<label><input type="checkbox" data-day="${i + 1}" ${(window.days || []).includes(i + 1) ? 'checked' : ''} />${label}</label>`
+            ).join('')}</div>
+            <div class="field"><label>开始</label><input class="tc-start" type="time" value="${esc(window.start)}" /></div>
+            <div class="field"><label>结束</label><input class="tc-end" type="text" inputmode="numeric" value="${esc(window.end)}" placeholder="24:00" /></div>
+            <button type="button" class="icon-btn tc-remove" data-index="${index}" title="删除时间段" aria-label="删除时间段">×</button>
+          </div>`).join('')}
+      </div>
+      <button type="button" class="icon-btn" id="tc-add" title="添加时间段" aria-label="添加时间段">+</button>
+    ` : ''}`;
+}
+
+function captureTimeControlRule() {
+  const mode = $('#tc-mode')?.value;
+  if (!mode || !state.timeControlDraft) return;
+  const key = state.timeControlTarget;
+  const old = key ? state.timeControlDraft.overrides[key] : state.timeControlDraft.schedule;
+  const windows = $('#tc-windows') ? $$('.tc-window').map((row) => ({
+    days: $$('input[data-day]:checked', row).map((input) => Number(input.dataset.day)),
+    start: $('.tc-start', row).value,
+    end: $('.tc-end', row).value.trim()
+  })) : (old?.windows || []);
+  if (key) {
+    if (mode === 'inherit') delete state.timeControlDraft.overrides[key];
+    else state.timeControlDraft.overrides[key] = { mode, windows };
+  } else state.timeControlDraft.schedule = { mode, windows };
+}
+
+function updateTimeControlLiveState() {
+  const status = state.timeControlStatus;
+  const current = state.timeControlTarget
+    ? status?.chats?.find((chat) => chat.chatKey === state.timeControlTarget) : status?.global;
+  const label = $('#tc-live-state');
+  if (label) label.textContent = !current?.enabled ? '时间控制未启用' : current.active ? '当前活跃' : '当前仅记录';
+  const next = $('#tc-next-change');
+  if (next) next.textContent = current?.enabled && current.nextChangeAt
+    ? `下次切换：${new Date(current.nextChangeAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })}`
+    : '';
+}
+
+async function loadTimeControlStatus() {
+  if (!$('#tc-target')) return;
+  try {
+    state.timeControlStatus = await api('/api/time-control/status');
+    const target = $('#tc-target');
+    if (!target) return;
+    target.innerHTML = timeControlTargetOptions();
+    updateTimeControlLiveState();
+  } catch (error) {
+    if ($('#tc-live-state')) $('#tc-live-state').textContent = error.message;
+  }
+}
+
+function bindTimeControlEvents() {
+  const editor = $('#tc-rule-editor');
+  const redraw = () => { editor.innerHTML = renderTimeRuleEditor(); updateTimeControlLiveState(); };
+  $('#tc-enabled').addEventListener('change', (event) => {
+    state.timeControlDraft.enabled = event.target.checked;
+  });
+  $('#tc-target').addEventListener('change', (event) => {
+    captureTimeControlRule();
+    state.timeControlTarget = event.target.value;
+    redraw();
+  });
+  editor.addEventListener('change', (event) => {
+    captureTimeControlRule();
+    if (event.target.id === 'tc-mode') redraw();
+  });
+  editor.addEventListener('click', (event) => {
+    const button = event.target.closest('button');
+    if (!button) return;
+    captureTimeControlRule();
+    const rule = state.timeControlTarget
+      ? state.timeControlDraft.overrides[state.timeControlTarget] : state.timeControlDraft.schedule;
+    if (button.id === 'tc-add' && rule.windows.length < 32) {
+      rule.windows.push({ days: [1, 2, 3, 4, 5, 6, 7], start: '00:00', end: '24:00' });
+    } else if (button.classList.contains('tc-remove')) rule.windows.splice(Number(button.dataset.index), 1);
+    redraw();
+  });
+  loadTimeControlStatus();
+}
+
+const MOMENT_STATUS_LABELS = {
+  running: '生成中', preview: '草稿', skipped: '决定不发布',
+  publishing: '发布中', published: '已发布', 'publish-unknown': '发布结果待核对',
+  failed: '生成失败', interrupted: '生成已中断', deferred: '等待活跃时间'
+};
+const momentStatusLabel = (record) => record?.status === 'preview' && record.decision === 'skip'
+  ? '预览：决定不发布' : (MOMENT_STATUS_LABELS[record?.status] || record?.status || '-');
+
 function renderDailyMomentsSection(c) {
   const moments = c.dailyMoments || {};
   const visibility = Number(moments.visibility) || 4;
@@ -3163,7 +3446,7 @@ function renderDailyMomentsSection(c) {
       <div class="field"><label>模型最大轮次</label><input type="number" id="cfg-moments-rounds" min="2" max="16" value="${esc(moments.maxRounds ?? 8)}" /></div>
     </div>
     <div class="settings-actions">
-      <button class="btn btn-small" id="daily-moments-preview-btn">预览一次</button>
+      <button class="btn btn-small" id="daily-moments-preview-btn">生成新草稿</button>
       <button class="btn btn-primary btn-small" id="daily-moments-run-btn">立即总结并执行</button>
       <span id="daily-moments-action-result" class="muted"></span>
     </div>
@@ -3175,24 +3458,165 @@ async function loadDailyMomentsStatus() {
   if (!box) return;
   try {
     const status = await api('/api/daily-moments/status');
-    const latest = status.latest;
-    const records = Array.isArray(status.records) ? status.records.slice(0, 7) : [];
+    const records = Array.isArray(status.records) ? status.records : [];
+    const latest = records.find((record) => record.id === state.currentMomentId) || status.latest;
+    for (const button of $$('#daily-moments-preview-btn,#daily-moments-run-btn')) button.disabled = status.running;
+    const publishable = latest?.status === 'preview' && latest.decision === 'publish' && latest.content;
     box.innerHTML = `
       <div class="field-row">
         <div class="field"><label>任务状态</label><div>${status.running ? '运行中' : (status.enabled ? '等待中' : '已关闭')}</div></div>
         <div class="field"><label>下次执行</label><div>${status.nextRunAt ? esc(fmtTime(status.nextRunAt)) : '-'}</div></div>
-        <div class="field"><label>最近结果</label><div>${latest ? esc(latest.status || '-') : '-'}</div></div>
+        <div class="field"><label>当前记录</label><div>${latest ? esc(`${latest.dayKey} · ${momentStatusLabel(latest)}`) : '-'}</div></div>
       </div>
-      ${latest?.content ? `<div class="field"><label>最近正文</label><div class="daily-moments-content">${esc(latest.content)}</div></div>` : ''}
-      ${latest?.reason ? `<div class="field"><label>最近决定</label><div>${esc(latest.reason)}</div></div>` : ''}
+      ${latest?.content ? `<div class="field"><label>正文</label><div class="daily-moments-content">${esc(latest.content)}</div></div>` : ''}
+      ${latest?.reason ? `<div class="field"><label>决定理由</label><div>${esc(latest.reason)}</div></div>` : ''}
+      ${latest?.error ? `<div class="moment-error" role="alert">${esc(latest.error)}</div>` : ''}
+      ${latest?.tid ? `<div class="field"><label>说说 ID</label><code>${esc(latest.tid)}</code></div>` : ''}
+      ${latest?.imageErrors?.length ? `<div class="moment-error">${latest.imageErrors.map(esc).join('<br>')}</div>` : ''}
+      <div class="settings-actions">
+        ${publishable ? `<button type="button" class="btn btn-primary btn-small" id="moment-publish-draft" ${status.running ? 'disabled' : ''}>发布这份草稿</button>` : ''}
+        ${latest?.status === 'publish-unknown' ? `<button type="button" class="btn btn-small" id="moment-reconcile" ${status.running ? 'disabled' : ''}>核对空间发布结果</button>` : ''}
+      </div>
+      ${latest?.groupSummaries?.length ? `<details class="moment-summaries"><summary>内部群摘要（${latest.groupSummaries.length}）</summary>
+        ${latest.groupSummaries.map((group) => `<div class="field"><label>${esc(group.groupName || group.chatKey)}</label><div>${esc(group.summary)}</div></div>`).join('')}
+      </details>` : ''}
       ${records.length ? `<div class="table-wrap"><table class="usage-table">
-        <thead><tr><th>日期</th><th>状态</th><th>群数</th><th>配图</th><th>时间</th></tr></thead>
-        <tbody>${records.map((record) => `<tr>
+        <thead><tr><th>日期</th><th>状态</th><th>群数</th><th>配图</th><th>时间</th><th></th></tr></thead>
+        <tbody>${records.slice(0, 7).map((record) => `<tr>
           <td>${esc(record.dayKey || '-')}</td>
-          <td>${esc(record.status || '-')}</td>
+          <td>${esc(momentStatusLabel(record))}</td>
           <td>${Number(record.groupCount) || 0}</td>
           <td>${Number(record.imageCount) || 0}</td>
           <td>${record.endedAt || record.startedAt ? esc(fmtTime(record.endedAt || record.startedAt)) : '-'}</td>
+          <td><button type="button" class="btn btn-small" data-moment-select="${esc(record.id)}">查看</button></td>
+        </tr>`).join('')}</tbody>
+      </table></div>` : ''}`;
+    $$('[data-moment-select]', box).forEach((button) => button.addEventListener('click', () => {
+      state.currentMomentId = button.dataset.momentSelect;
+      loadDailyMomentsStatus();
+    }));
+    const recordAction = async (action) => {
+      if (action === 'publish') {
+        const visibility = $('#cfg-moments-visibility')?.selectedOptions?.[0]?.textContent || '当前可见范围';
+        if (!confirm(`确认发布这份草稿？（${visibility}）\n\n${String(latest.content).slice(0, 180)}`)) return;
+      }
+      const hint = $('#daily-moments-action-result');
+      const buttons = $$('#daily-moments-preview-btn,#daily-moments-run-btn,#moment-publish-draft,#moment-reconcile');
+      buttons.forEach((button) => { button.disabled = true; });
+      if (hint) hint.textContent = action === 'publish' ? '发布中…' : '核对中…';
+      try {
+        if (action === 'publish') await saveConfig({ quiet: true });
+        const result = await api(`/api/daily-moments/records/${latest.id}/${action}`, {
+          method: 'POST', body: JSON.stringify({ confirm: action === 'publish' })
+        });
+        state.currentMomentId = result.record?.id || latest.id;
+        if (hint) hint.textContent = result.matched === false
+          ? '近期列表未找到，仍需人工核对；未重发'
+          : `${result.alreadyAttempted ? '未重复发布：' : ''}${momentStatusLabel(result.record)}`;
+      } catch (error) {
+        if (hint) hint.textContent = error.message;
+      } finally {
+        buttons.forEach((button) => { button.disabled = false; });
+        await loadDailyMomentsStatus();
+      }
+    };
+    $('#moment-publish-draft')?.addEventListener('click', () => recordAction('publish'));
+    $('#moment-reconcile')?.addEventListener('click', () => recordAction('reconcile'));
+  } catch (error) {
+    box.innerHTML = `<span class="muted">状态读取失败：${esc(error.message)}</span>`;
+  }
+}
+
+const QZONE_RUN_LABELS = {
+  running: '运行中',
+  baseline: '已建立初始基线',
+  idle: '没有新内容',
+  done: '已完成',
+  'partial-unknown': '部分结果待核对',
+  failed: '执行失败',
+  interrupted: '执行中断',
+  deferred: '等待活跃时间'
+};
+
+function renderQzoneInteractionSection(c) {
+  const q = c.qzoneInteractions || {};
+  return `
+    <h3 id="settings-qzone-interactions">动态互动</h3>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-qzi-enabled" ${q.enabled === true ? 'checked' : ''} />
+      <label for="cfg-qzi-enabled">启用好友动态阅览、点赞评论与评论回复</label></div>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-qzi-catchup" ${q.startupCatchup === true ? 'checked' : ''} />
+      <label for="cfg-qzi-catchup">首次启用时处理已有内容</label></div>
+    <div class="field-row">
+      <div class="field"><label>好友动态检查间隔（分钟）</label><input type="number" id="cfg-qzi-feed-interval" min="5" max="1440" value="${esc(q.feedIntervalMinutes ?? 60)}" /></div>
+      <div class="field"><label>评论回复检查间隔（分钟）</label><input type="number" id="cfg-qzi-reply-interval" min="1" max="1440" value="${esc(q.replyIntervalMinutes ?? 5)}" /></div>
+      <div class="field"><label>只处理最近（小时）</label><input type="number" id="cfg-qzi-max-age" min="1" max="720" value="${esc(q.maxAgeHours ?? 72)}" /></div>
+    </div>
+    <div class="field-row">
+      <div class="field"><label>每次抓取动态数</label><input type="number" id="cfg-qzi-feed-count" min="1" max="50" value="${esc(q.feedFetchCount ?? 30)}" /></div>
+      <div class="field"><label>检查自己的动态数</label><input type="number" id="cfg-qzi-own-count" min="1" max="30" value="${esc(q.ownPostCount ?? 10)}" /></div>
+      <div class="field"><label>单批最多提交条目</label><input type="number" id="cfg-qzi-batch-items" min="1" max="50" value="${esc(q.maxBatchItems ?? 20)}" /></div>
+    </div>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-qzi-likes" ${q.allowLikes !== false ? 'checked' : ''} />
+      <label for="cfg-qzi-likes">允许自主点赞</label></div>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-qzi-comments" ${q.allowComments !== false ? 'checked' : ''} />
+      <label for="cfg-qzi-comments">允许自主评论好友动态</label></div>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-qzi-replies" ${q.allowReplies !== false ? 'checked' : ''} />
+      <label for="cfg-qzi-replies">允许自主回复动态评论</label></div>
+    <div class="field-row">
+      <div class="field"><label>每轮最多点赞</label><input type="number" id="cfg-qzi-max-likes" min="0" max="20" value="${esc(q.maxLikesPerRun ?? 3)}" /></div>
+      <div class="field"><label>每轮最多评论</label><input type="number" id="cfg-qzi-max-comments" min="0" max="10" value="${esc(q.maxCommentsPerRun ?? 2)}" /></div>
+      <div class="field"><label>每轮最多回复</label><input type="number" id="cfg-qzi-max-replies" min="0" max="20" value="${esc(q.maxRepliesPerRun ?? 5)}" /></div>
+    </div>
+    <div class="field-row">
+      <div class="field"><label>评论最长字符</label><input type="number" id="cfg-qzi-comment-chars" min="5" max="200" value="${esc(q.commentMaxChars ?? 60)}" /></div>
+      <div class="field"><label>回复最长字符</label><input type="number" id="cfg-qzi-reply-chars" min="5" max="200" value="${esc(q.replyMaxChars ?? 60)}" /></div>
+      <div class="field"><label>写操作随机间隔（毫秒）</label>
+        <div style="display:flex;gap:8px">
+          <input type="number" id="cfg-qzi-delay-min" min="0" max="10000" step="100" value="${esc(q.actionDelayMinMs ?? 700)}" />
+          <input type="number" id="cfg-qzi-delay-max" min="0" max="15000" step="100" value="${esc(q.actionDelayMaxMs ?? 1800)}" />
+        </div></div>
+    </div>
+    <div class="settings-actions">
+      <button class="btn btn-primary btn-small" id="qzi-run-feed-btn">立即阅览好友动态</button>
+      <button class="btn btn-small" id="qzi-run-reply-btn">立即检查评论回复</button>
+      <span id="qzi-action-result" class="muted"></span>
+    </div>
+    <div id="qzone-interactions-status" class="daily-moments-status"><span class="muted">正在读取状态…</span></div>`;
+}
+
+async function loadQzoneInteractionStatus() {
+  const box = $('#qzone-interactions-status');
+  if (!box) return;
+  try {
+    const status = await api('/api/qzone-interactions/status');
+    const records = Array.isArray(status.records) ? status.records : [];
+    const latest = records[0];
+    for (const button of $$('#qzi-run-feed-btn,#qzi-run-reply-btn')) {
+      button.disabled = status.running;
+    }
+    box.innerHTML = `
+      <div class="field-row">
+        <div class="field"><label>任务状态</label><div>${status.running ? '运行中' : (status.enabled ? '等待中' : '已关闭')}</div></div>
+        <div class="field"><label>下次检查</label><div>${status.nextRunAt ? esc(fmtTime(status.nextRunAt)) : '-'}</div></div>
+        <div class="field"><label>未阅览动态</label><div>${Number(status.unreadFeeds) || 0}</div></div>
+        <div class="field"><label>待决定回复</label><div>${Number(status.unreadReplies) || 0}</div></div>
+        <div class="field"><label>结果待核对</label><div>${Number(status.uncertain) || 0}</div></div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label>上次好友动态检查</label><div>${status.lastFeedPollAt ? esc(fmtTime(status.lastFeedPollAt)) : '-'}</div></div>
+        <div class="field"><label>上次评论检查</label><div>${status.lastReplyPollAt ? esc(fmtTime(status.lastReplyPollAt)) : '-'}</div></div>
+      </div>
+      ${latest?.error ? `<div class="moment-error" role="alert">${esc(latest.error)}</div>` : ''}
+      ${records.length ? `<div class="table-wrap"><table class="usage-table">
+        <thead><tr><th>时间</th><th>类型</th><th>状态</th><th>动态</th><th>回复</th><th>写操作</th><th>延后</th></tr></thead>
+        <tbody>${records.slice(0, 10).map((record) => `<tr>
+          <td>${record.startedAt ? esc(fmtTime(record.startedAt)) : '-'}</td>
+          <td>${esc(record.kind || '-')}</td>
+          <td>${esc(QZONE_RUN_LABELS[record.status] || record.status || '-')}</td>
+          <td>${Number(record.selectedFeeds) || 0}</td>
+          <td>${Number(record.selectedReplies) || 0}</td>
+          <td>${Array.isArray(record.actions) ? record.actions.length : 0}</td>
+          <td>${(Number(record.deferredFeeds) || 0) + (Number(record.deferredReplies) || 0)}</td>
         </tr>`).join('')}</tbody>
       </table></div>` : ''}`;
   } catch (error) {
@@ -3424,7 +3848,8 @@ function renderConversationModePanels(conversation = {}) {
           <div class="field-row conversation-mode-fields">
             <div class="field"><label>硬上限后待续接（分钟）</label><input type="number" id="cfg-life-rollover" min="1" max="60" value="${esc(Math.round((conversation.rolloverArmedMs ?? 600000) / 60000))}" /></div>
             <div class="field"><label>首次读取历史条数</label><input type="number" id="cfg-life-history" min="1" max="500" value="${esc(conversation.lifecycleContextCount ?? 100)}" /></div>
-            <div class="field"><label>追加上下文上限（字符）</label><input type="number" id="cfg-life-chars" min="20000" max="1000000" step="10000" value="${esc(conversation.maxTranscriptChars ?? 240000)}" /></div>
+            <div class="field"><label>换代输入上限（Token）</label><input type="number" id="cfg-life-tokens" min="5000" max="500000" step="1000" value="${esc(conversation.lifecycleRolloverInputTokens ?? 32000)}" /></div>
+            <div class="field"><label>追加上下文兜底（字符）</label><input type="number" id="cfg-life-chars" min="20000" max="1000000" step="10000" value="${esc(conversation.maxTranscriptChars ?? 240000)}" /></div>
           </div>
         </section>
       </div>
@@ -3473,7 +3898,8 @@ return `
 
     <h3>所有模式 · 运行节奏</h3>
     <div class="field-row">
-      <div class="field"><label>防抖聚批窗口（毫秒）—— 等连发消息聚成一批再开运行</label><input type="number" id="cfg-wakedelay" min="0" value="${esc(c.wakeDelayMs)}" /></div>
+      <div class="field"><label>未思考等待最短值（毫秒）</label><input type="number" id="cfg-wakedelay-min" min="0" max="20000" value="${esc(c.wakeDelayMinMs ?? c.wakeDelayMs ?? 8000)}" /></div>
+      <div class="field"><label>未思考等待最长值（毫秒）</label><input type="number" id="cfg-wakedelay-max" min="0" max="20000" value="${esc(c.wakeDelayMaxMs ?? c.wakeDelayMs ?? 12000)}" /></div>
       <div class="field"><label>批次间隔（毫秒）—— 上轮结束到下轮处理的间隔</label><input type="number" id="cfg-draindelay" min="0" value="${esc(c.drainDelayMs)}" /></div>
       <div class="field"><label>同时处理几个会话</label><input type="number" id="cfg-maxruns" min="1" max="8" value="${esc(c.maxConcurrentRuns)}" /></div>
     </div>
@@ -3637,6 +4063,7 @@ function renderOnebotSection(c) {
 }
 
 function bindSettingsEvents(c) {
+  if (state.settingsSection === 'time-control') bindTimeControlEvents();
   // 保存当前区块设置（通用保存按钮）。只有当前区块的字段才会被读取，不会 null 报错。
   const saveCfgBtn = $('#save-cfg-btn');
   if (saveCfgBtn) saveCfgBtn.addEventListener('click', async () => {
@@ -3657,10 +4084,11 @@ function bindSettingsEvents(c) {
   if ((state.settingsSection || 'api') === 'moments') {
     loadDailyMomentsStatus();
     const runMoments = async (publish) => {
-      const button = publish ? $('#daily-moments-run-btn') : $('#daily-moments-preview-btn');
+      const buttons = $$('#daily-moments-run-btn,#daily-moments-preview-btn,#moment-publish-draft,#moment-reconcile');
       const result = $('#daily-moments-action-result');
       if (publish && !confirm('立即汇总今天的群聊，并允许模型按决定发布一条说说？')) return;
-      button.disabled = true;
+      state.currentMomentId = null;
+      buttons.forEach((button) => { button.disabled = true; });
       result.textContent = publish ? '正在总结并执行…' : '正在生成预览…';
       try {
         await saveConfig({ quiet: true });
@@ -3669,18 +4097,48 @@ function bindSettingsEvents(c) {
           body: JSON.stringify({ publish, confirm: publish })
         });
         const record = response.record || {};
+        state.currentMomentId = record.id || null;
         result.textContent = response.alreadyAttempted
-          ? `今天已执行：${record.status || '-'}`
-          : `${publish ? '执行完成' : '预览完成'}：${record.status || '-'}${record.tid ? ` · ${record.tid}` : ''}`;
+          ? `未重复发布：${momentStatusLabel(record)}`
+          : `${publish ? '执行完成' : '草稿生成完成'}：${momentStatusLabel(record)}${record.tid ? ` · ${record.tid}` : ''}`;
         await loadDailyMomentsStatus();
       } catch (error) {
         result.textContent = `执行失败：${error.message}`;
       } finally {
-        button.disabled = false;
+        buttons.forEach((button) => { button.disabled = false; });
+        await loadDailyMomentsStatus();
       }
     };
     $('#daily-moments-preview-btn')?.addEventListener('click', () => runMoments(false));
     $('#daily-moments-run-btn')?.addEventListener('click', () => runMoments(true));
+  }
+
+  if ((state.settingsSection || 'api') === 'qzone-interactions') {
+    loadQzoneInteractionStatus();
+    const runInteractions = async (kind) => {
+      const label = kind === 'feed' ? '阅览好友动态并允许模型点赞或评论' : '检查新评论并允许模型回复';
+      if (!confirm(`确认立即${label}？`)) return;
+      const buttons = $$('#qzi-run-feed-btn,#qzi-run-reply-btn');
+      const result = $('#qzi-action-result');
+      buttons.forEach((button) => { button.disabled = true; });
+      result.textContent = '执行中…';
+      try {
+        await saveConfig({ quiet: true });
+        const response = await api('/api/qzone-interactions/run', {
+          method: 'POST',
+          body: JSON.stringify({ kind, confirm: true })
+        });
+        const run = response.run || {};
+        result.textContent = `${QZONE_RUN_LABELS[run.status] || run.status || '完成'}：动态 ${Number(run.selectedFeeds) || 0}，回复 ${Number(run.selectedReplies) || 0}`;
+      } catch (error) {
+        result.textContent = `执行失败：${error.message}`;
+      } finally {
+        buttons.forEach((button) => { button.disabled = false; });
+        await loadQzoneInteractionStatus();
+      }
+    };
+    $('#qzi-run-feed-btn')?.addEventListener('click', () => runInteractions('feed'));
+    $('#qzi-run-reply-btn')?.addEventListener('click', () => runInteractions('reply'));
   }
 
   $('#change-console-token-btn')?.addEventListener('click', async () => {
@@ -4955,6 +5413,15 @@ async function saveConfig({ quiet = false } = {}) {
 
   const patch = {};
 
+  if (sec === 'time-control') {
+    captureTimeControlRule();
+    patch.timeControl = {
+      ...structuredClone(state.timeControlDraft),
+      enabled: chk('#tc-enabled'),
+      overrides: { __replace__: structuredClone(state.timeControlDraft.overrides) }
+    };
+  }
+
   if (sec === 'memory') {
     patch.memory = {
       ...(c.memory || {}),
@@ -4993,11 +5460,82 @@ async function saveConfig({ quiet = false } = {}) {
     };
   }
 
+  if (sec === 'qzone-interactions') {
+    patch.qzoneInteractions = {
+      ...(c.qzoneInteractions || {}),
+      enabled: chk('#cfg-qzi-enabled', c.qzoneInteractions?.enabled === true),
+      startupCatchup: chk('#cfg-qzi-catchup', c.qzoneInteractions?.startupCatchup === true),
+      feedIntervalMinutes: clampInt(
+        val('#cfg-qzi-feed-interval', c.qzoneInteractions?.feedIntervalMinutes),
+        5, 1440, 60
+      ),
+      replyIntervalMinutes: clampInt(
+        val('#cfg-qzi-reply-interval', c.qzoneInteractions?.replyIntervalMinutes),
+        1, 1440, 5
+      ),
+      feedFetchCount: clampInt(
+        val('#cfg-qzi-feed-count', c.qzoneInteractions?.feedFetchCount),
+        1, 50, 30
+      ),
+      ownPostCount: clampInt(
+        val('#cfg-qzi-own-count', c.qzoneInteractions?.ownPostCount),
+        1, 30, 10
+      ),
+      maxAgeHours: clampInt(
+        val('#cfg-qzi-max-age', c.qzoneInteractions?.maxAgeHours),
+        1, 720, 72
+      ),
+      maxBatchItems: clampInt(
+        val('#cfg-qzi-batch-items', c.qzoneInteractions?.maxBatchItems),
+        1, 50, 20
+      ),
+      allowLikes: chk('#cfg-qzi-likes', c.qzoneInteractions?.allowLikes !== false),
+      allowComments: chk('#cfg-qzi-comments', c.qzoneInteractions?.allowComments !== false),
+      allowReplies: chk('#cfg-qzi-replies', c.qzoneInteractions?.allowReplies !== false),
+      maxLikesPerRun: clampInt(
+        val('#cfg-qzi-max-likes', c.qzoneInteractions?.maxLikesPerRun),
+        0, 20, 3
+      ),
+      maxCommentsPerRun: clampInt(
+        val('#cfg-qzi-max-comments', c.qzoneInteractions?.maxCommentsPerRun),
+        0, 10, 2
+      ),
+      maxRepliesPerRun: clampInt(
+        val('#cfg-qzi-max-replies', c.qzoneInteractions?.maxRepliesPerRun),
+        0, 20, 5
+      ),
+      commentMaxChars: clampInt(
+        val('#cfg-qzi-comment-chars', c.qzoneInteractions?.commentMaxChars),
+        5, 200, 60
+      ),
+      replyMaxChars: clampInt(
+        val('#cfg-qzi-reply-chars', c.qzoneInteractions?.replyMaxChars),
+        5, 200, 60
+      ),
+      actionDelayMinMs: clampInt(
+        val('#cfg-qzi-delay-min', c.qzoneInteractions?.actionDelayMinMs),
+        0, 10000, 700
+      ),
+      actionDelayMaxMs: clampInt(
+        val('#cfg-qzi-delay-max', c.qzoneInteractions?.actionDelayMaxMs),
+        0, 15000, 1800
+      )
+    };
+  }
+
   if (sec === 'api') {
     patch.api = {
       vision: chk('#cfg-vision', c.api.vision !== false),
       temperature: Number(val('#cfg-temperature', c.api.temperature)) || 0.8,
       maxRounds: Number(val('#cfg-maxrounds', c.api.maxRounds)) || 12,
+      maxRunTokens: clampInt(
+        val('#cfg-max-run-tokens', c.api.maxRunTokens),
+        20000, 1000000, 160000
+      ),
+      contextWindowTokens: clampInt(
+        val('#cfg-context-window-tokens', c.api.contextWindowTokens),
+        16000, 2000000, 1000000
+      ),
       // 成本核算：官方价开关（走中转站时通常要关掉开关自己填）
       useOfficialPrice: chk('#cfg-useofficialprice', c.api.useOfficialPrice !== false),
       // 远程价格表 URL：留空 = 只用内置表
@@ -5112,7 +5650,20 @@ async function saveConfig({ quiet = false } = {}) {
   }
 
   if (sec === 'chat') {
-    patch.wakeDelayMs = Number(val('#cfg-wakedelay', c.wakeDelayMs)) || 2000;
+    let wakeDelayMinMs = clampInt(
+      val('#cfg-wakedelay-min', c.wakeDelayMinMs ?? c.wakeDelayMs),
+      0, 20000, 8000
+    );
+    let wakeDelayMaxMs = clampInt(
+      val('#cfg-wakedelay-max', c.wakeDelayMaxMs ?? c.wakeDelayMs),
+      0, 20000, 12000
+    );
+    if (wakeDelayMinMs > wakeDelayMaxMs) {
+      [wakeDelayMinMs, wakeDelayMaxMs] = [wakeDelayMaxMs, wakeDelayMinMs];
+    }
+    patch.wakeDelayMinMs = wakeDelayMinMs;
+    patch.wakeDelayMaxMs = wakeDelayMaxMs;
+    patch.wakeDelayMs = Math.round((wakeDelayMinMs + wakeDelayMaxMs) / 2);
     patch.drainDelayMs = Number(val('#cfg-draindelay', c.drainDelayMs)) || 1200;
     patch.maxConcurrentRuns = Number(val('#cfg-maxruns', c.maxConcurrentRuns)) || 2;
     patch.conversation = {
@@ -5155,6 +5706,10 @@ async function saveConfig({ quiet = false } = {}) {
       lifecycleContextCount: clampInt(
         val('#cfg-life-history', c.conversation?.lifecycleContextCount),
         1, 500, 100
+      ),
+      lifecycleRolloverInputTokens: clampInt(
+        val('#cfg-life-tokens', c.conversation?.lifecycleRolloverInputTokens),
+        5000, 500000, 32000
       ),
       maxTranscriptChars: clampInt(
         val('#cfg-life-chars', c.conversation?.maxTranscriptChars),

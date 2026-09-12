@@ -465,9 +465,25 @@ async function main() {
   assert.ok(app.store.getChatMeta('group:456').unread >= 1, '暂停期间消息仍入档为未读');
   await fetch(`http://127.0.0.1:${cfg.server.port}/api/pause`, { method: 'POST', body: JSON.stringify({ paused: false }) });
   llm.state.script.push({ content: '（恢复后检查一遍，不用回）' }); // 显式脚本，保证后续索引不漂移
-  await fetch(`http://127.0.0.1:${cfg.server.port}/api/chats/group_456/wake`, { method: 'POST', body: '{}' });
   await waitSessionDone('暂停期间的消息');
-  pass('暂停/恢复 + 手动唤醒（暂停期间消息积压为未读）');
+  pass('暂停/恢复 + 自动处理暂停期间积压');
+
+  // ── 场景 8b：存档页主动唤醒在没有未读消息时仍应创建一次上下文运行 ──
+  const callsBeforeManualWake = llm.state.requests.length;
+  llm.state.script.push({ content: '（看了最近存档，目前不用接话）' });
+  const manualWakeResponse = await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/chats/group_456/wake`,
+    { method: 'POST', body: '{}' }
+  );
+  assert.equal(manualWakeResponse.status, 202, '手动唤醒接口返回已接受');
+  assert.equal((await manualWakeResponse.json()).mode, 'context', '无未读时基于最近存档运行');
+  await waitFor(
+    () => llm.state.requests.length >= callsBeforeManualWake + 1,
+    5000,
+    '存档页主动唤醒'
+  );
+  await waitSessionDone('控制台主动唤醒');
+  pass('存档页主动唤醒：无未读也会基于最近上下文运行');
 
   // ── 场景 9：私聊 ──
   llm.state.script.push(
@@ -732,12 +748,55 @@ async function main() {
     }
   );
   assert.equal(unconfirmedMoment.status, 409, '手动发布说说必须显式确认');
+  const originalStartProactive = app.orchestrator.startProactiveLoop;
+  const originalStopProactive = app.orchestrator.stopProactiveLoop;
+  const originalReconfigureMoments = app.dailyMoments.reconfigure;
+  let proactiveStarts = 0;
+  let proactiveStops = 0;
+  let momentsReconfigures = 0;
+  app.orchestrator.startProactiveLoop = () => { proactiveStarts += 1; };
+  app.orchestrator.stopProactiveLoop = () => { proactiveStops += 1; };
+  app.dailyMoments.reconfigure = () => { momentsReconfigures += 1; };
+  await fetch(`http://127.0.0.1:${cfg.server.port}/api/config`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ ui: { refreshMs: cfg.ui?.refreshMs ?? 15000 } })
+  });
+  assert.deepEqual(
+    [proactiveStarts, proactiveStops, momentsReconfigures],
+    [0, 0, 0],
+    '保存无关设置不应重启后台定时器'
+  );
+  await fetch(`http://127.0.0.1:${cfg.server.port}/api/config`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ proactive: { enabled: true } })
+  });
+  await fetch(`http://127.0.0.1:${cfg.server.port}/api/config`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ proactive: { enabled: false } })
+  });
+  assert.deepEqual([proactiveStarts, proactiveStops], [1, 1],
+    '主动设置实际变化时才重配循环');
+  app.orchestrator.startProactiveLoop = originalStartProactive;
+  app.orchestrator.stopProactiveLoop = originalStopProactive;
+  app.dailyMoments.reconfigure = originalReconfigureMoments;
   const modelsRes = await (await fetch(`http://127.0.0.1:${cfg.server.port}/api/models`)).json();
   assert.strictEqual(modelsRes.models.length, 2, '模型列表 API');
   const sessRes = await (await fetch(`http://127.0.0.1:${cfg.server.port}/api/sessions`)).json();
   assert.ok(sessRes.sessions.length >= 8, `会话列表有记录（${sessRes.sessions.length}）`);
   const oneSession = await (await fetch(`http://127.0.0.1:${cfg.server.port}/api/sessions/${sessRes.sessions[0].id}`)).json();
   assert.ok(oneSession.messages && oneSession.systemPrompt);
+  assert.equal(oneSession.sessionMetrics.promptTokens, Number(oneSession.usage?.promptTokens) || 0);
+  assert.equal(oneSession.sessionMetrics.completionTokens, Number(oneSession.usage?.completionTokens) || 0);
+  assert.equal(oneSession.sessionMetrics.cachedTokens, Number(oneSession.usage?.cachedTokens) || 0);
+  assert.equal(
+    oneSession.sessionMetrics.toolCalls,
+    oneSession.messages.filter((message) => message?.toolCall).length
+  );
+  assert.equal(oneSession.sessionMetrics.webSearchCount, Number(oneSession.webSearchCount) || 0);
+  assert.ok(Number.isFinite(oneSession.sessionMetrics.estimatedCost));
   const chatsRes = await (await fetch(`http://127.0.0.1:${cfg.server.port}/api/chats`)).json();
   assert.ok(chatsRes.chats.some((c) => c.key === 'group:456'));
   app.store.upsertConversationThread('group:456', {

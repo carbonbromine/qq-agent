@@ -3,6 +3,7 @@
 // 对外抓取网页正文一律走 safe-fetch（web_fetch 工具）。
 import { getConfig } from './config.js';
 import { safeFetch } from './safe-fetch.js';
+import { assertTimeAllowed, withTimeWindow } from './time-gate.js';
 
 /** 查询词清洗：去 CQ 码、控制字符、超长截断。 */
 export function sanitizeQuery(query) {
@@ -61,6 +62,7 @@ export async function bingSearch(query) {
 
 /** 给工具用的统一入口：搜索 + 紧凑序列化。 */
 export async function webSearch(query) {
+  assertTimeAllowed();
   const clean = sanitizeQuery(query);
   if (!clean) throw new Error('查询词为空');
   const cfg = getConfig().webSearch ?? {};
@@ -84,7 +86,11 @@ export async function webSearch(query) {
  * 搜索结果生成的最终回答；URL/标题/摘要为黑盒，拿不到结构化来源。适合
  * “只要能搜到并总结”的场景；需要引用列表时请用 Bing / 其他搜索 API。
  */
-export async function deepSeekSearch(query) {
+export function deepSeekSearch(query) {
+  return withTimeWindow((signal) => deepSeekSearchRequest(query, signal));
+}
+
+async function deepSeekSearchRequest(query, signal) {
   const cfg = getConfig().webSearch?.deepseek ?? {};
   const apiKey = String(cfg.apiKey || process.env.DEEPSEEK_API_KEY || '').trim();
   if (!apiKey) throw new Error('DeepSeek 搜索需要 API Key（设置里填，或环境变量 DEEPSEEK_API_KEY）');
@@ -103,7 +109,7 @@ export async function deepSeekSearch(query) {
       tools: [{ type: 'web_search' }],
       stream: false
     }),
-    signal: AbortSignal.timeout(Math.max(10000, Number(cfg.timeoutMs) || 60000))
+    signal: AbortSignal.any([signal, AbortSignal.timeout(Math.max(10000, Number(cfg.timeoutMs) || 60000))])
   });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
@@ -304,7 +310,11 @@ function resolveCustomConfig(providerId = null) {
  *     适合 SearXNG、Tavily、自建聚合搜索等。
  *   - 'bing'：GET 一个搜索页并用 b_algo 块解析（兼容 Bing 结果格式的引擎，如部分 SearXNG 实例）。
  */
-export async function customSearch(query, providerId = null) {
+export function customSearch(query, providerId = null) {
+  return withTimeWindow((signal) => customSearchRequest(query, providerId, signal));
+}
+
+async function customSearchRequest(query, providerId, signal) {
   const cfg = resolveCustomConfig(providerId);
   const type = String(cfg.type || 'openai').toLowerCase();
 
@@ -332,7 +342,7 @@ export async function customSearch(query, providerId = null) {
       ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {})
     },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(Math.max(10000, Number(cfg.timeoutMs) || 20000))
+    signal: AbortSignal.any([signal, AbortSignal.timeout(Math.max(10000, Number(cfg.timeoutMs) || 20000))])
   });
   if (!res.ok) {
     const text = await res.text().catch(() => '');

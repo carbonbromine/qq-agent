@@ -20,46 +20,54 @@ export function nowMs() {
   return Date.now();
 }
 
-// ── 时间格式化（全部走本地时区，给模型/界面看） ─────────────────────────
+// ── 时间格式化（固定上海时区，给模型/界面看） ───────────────────────────
 const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+const SHANGHAI_OFFSET_MS = 8 * 60 * 60 * 1000;
 
 function pad2(n) {
   return String(n).padStart(2, '0');
 }
 
+function shanghaiDate(ts = Date.now()) {
+  const value = Number(ts);
+  return new Date((Number.isFinite(value) ? value : Date.now()) + SHANGHAI_OFFSET_MS);
+}
+
 /** 2026-08-30 21:33:05（周六） */
 export function formatFullTime(ts = Date.now()) {
-  const d = new Date(ts);
-  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}（${WEEKDAYS[d.getDay()]}）`;
+  const d = shanghaiDate(ts);
+  const formatted = `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())} ${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}:${pad2(d.getUTCSeconds())}（${WEEKDAYS[d.getUTCDay()]}）`;
+  // #region debug-point A:prompt-time
+  if (!String(process.argv[1]).includes('/test/')) (() => { try { const body = JSON.stringify({ sessionId: 'agent-time-sticker-download', runId: 'post-fix', hypothesisId: 'A', location: 'src/util.js:formatFullTime', msg: '[DEBUG] Formatted model prompt time', data: { ts: Number(ts), formatted, timezone: 'Asia/Shanghai', hostTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone, offsetMinutes: 480 }, ts: Date.now() }); const req = process.getBuiltinModule('node:http').request('http://192.168.31.10:7777/event', { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } }, (res) => res.resume()); req.on('error', () => {}); req.on('socket', (socket) => socket.unref()); req.setTimeout(500, () => req.destroy()); req.end(body); } catch {} })();
+  // #endregion
+  return formatted;
 }
 
 /** 08-30 21:33 */
 export function formatShortTime(ts = Date.now()) {
-  const d = new Date(ts);
-  return `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  const d = shanghaiDate(ts);
+  return `${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())} ${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}`;
 }
 
 /** 21:33:05 */
 export function formatClockTime(ts = Date.now()) {
-  const d = new Date(ts);
-  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+  const d = shanghaiDate(ts);
+  return `${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}:${pad2(d.getUTCSeconds())}`;
 }
 
 export function todayKey(ts = Date.now()) {
-  const value = Number(ts);
-  const d = new Date((Number.isFinite(value) ? value : Date.now()) + 8 * 60 * 60 * 1000);
+  const d = shanghaiDate(ts);
   return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
 }
 
 /** 当前时间所属上海自然日的起点，返回 UTC 毫秒时间戳。 */
 export function shanghaiDayStart(ts = Date.now()) {
-  const value = Number(ts);
-  const shifted = new Date((Number.isFinite(value) ? value : Date.now()) + 8 * 60 * 60 * 1000);
+  const shifted = shanghaiDate(ts);
   return Date.UTC(
     shifted.getUTCFullYear(),
     shifted.getUTCMonth(),
     shifted.getUTCDate()
-  ) - 8 * 60 * 60 * 1000;
+  ) - SHANGHAI_OFFSET_MS;
 }
 
 // ── 文本处理 ─────────────────────────────────────────────────────────────

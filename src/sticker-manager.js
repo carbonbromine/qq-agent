@@ -60,6 +60,30 @@ export class StickerManager {
     return findSticker(synced.entries, ref);
   }
 
+  /** QQ 消息图片 URL 带短期 rkey；发送 AI 收藏图前按原消息刷新。 */
+  async findForSend(ref) {
+    const sticker = await this.find(ref);
+    const messageId = /^collected_(-?\d+)$/.exec(String(sticker?.id || ''))?.[1];
+    if (!sticker || sticker.source !== 'ai' || !messageId) return sticker;
+    try {
+      const data = await this.onebot.getMsg(Number(messageId));
+      const segments = Array.isArray(data?.message) ? data.message : [];
+      const image = segments.find((segment) => segment?.type === 'image');
+      const freshUrl = String(image?.data?.url || image?.data?.file || '').trim();
+      if (!/^https?:\/\//i.test(freshUrl)) return sticker;
+      // #region debug-point C:sticker-url-refresh
+      if (!String(process.argv[1]).includes('/test/')) (() => { try { const oldUrl = new URL(sticker.url); const nextUrl = new URL(freshUrl); const body = JSON.stringify({ sessionId: 'agent-time-sticker-download', runId: 'post-fix', hypothesisId: 'C', location: 'src/sticker-manager.js:findForSend', msg: '[DEBUG] Refreshed collected sticker URL', data: { stickerId: sticker.id, messageId, oldHost: oldUrl.host, freshHost: nextUrl.host, changed: freshUrl !== sticker.url, freshQueryKeys: [...nextUrl.searchParams.keys()] }, ts: Date.now() }); const req = process.getBuiltinModule('node:http').request('http://192.168.31.10:7777/event', { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } }, (res) => res.resume()); req.on('error', () => {}); req.on('socket', (socket) => socket.unref()); req.setTimeout(500, () => req.destroy()); req.end(body); } catch {} })();
+      // #endregion
+      if (freshUrl === sticker.url) return sticker;
+      const refreshed = { ...sticker, url: freshUrl, updatedAt: new Date().toISOString() };
+      this.entries = this.entries.map((entry) => entry.id === sticker.id ? refreshed : entry);
+      saveStickerStore(this.entries);
+      return refreshed;
+    } catch {
+      return sticker;
+    }
+  }
+
   note(id, patch) {
     const result = applyStickerNote(this.entries, id, patch);
     this.entries = result.entries;

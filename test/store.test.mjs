@@ -201,12 +201,14 @@ describe('ChatStore', () => {
     const active = store.updateLifecycleThread('group:2', {
       disposition: 'active',
       participantIds: ['42'],
+      promptTokens: 12000,
       activeIdleMs: 1200000,
       hardLifetimeMs: 1800000,
       rolloverArmedMs: 600000,
       promptHash: 'prompt-v1',
       now: startedAt
     });
+    assert.equal(active.promptTokens, 12000);
     store.appendThreadTurns('group:2', active.threadId, 'run-1', [
       { role: 'user', content: '第一轮' },
       { role: 'assistant', content: '继续' }
@@ -222,6 +224,7 @@ describe('ChatStore', () => {
       promptHash: 'prompt-v1',
       now: startedAt + 15 * 60000
     });
+    assert.equal(refreshedOnce.promptTokens, 12000, '未提供新 usage 时保留上次输入 Token');
     const refreshed = store.updateLifecycleThread('group:2', {
       disposition: 'active',
       participantIds: ['43'],
@@ -235,6 +238,7 @@ describe('ChatStore', () => {
     assert.equal(refreshed.hardDeadline, active.hardDeadline, '硬上限不能随消息刷新');
     const armed = store.getConversationThread('group:2', active.hardDeadline + 1);
     assert.equal(armed.state, 'rollover_armed');
+    assert.equal(armed.promptTokens, 0);
     assert.equal(store.getThreadTurns(active.threadId).length, 0, '滚动时清除原始 provider transcript');
 
     const resumed = store.updateLifecycleThread('group:2', {
@@ -339,6 +343,7 @@ describe('ChatStore', () => {
     assert.equal(migrated.threadId, 'old-thread');
     assert.equal(migrated.mode, 'threaded');
     assert.equal(migrated.transcriptChars, 0);
+    assert.equal(migrated.promptTokens, 0);
     store.close();
   });
 

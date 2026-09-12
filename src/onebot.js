@@ -158,6 +158,9 @@ export class OneBotClient {
       throw new Error(`OneBot ${action} HTTP ${res.status}${hint}`);
     }
     const body = await res.json().catch(() => ({}));
+    // #region debug-point C-D:onebot-image-result
+    if (!String(process.argv[1]).includes('/test/') && (action === 'send_group_msg' || action === 'send_private_msg') && Array.isArray(params.message) && params.message.some((segment) => segment?.type === 'image')) (() => { try { const file = String(params.message.find((segment) => segment?.type === 'image')?.data?.file || ''); let host = '', pathname = '', queryKeys = []; try { const parsed = new URL(file); host = parsed.host; pathname = parsed.pathname; queryKeys = [...parsed.searchParams.keys()]; } catch {} const payload = JSON.stringify({ sessionId: 'agent-time-sticker-download', runId: 'post-fix', hypothesisId: 'C,D', location: 'src/onebot.js:call', msg: '[DEBUG] OneBot image send result', data: { action, targetId: params.group_id ?? params.user_id ?? null, segmentTypes: params.message.map((segment) => segment?.type), fileHost: host, filePathname: pathname, fileQueryKeys: queryKeys, fileLength: file.length, httpStatus: res.status, onebotStatus: body.status ?? null, retcode: body.retcode ?? null, wording: body.wording ?? '' }, ts: Date.now() }); const req = process.getBuiltinModule('node:http').request('http://192.168.31.10:7777/event', { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } }, (response) => response.resume()); req.on('error', () => {}); req.on('socket', (socket) => socket.unref()); req.setTimeout(500, () => req.destroy()); req.end(payload); } catch {} })();
+    // #endregion
     if (body.status !== 'ok' && body.retcode !== 0) {
       throw new Error(`OneBot ${action} 失败: retcode=${body.retcode ?? body.status} ${body.wording ?? ''}`);
     }

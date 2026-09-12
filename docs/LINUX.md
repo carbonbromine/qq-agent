@@ -149,10 +149,44 @@ Each run is persisted in `daily-moments.json` before any external write. A
 `publishing`, `published` or `publish-unknown` record blocks automatic reruns for
 that Shanghai calendar day. Recent Qzone content is also checked before publish
 to avoid duplicating an already-created post after an ambiguous response.
+On startup, interrupted `running` generation records become `interrupted`;
+`publishing` records become `publish-unknown` and remain protected. Manual draft
+generation may retry pre-publish failures, but never overrides an uncertain send.
+Invalid submission JSON is returned to the model for correction; an exhausted
+correction budget is a failure, not an implicit skip.
+
+The console can publish an existing preview by record ID without another model
+call, or reconcile an uncertain send using the Qzone list. Publishing requires
+the current persona fingerprint, source-chat permissions, runtime and active-hours
+checks to pass. Details and the persona-oriented prompt design are documented in
+[DAILY_MOMENTS.md](DAILY_MOMENTS.md).
+
+## Qzone Interactions
+
+The optional interaction scheduler polls SnowLuma for friend feeds every 60
+minutes and checks comment conversations every 5 minutes by default. Both
+intervals are configurable. SnowLuma does not currently emit Qzone feed/comment
+events, so new activity is detected on the next poll.
+
+Unread feeds are persisted, sorted newest first and submitted to the model as one
+batch. The usable input budget is the lower of the configured model context
+window and Agent run budget, minus output headroom. Older items omitted by that
+budget remain unread for a later cycle.
+
+Likes and top-level comments use SnowLuma `like_qzone` and `comment_qzone`.
+Nested replies use the current OneBot Qzone cookie with native
+`commentId/commentUin` relation fields. Cookies are never persisted. Every write
+is persisted before dispatch; a timeout or restart becomes `unknown` and is not
+retried automatically. Details are in
+[QZONE_INTERACTIONS.md](QZONE_INTERACTIONS.md).
 
 ## Budgets And Context
 
-- `wakeDelayMs=10000`, `drainDelayMs=10000`, `maxBatchWaitMs=20000`.
+- `wakeDelayMinMs=8000`, `wakeDelayMaxMs=12000`,
+  `drainDelayMs=10000`, `maxBatchWaitMs=20000`.
+- Each automatically scheduled batch draws a new debounce delay from the
+  configured range. The max-batch timer still caps continuous aggregation at
+  20 seconds from the first pending message.
 - `store.batchLimit=100`, `store.batchMaxChars=32000`.
 - History <=300 messages and <=24000 characters; each message excerpt <=2000 characters.
 - Full messages remain on disk and can be inspected via detail/history tools.
@@ -161,9 +195,13 @@ to avoid duplicating an already-created post after an ambiguous response.
   next step and last actual reply. It expires after 24 hours by default, is
   capped at 4000 prompt characters, and can be edited or cleared in Memory.
 - API request timeout defaults to 60 seconds including the response body.
-- Run deadline defaults to 180 seconds, at most 12 rounds and 120000 recorded tokens.
-- Token budget is checked between calls, not a guarantee against a single oversized
-  response or unknown provider-side billing. Usage of failed attempts is retained.
+- Run deadline defaults to 180 seconds, at most 12 rounds and 160000 cumulative tokens.
+- Before each additional tool round, the next input is estimated from the preceding
+  provider usage with output headroom. A run that would exceed the budget ends safely
+  and commits confirmed effects instead of turning them into a held retry.
+- Lifecycle generations roll over before the next batch when the preceding request
+  reached 32000 input tokens. The character limit remains a secondary fallback.
+- Usage of failed attempts is retained; unknown delivery results still require review.
 - LLM transient requests retry twice with backoff; persisted batch attempts cap at three.
 - Dashboard and usage-page costs are calculated from each provider call's model,
   timestamp, prompt tokens, cached prompt tokens and completion tokens. Calendar-day
@@ -179,6 +217,30 @@ tool use and provider caching. This is bounded context, not a constant-price
 guarantee. General DSH Skills/workspace/approval capabilities are intentionally
 not included. Old owner friend-approval commands continue to belong to the old
 Bridge.
+
+## Active Hours
+
+`timeControl.enabled` defaults to false and bypasses all time rules, including
+per-conversation overrides. When enabled, `schedule.mode` is
+`deepseek-offpeak`, `custom`, or `always`. The default uses Shanghai weekday
+off-peak windows 00:00-09:00, 12:00-14:00, 18:00-24:00 and full weekends.
+`overrides["group:<id>"]` and `overrides["private:<id>"]` replace the default;
+removing an override restores inheritance. Custom `windows` contain `days`
+(1=Monday through 7=Sunday), `start` and `end` (HH:mm; end supports 24:00).
+An end earlier than start crosses into the following day. Empty custom windows
+mean no active hours.
+
+Inactive inputs are recorded as acknowledged history, not queued for catch-up.
+Normal conversations retain their legacy/threaded/lifecycle policy during active
+hours. Model requests and retries, memory consolidation, token-producing search,
+vision/model probes and sends are gated before dispatch. In-flight requests are
+aborted at the closing boundary or a configuration change; upstream processing
+already accepted by a provider can still incur charges. Unknown deliveries retain
+their held state. Daily moments use the global schedule and exclude currently
+inactive source conversations, deferring scheduled work while globally inactive.
+
+The master switch is not automatically enabled by deployment. Configure it in
+Settings -> Time Control. Status is available at `/api/time-control/status`.
 
 ## Data And Backup
 

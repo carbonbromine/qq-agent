@@ -35,15 +35,33 @@ test('migrates legacy desktop and DSH keys into the Linux configuration', async 
   assert.equal('closeToTray' in config.server, false);
   assert.equal(config.ui.theme, 'dark');
   assert.equal(config.conversation.mode, 'legacy');
+  assert.equal(config.api.maxRunTokens, 160000);
+  assert.equal(config.api.contextWindowTokens, 1000000);
+  assert.equal(config.conversation.lifecycleRolloverInputTokens, 32000);
+  assert.equal(config.qzoneInteractions.enabled, false);
+  assert.equal(config.qzoneInteractions.feedIntervalMinutes, 60);
+  assert.equal(config.qzoneInteractions.replyIntervalMinutes, 5);
+  assert.equal(config.wakeDelayMinMs, 8000);
+  assert.equal(config.wakeDelayMaxMs, 12000);
   updateConfig({
+    api: { maxRunTokens: 180000, contextWindowTokens: 800000 },
     ui: { refreshMs: 5000 },
+    qzoneInteractions: {
+      enabled: true,
+      feedIntervalMinutes: 90,
+      replyIntervalMinutes: 10,
+      maxBatchItems: 15
+    },
+    wakeDelayMinMs: 14000,
+    wakeDelayMaxMs: 6000,
     conversation: {
       mode: 'threaded',
       unifiedMode: false,
       groupModes: { 100: 'lifecycle', 200: 'legacy' },
       continuationWindowMs: 120000,
       threadTtlMs: 900000,
-      continuationContextCount: 80
+      continuationContextCount: 80,
+      lifecycleRolloverInputTokens: 36000
     }
   });
   const saved = JSON.parse(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'));
@@ -51,6 +69,16 @@ test('migrates legacy desktop and DSH keys into the Linux configuration', async 
   assert.equal(saved.providerKeys.provider, 'model-secret');
   assert.equal('snowluma' in saved, false);
   assert.equal(saved.conversation.mode, 'threaded');
+  assert.equal(saved.api.maxRunTokens, 180000);
+  assert.equal(saved.api.contextWindowTokens, 800000);
+  assert.equal(saved.qzoneInteractions.enabled, true);
+  assert.equal(saved.qzoneInteractions.feedIntervalMinutes, 90);
+  assert.equal(saved.qzoneInteractions.replyIntervalMinutes, 10);
+  assert.equal(saved.qzoneInteractions.maxBatchItems, 15);
+  assert.equal(saved.wakeDelayMinMs, 6000);
+  assert.equal(saved.wakeDelayMaxMs, 14000);
+  assert.equal(saved.wakeDelayMs, 10000);
+  assert.equal(saved.conversation.lifecycleRolloverInputTokens, 36000);
   assert.equal(conversationConfigForChat('group:100').mode, 'lifecycle');
   assert.equal(conversationConfigForChat('group:200').mode, 'legacy');
   assert.equal(conversationConfigForChat('group:300').mode, 'threaded');

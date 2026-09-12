@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PERSONAS } from './personas.js';
 import { sliderToTier } from './tier-slider.js';   // 零依赖模块，避免循环依赖
+import { DEFAULT_TIME_CONTROL, normalizeTimeControl } from './time-control.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const ROOT = path.resolve(__dirname, '..');
@@ -25,7 +26,8 @@ export const DEFAULT_CONFIG = {
     maxRounds: 12,                          // 单次运行的最多工具轮数
     timeoutMs: 60000,
     runTimeoutMs: 180000,
-    maxRunTokens: 120000,
+    maxRunTokens: 160000,                   // 同一 Agent 运行内所有模型调用的累计 Token 上限
+    contextWindowTokens: 1000000,           // 当前模型上下文窗口，供批处理裁剪与预算预判
     // 成本核算（仅本地估算展示，不参与任何请求）
     priceInputPerM: 0,      // 输入单价（元 / 百万 token）—— 兜底默认值
     priceOutputPerM: 0,     // 输出单价
@@ -125,9 +127,12 @@ export const DEFAULT_CONFIG = {
   allowAllWhenEmpty: false,
   // 运行节奏
   wakeDelayMs: 10000,
+  wakeDelayMinMs: 8000,
+  wakeDelayMaxMs: 12000,
   drainDelayMs: 10000,
   maxBatchWaitMs: 20000,
   runtime: { mode: 'observe', paused: false },
+  timeControl: DEFAULT_TIME_CONTROL,
   maxConcurrentRuns: 2,     // 全局同时进行的 agent 运行数
   // 对话线程试点：默认关闭，可从控制台动态切换，不影响旧触发模式。
   conversation: {
@@ -142,6 +147,7 @@ export const DEFAULT_CONFIG = {
     hardLifetimeMs: 1800000,         // lifecycle：绝对生命周期上限 30 分钟
     rolloverArmedMs: 600000,         // 活跃线程撞硬上限后，一次性任意消息触发期限
     lifecycleContextCount: 100,      // 生命周期首次运行携带的历史条数
+    lifecycleRolloverInputTokens: 32000, // 上次实际输入达到此值时，下一批先换代
     maxTranscriptChars: 240000       // 生命周期追加式模型上下文硬预算
   },
   // 发送保护
@@ -177,6 +183,28 @@ export const DEFAULT_CONFIG = {
     targetUins: [],
     maxResearchCalls: 4,
     maxRounds: 8
+  },
+  // 好友动态阅览、点赞评论与评论回复。默认关闭，启用后按上海时间周期轮询。
+  qzoneInteractions: {
+    enabled: false,
+    startupCatchup: false,
+    feedIntervalMinutes: 60,
+    replyIntervalMinutes: 5,
+    feedFetchCount: 30,
+    ownPostCount: 10,
+    maxAgeHours: 72,
+    maxBatchItems: 20,
+    maxLikesPerRun: 3,
+    maxCommentsPerRun: 2,
+    maxRepliesPerRun: 5,
+    commentMaxChars: 60,
+    replyMaxChars: 60,
+    allowLikes: true,
+    allowComments: true,
+    allowReplies: true,
+    actionDelayMinMs: 700,
+    actionDelayMaxMs: 1800,
+    maxDecisionRounds: 3
   },
   // 表情包
   sticker: {
@@ -248,6 +276,16 @@ export const DEFAULT_CONFIG = {
 
 function migrateConfig(parsed) {
   const out = structuredClone(parsed);
+  if (out.wakeDelayMinMs == null && out.wakeDelayMaxMs == null && out.wakeDelayMs != null) {
+    const legacy = Math.max(0, Number(out.wakeDelayMs) || 0);
+    if (legacy === 10000) {
+      out.wakeDelayMinMs = 8000;
+      out.wakeDelayMaxMs = 12000;
+    } else {
+      out.wakeDelayMinMs = legacy;
+      out.wakeDelayMaxMs = legacy;
+    }
+  }
   if (!out.onebot && out.snowluma) {
     out.onebot = {
       wsUrl: out.snowluma.wsUrl,
@@ -304,6 +342,16 @@ export function loadConfig() {
 
 let currentConfig = null;
 let saveTimers = new Map();
+const timeControlListeners = new Set();
+
+export function onTimeControlChange(listener) {
+  timeControlListeners.add(listener);
+  return () => timeControlListeners.delete(listener);
+}
+
+function notifyTimeControlChange() {
+  for (const listener of timeControlListeners) listener();
+}
 
 /** 取当前生效配置（未初始化时从磁盘读）。 */
 export function getConfig() {
@@ -314,6 +362,8 @@ export function getConfig() {
 /** 更新并持久化配置（浅合并到当前值；patch 里传对象字段则整体替换该字段）。 */
 export function updateConfig(patch) {
   const next = migrateConfig(deepMerge(getConfig(), patch));
+  const oldTimeControl = JSON.stringify(getConfig().timeControl);
+  next.timeControl = normalizeTimeControl(next.timeControl);
   if (!['observe', 'active'].includes(next.runtime?.mode)) throw new Error('Invalid runtime mode');
   if (!['legacy', 'threaded', 'lifecycle'].includes(next.conversation?.mode)) {
     throw new Error('Invalid conversation mode');
@@ -323,6 +373,62 @@ export function updateConfig(patch) {
       throw new Error('Invalid group conversation mode');
     }
   }
+  next.api.maxRunTokens = Math.min(
+    1000000,
+    Math.max(20000, Math.round(Number(next.api.maxRunTokens) || DEFAULT_CONFIG.api.maxRunTokens))
+  );
+  next.api.contextWindowTokens = Math.min(
+    2000000,
+    Math.max(
+      16000,
+      Math.round(Number(next.api.contextWindowTokens) || DEFAULT_CONFIG.api.contextWindowTokens)
+    )
+  );
+  let wakeMin = Math.min(
+    20000,
+    Math.max(0, Math.round(Number(next.wakeDelayMinMs) || 0))
+  );
+  let wakeMax = Math.min(
+    20000,
+    Math.max(0, Math.round(Number(next.wakeDelayMaxMs) || 0))
+  );
+  if (wakeMin > wakeMax) [wakeMin, wakeMax] = [wakeMax, wakeMin];
+  next.wakeDelayMinMs = wakeMin;
+  next.wakeDelayMaxMs = wakeMax;
+  next.wakeDelayMs = Math.round((wakeMin + wakeMax) / 2);
+  next.conversation.lifecycleRolloverInputTokens = Math.min(
+    500000,
+    Math.max(
+      5000,
+      Math.round(
+        Number(next.conversation.lifecycleRolloverInputTokens)
+        || DEFAULT_CONFIG.conversation.lifecycleRolloverInputTokens
+      )
+    )
+  );
+  const interactions = next.qzoneInteractions || {};
+  next.qzoneInteractions = {
+    ...interactions,
+    enabled: interactions.enabled === true,
+    startupCatchup: interactions.startupCatchup === true,
+    feedIntervalMinutes: Math.min(1440, Math.max(5, Number(interactions.feedIntervalMinutes) || 60)),
+    replyIntervalMinutes: Math.min(1440, Math.max(1, Number(interactions.replyIntervalMinutes) || 5)),
+    feedFetchCount: Math.min(50, Math.max(1, Number(interactions.feedFetchCount) || 30)),
+    ownPostCount: Math.min(30, Math.max(1, Number(interactions.ownPostCount) || 10)),
+    maxAgeHours: Math.min(720, Math.max(1, Number(interactions.maxAgeHours) || 72)),
+    maxBatchItems: Math.min(50, Math.max(1, Number(interactions.maxBatchItems) || 20)),
+    maxLikesPerRun: Math.min(20, Math.max(0, Number(interactions.maxLikesPerRun) || 0)),
+    maxCommentsPerRun: Math.min(10, Math.max(0, Number(interactions.maxCommentsPerRun) || 0)),
+    maxRepliesPerRun: Math.min(20, Math.max(0, Number(interactions.maxRepliesPerRun) || 0)),
+    commentMaxChars: Math.min(200, Math.max(5, Number(interactions.commentMaxChars) || 60)),
+    replyMaxChars: Math.min(200, Math.max(5, Number(interactions.replyMaxChars) || 60)),
+    allowLikes: interactions.allowLikes !== false,
+    allowComments: interactions.allowComments !== false,
+    allowReplies: interactions.allowReplies !== false,
+    actionDelayMinMs: Math.min(10000, Math.max(0, Number(interactions.actionDelayMinMs) || 0)),
+    actionDelayMaxMs: Math.min(15000, Math.max(0, Number(interactions.actionDelayMaxMs) || 0)),
+    maxDecisionRounds: Math.min(5, Math.max(1, Number(interactions.maxDecisionRounds) || 3))
+  };
   if (!Number.isInteger(Number(next.server?.port)) || next.server.port < 1 || next.server.port > 65535) {
     throw new Error('Invalid server port');
   }
@@ -345,12 +451,14 @@ export function updateConfig(patch) {
   const tmp = `${CONFIG_FILE}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(currentConfig, null, 2), { mode: 0o600 });
   fs.renameSync(tmp, CONFIG_FILE);
+  if (oldTimeControl !== JSON.stringify(next.timeControl)) notifyTimeControlChange();
   return currentConfig;
 }
 
 /** 内存态改动（不落盘）——用于运行期覆盖（如自测注入 mock）。 */
 export function setRuntimeConfig(cfg) {
   currentConfig = cfg;
+  notifyTimeControlChange();
 }
 
 /**

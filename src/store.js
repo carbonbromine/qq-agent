@@ -40,6 +40,7 @@ function threadEntry(row) {
     lastMessageId: Number(row.last_message_id) || 0,
     promptHash: row.prompt_hash || '',
     transcriptChars: Number(row.transcript_chars) || 0,
+    promptTokens: Number(row.prompt_tokens) || 0,
     version: Number(row.version) || 1,
     closeReason: row.close_reason || ''
   };
@@ -92,6 +93,7 @@ export class ChatStore {
         expires_at INTEGER NOT NULL DEFAULT 0,
         last_message_id INTEGER NOT NULL DEFAULT 0, version INTEGER NOT NULL DEFAULT 1,
         prompt_hash TEXT NOT NULL DEFAULT '', transcript_chars INTEGER NOT NULL DEFAULT 0,
+        prompt_tokens INTEGER NOT NULL DEFAULT 0,
         close_reason TEXT
       );
       CREATE INDEX IF NOT EXISTS conversation_threads_expiry
@@ -121,6 +123,7 @@ export class ChatStore {
     ensureColumn(this.db, 'conversation_threads', 'resume_armed_until', 'INTEGER NOT NULL DEFAULT 0');
     ensureColumn(this.db, 'conversation_threads', 'prompt_hash', "TEXT NOT NULL DEFAULT ''");
     ensureColumn(this.db, 'conversation_threads', 'transcript_chars', 'INTEGER NOT NULL DEFAULT 0');
+    ensureColumn(this.db, 'conversation_threads', 'prompt_tokens', 'INTEGER NOT NULL DEFAULT 0');
     this.#importJson(dataDir);
   }
 
@@ -183,8 +186,10 @@ export class ChatStore {
     return entry(this.db.prepare('SELECT * FROM messages WHERE chat_key=? AND id=?').get(chatKey, id));
   }
 
-  appendIncoming(chatKey, message) {
-    return this.#transaction(() => this.#append(chatKey, { ...message, self: false }, 'pending'));
+  appendIncoming(chatKey, message, { recordOnly = false } = {}) {
+    return this.#transaction(() => this.#append(
+      chatKey, { ...message, self: false }, recordOnly ? 'acked' : 'pending'
+    ));
   }
 
   appendSelf(chatKey, message) {
@@ -387,10 +392,13 @@ export class ChatStore {
       if (nextState) transitions.push({ row, nextState, reason });
     }
     if (!transitions.length) return 0;
+    // #region debug-point C:thread-expiry-transition
+    for (const { row, nextState, reason } of transitions) (() => { const body = JSON.stringify({ sessionId: process.env.DEBUG_SESSION_ID || 'lifecycle-instant-close', runId: process.env.DEBUG_RUN_ID || 'pre-fix', hypothesisId: 'C', location: 'src/store.js:expireConversationThreads', msg: '[DEBUG] Conversation thread expired or rolled over', data: { chatKey: row.chat_key, threadId: row.thread_id, previousState: row.state, disposition: row.disposition, nextState, reason, now, idleDeadline: Number(row.idle_deadline) || 0, hardDeadline: Number(row.hard_deadline) || 0, resumeArmedUntil: Number(row.resume_armed_until) || 0 }, ts: Date.now() }); const req = process.getBuiltinModule('node:http').request(process.env.DEBUG_SERVER_URL || 'http://192.168.31.10:7777/event', { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } }, (res) => res.resume()); req.on('error', () => {}); req.end(body); })();
+    // #endregion
     this.#transaction(() => {
       for (const { row, nextState, reason } of transitions) {
         this.db.prepare(`UPDATE conversation_threads SET state=?,close_reason=?,
-          transcript_chars=0,updated_at=?,version=version+1 WHERE chat_key=?`)
+          transcript_chars=0,prompt_tokens=0,updated_at=?,version=version+1 WHERE chat_key=?`)
           .run(nextState, reason, now, row.chat_key);
         this.db.prepare('DELETE FROM thread_turns WHERE thread_id=?').run(row.thread_id);
       }
@@ -446,14 +454,16 @@ export class ChatStore {
         lastMessageId: Math.max(Number(lastMessageId) || 0, existing?.lastMessageId || 0),
         promptHash: '',
         transcriptChars: 0,
+        promptTokens: 0,
         version: (existing?.version || 0) + 1,
         closeReason: ''
       };
       this.db.prepare(`INSERT INTO conversation_threads
         (chat_key,thread_id,mode,state,disposition,topic,participant_ids,opened_at,updated_at,
          last_human_at,last_agent_at,engaged_until,idle_deadline,hard_deadline,
-         resume_armed_until,expires_at,last_message_id,prompt_hash,transcript_chars,version,close_reason)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         resume_armed_until,expires_at,last_message_id,prompt_hash,transcript_chars,version,
+         close_reason,prompt_tokens)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(chat_key) DO UPDATE SET
           thread_id=excluded.thread_id,mode=excluded.mode,state=excluded.state,
           disposition=excluded.disposition,topic=excluded.topic,
@@ -464,14 +474,14 @@ export class ChatStore {
           resume_armed_until=excluded.resume_armed_until,expires_at=excluded.expires_at,
           last_message_id=excluded.last_message_id,prompt_hash=excluded.prompt_hash,
           transcript_chars=excluded.transcript_chars,version=excluded.version,
-          close_reason=excluded.close_reason`)
+          close_reason=excluded.close_reason,prompt_tokens=excluded.prompt_tokens`)
         .run(
           thread.chatKey, thread.threadId, thread.mode, thread.state, thread.disposition,
           thread.topic, JSON.stringify(thread.participantIds), thread.openedAt,
           thread.updatedAt, thread.lastHumanAt, thread.lastAgentAt, thread.engagedUntil,
           thread.idleDeadline, thread.hardDeadline, thread.resumeArmedUntil,
           thread.expiresAt, thread.lastMessageId, thread.promptHash,
-          thread.transcriptChars, thread.version, thread.closeReason
+          thread.transcriptChars, thread.version, thread.closeReason, thread.promptTokens
         );
       return thread;
     });
@@ -485,6 +495,7 @@ export class ChatStore {
     lastHumanAt = 0,
     lastAgentAt = 0,
     promptHash = '',
+    promptTokens = null,
     silentIdleMs = 300000,
     activeIdleMs = 1200000,
     hardLifetimeMs = 1800000,
@@ -513,6 +524,9 @@ export class ChatStore {
       const state = now >= hardDeadline
         ? (activeAtHardDeadline ? 'rollover_armed' : 'closed')
         : normalizedDisposition;
+      // #region debug-point C:lifecycle-deadline-calculation
+      (() => { const body = JSON.stringify({ sessionId: process.env.DEBUG_SESSION_ID || 'lifecycle-instant-close', runId: process.env.DEBUG_RUN_ID || 'pre-fix', hypothesisId: 'C', location: 'src/store.js:updateLifecycleThread', msg: '[DEBUG] Lifecycle deadlines calculated', data: { chatKey, currentThreadId: current?.threadId || null, currentState: current?.state || null, currentDisposition: current?.disposition || null, reusable, acceptedTime, now, normalizedDisposition, idleDeadline, hardDeadline, resumeArmedUntil, activeAtHardDeadline, nextState: state }, ts: Date.now() }); const req = process.getBuiltinModule('node:http').request(process.env.DEBUG_SERVER_URL || 'http://192.168.31.10:7777/event', { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } }, (res) => res.resume()); req.on('error', () => {}); req.end(body); })();
+      // #endregion
       const participants = [...new Set([
         ...(reusable ? current.participantIds : []),
         ...(Array.isArray(participantIds) ? participantIds : [])
@@ -537,6 +551,10 @@ export class ChatStore {
         lastMessageId: Math.max(Number(lastMessageId) || 0, reusable ? current.lastMessageId : 0),
         promptHash: String(promptHash || (reusable ? current.promptHash : '') || '').slice(0, 100),
         transcriptChars: reusable ? current.transcriptChars : 0,
+        promptTokens: promptTokens !== null && promptTokens !== undefined
+          && Number.isFinite(Number(promptTokens))
+          ? Math.max(0, Math.round(Number(promptTokens)))
+          : (reusable ? current.promptTokens : 0),
         version: (reusable ? current.version : 0) + 1,
         closeReason: state === 'rollover_armed' ? 'hard-lifetime' : (state === 'closed' ? 'hard-lifetime-silent' : '')
       };
@@ -546,8 +564,9 @@ export class ChatStore {
       this.db.prepare(`INSERT INTO conversation_threads
         (chat_key,thread_id,mode,state,disposition,topic,participant_ids,opened_at,updated_at,
          last_human_at,last_agent_at,engaged_until,idle_deadline,hard_deadline,
-         resume_armed_until,expires_at,last_message_id,prompt_hash,transcript_chars,version,close_reason)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         resume_armed_until,expires_at,last_message_id,prompt_hash,transcript_chars,version,
+         close_reason,prompt_tokens)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(chat_key) DO UPDATE SET
           thread_id=excluded.thread_id,mode=excluded.mode,state=excluded.state,
           disposition=excluded.disposition,topic=excluded.topic,
@@ -558,18 +577,19 @@ export class ChatStore {
           resume_armed_until=excluded.resume_armed_until,expires_at=excluded.expires_at,
           last_message_id=excluded.last_message_id,prompt_hash=excluded.prompt_hash,
           transcript_chars=excluded.transcript_chars,version=excluded.version,
-          close_reason=excluded.close_reason`)
+          close_reason=excluded.close_reason,prompt_tokens=excluded.prompt_tokens`)
         .run(
           thread.chatKey, thread.threadId, thread.mode, thread.state, thread.disposition,
           thread.topic, JSON.stringify(thread.participantIds), thread.openedAt,
           thread.updatedAt, thread.lastHumanAt, thread.lastAgentAt, thread.engagedUntil,
           thread.idleDeadline, thread.hardDeadline, thread.resumeArmedUntil,
           thread.expiresAt, thread.lastMessageId, thread.promptHash,
-          thread.transcriptChars, thread.version, thread.closeReason
+          thread.transcriptChars, thread.version, thread.closeReason, thread.promptTokens
         );
       if (state === 'rollover_armed' || state === 'closed') {
         this.db.prepare('DELETE FROM thread_turns WHERE thread_id=?').run(thread.threadId);
         thread.transcriptChars = 0;
+        thread.promptTokens = 0;
       }
       return state === 'closed' ? null : thread;
     });
@@ -584,7 +604,8 @@ export class ChatStore {
       const until = now + Math.max(60000, Number(armedMs) || 600000);
       const changed = this.db.prepare(`UPDATE conversation_threads
         SET state='rollover_armed',disposition='active',resume_armed_until=?,
-            expires_at=?,updated_at=?,close_reason=?,transcript_chars=0,version=version+1
+            expires_at=?,updated_at=?,close_reason=?,transcript_chars=0,
+            prompt_tokens=0,version=version+1
         WHERE chat_key=?`).run(
           until, until, now, String(reason).slice(0, 100), chatKey
         ).changes;
@@ -599,7 +620,7 @@ export class ChatStore {
         WHERE chat_key=? AND state!='closed'`).get(chatKey);
       if (!row) return false;
       const changed = this.db.prepare(`UPDATE conversation_threads SET state='closed',
-        close_reason=?,transcript_chars=0,updated_at=?,version=version+1
+        close_reason=?,transcript_chars=0,prompt_tokens=0,updated_at=?,version=version+1
         WHERE chat_key=? AND state!='closed'`)
         .run(String(reason).slice(0, 100), Date.now(), chatKey).changes > 0;
       this.db.prepare('DELETE FROM thread_turns WHERE thread_id=?').run(row.thread_id);

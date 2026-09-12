@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { conversationConfigForChat, getConfig, updateConfig, DATA_DIR } from './config.js';
+import { conversationConfigForChat, getConfig, updateConfig, onTimeControlChange, DATA_DIR } from './config.js';
 import { customSearch } from './web-search.js';
 import { OneBotClient, segmentsToText, extractMediaFromSegments, expandForwardNodes } from './onebot.js';
 import { ChatStore } from './store.js';
@@ -14,6 +14,7 @@ import { SendQueue } from './sender.js';
 import { SessionRegistry } from './sessions.js';
 import { Orchestrator } from './orchestrator.js';
 import { DailyMomentsManager } from './daily-moments.js';
+import { QzoneInteractionManager } from './qzone-interactions.js';
 import { listModels, chatCompletion, resolveApiKey, cachedTokensOfUsage } from './llm.js';
 import { resolveOfficialPrice, listOfficialPrices, isPeakHour, priceAt, resolveModelPrice, modelLabel, splitModelLabel, UNKNOWN_VENDOR } from './model-prices.js';
 import { initPriceFeed, refreshPriceFeed, priceFeedStatus } from './price-feed.js';
@@ -22,6 +23,8 @@ import { scanModelsVision, visionResults, modelImageVerdict } from './vision-sca
 import { builtinVisionResults } from './model-vision-docs.js';
 import { createEventBus, todayKey, shanghaiDayStart } from './util.js';
 import { assertCanSend } from './access.js';
+import { isTimeActive } from './time-gate.js';
+import { timeControlState, TIME_ZONE } from './time-control.js';
 
 // 全局 fetch（undici）默认连接建立超时只有 10 秒，openrouter.ai 这类海外端点
 // 握手慢时会直接报 "Connect Timeout Error ... timeout: 10000ms"（注意这不是
@@ -86,6 +89,7 @@ export function createApp({ log = console.log } = {}) {
             promptLayout: s.promptLayout ?? '',
             lifecycleContinuation: s.lifecycleContinuation === true,
             callUsage: s.callUsage ?? [],
+            sessionMetrics: buildSessionMetrics(s),
             // sent/finishReason/error/endedAt 必须随 SSE 推下去：
             // 曾经载荷里没有它们，"已发送到 QQ"徽标只能等 HTTP 轮询带回来；
             // 而会话一结束轮询就不再拉详情（只刷 running/waiting），
@@ -129,9 +133,34 @@ export function createApp({ log = console.log } = {}) {
     onebot,
     sessions,
     resolveChatName: (groupId) => orchestrator.getChatName(groupId),
+    setProactiveSuppressed: (suppressed) =>
+      orchestrator.setProactiveSuppressed('daily-moments', suppressed),
     emit,
     log
   });
+  const qzoneInteractions = new QzoneInteractionManager({
+    onebot,
+    sessions,
+    setProactiveSuppressed: (suppressed) =>
+      orchestrator.setProactiveSuppressed('qzone-interactions', suppressed),
+    emit,
+    log
+  });
+  let timeControlTimer = null;
+  function refreshTimeControl() {
+    clearTimeout(timeControlTimer);
+    if (getConfig().timeControl?.enabled !== true) return;
+    orchestrator.enforceTimeControl();
+    const now = Date.now();
+    const keys = ['', ...store.listChats()];
+    const changes = keys.map((key) =>
+      timeControlState(getConfig().timeControl, key, now).nextChangeAt
+    ).filter((at) => at > now);
+    const delay = Math.min(60000, ...changes.map((at) => at - now));
+    timeControlTimer = setTimeout(refreshTimeControl, Math.max(1, delay));
+    timeControlTimer.unref?.();
+  }
+  const releaseTimeControl = onTimeControlChange(refreshTimeControl);
 
   // 远程价格表：启动即初始化（内部幂等；URL 为空则完全不动）
   initPriceFeed(cfg.api?.priceRemoteUrl || '');
@@ -178,7 +207,7 @@ export function createApp({ log = console.log } = {}) {
     }
   }
 
-  async function ingestMessage(kind, id, event) {
+  async function ingestMessage(kind, id, event, arrivedInactive = false) {
     const cfgNow = getConfig();
     if (!allowed(kind, id, cfgNow)) return; // 白名单外的聊天完全不记录
     const chatKey = `${kind}:${id}`;
@@ -252,13 +281,15 @@ export function createApp({ log = console.log } = {}) {
       reply,
       media
     };
-    const stored = isSelf ? store.appendSelf(chatKey, message) : store.appendIncoming(chatKey, message);
+    const stored = isSelf ? store.appendSelf(chatKey, message) : store.appendIncoming(chatKey, message, {
+      recordOnly: arrivedInactive || !isTimeActive(chatKey)
+    });
     if (stored.duplicate) return;
     emit('chat-update', chatKey);
     if (!isSelf) orchestrator.onIncoming(chatKey);
   }
 
-  async function ingestPoke(event) {
+  async function ingestPoke(event, arrivedInactive = false) {
     // OneBot v11: notice_type=notify, sub_type=poke；群拍 target_id，私聊拍自己
     const isGroup = event.group_id != null;
     const id = isGroup ? String(event.group_id) : String(event.user_id);
@@ -297,7 +328,7 @@ export function createApp({ log = console.log } = {}) {
       senderName: operatorName,
       text,
       media: []
-    });
+    }, { recordOnly: arrivedInactive || !isTimeActive(chatKeyNow) });
     emit('chat-update', `${isGroup ? 'group' : 'private'}:${id}`);
     orchestrator.onIncoming(`${isGroup ? 'group' : 'private'}:${id}`);
   }
@@ -305,7 +336,8 @@ export function createApp({ log = console.log } = {}) {
   const ingress = new Map();
   function handleOneBotEvent(event) {
     const key = event?.group_id ? `group:${event.group_id}` : `private:${event?.user_id}`;
-    const task = (ingress.get(key) || Promise.resolve()).then(() => ingestOneBotEvent(event));
+    const arrivedInactive = !isTimeActive(key);
+    const task = (ingress.get(key) || Promise.resolve()).then(() => ingestOneBotEvent(event, arrivedInactive));
     const tail = task.catch((error) => log('[ingest]', error?.message ?? error)).finally(() => {
       if (ingress.get(key) === tail) ingress.delete(key);
     });
@@ -313,16 +345,16 @@ export function createApp({ log = console.log } = {}) {
     return task;
   }
 
-  async function ingestOneBotEvent(event) {
+  async function ingestOneBotEvent(event, arrivedInactive) {
     if (!event || typeof event !== 'object') return;
     if (event.post_type === 'message' || event.post_type === 'message_sent') {
       // Echoes are deduplicated by message ID; shared-protocol observe mode also records old-instance replies.
-      if (event.message_type === 'group' && event.group_id != null) return ingestMessage('group', String(event.group_id), event);
-      if (event.message_type === 'private' && event.user_id != null) return ingestMessage('private', String(event.user_id), event);
+      if (event.message_type === 'group' && event.group_id != null) return ingestMessage('group', String(event.group_id), event, arrivedInactive);
+      if (event.message_type === 'private' && event.user_id != null) return ingestMessage('private', String(event.user_id), event, arrivedInactive);
       return;
     }
     if (event.post_type === 'notice' && event.notice_type === 'notify' && event.sub_type === 'poke') {
-      return ingestPoke(event);
+      return ingestPoke(event, arrivedInactive);
     }
     // meta/心跳等事件忽略
   }
@@ -615,6 +647,9 @@ export function createApp({ log = console.log } = {}) {
           cost,
           cacheHitRate: totals.cacheHitRate,
           webSearchCount: usage.webSearchCount || 0,
+          ...(cfgNow.timeControl?.enabled ? {
+            timeControl: timeControlState(cfgNow.timeControl)
+          } : {}),
           paused: orchestrator.paused,
           pauseReason: orchestrator.pauseReason ?? null
         });
@@ -1027,6 +1062,9 @@ export function createApp({ log = console.log } = {}) {
 
       if (pathname === '/api/config' && method === 'POST') {
         const patch = await readBody(req);
+        const previousProactive = JSON.stringify(cfgNow.proactive || {});
+        const previousDailyMoments = JSON.stringify(cfgNow.dailyMoments || {});
+        const previousQzoneInteractions = JSON.stringify(cfgNow.qzoneInteractions || {});
         const previousModes = new Map(
           store.listChats().map((chatKey) => [chatKey, conversationConfigForChat(chatKey).mode])
         );
@@ -1044,8 +1082,16 @@ export function createApp({ log = console.log } = {}) {
           }
         }
         if (closedThreads) emit('chat-update', '*');
-        if (next.proactive?.enabled) orchestrator.startProactiveLoop(); else orchestrator.stopProactiveLoop();
-        dailyMoments.reconfigure();
+        if (JSON.stringify(next.proactive || {}) !== previousProactive) {
+          if (next.proactive?.enabled) orchestrator.startProactiveLoop();
+          else orchestrator.stopProactiveLoop();
+        }
+        if (JSON.stringify(next.dailyMoments || {}) !== previousDailyMoments) {
+          dailyMoments.reconfigure();
+        }
+        if (JSON.stringify(next.qzoneInteractions || {}) !== previousQzoneInteractions) {
+          qzoneInteractions.reconfigure();
+        }
         initPriceFeed(next.api?.priceRemoteUrl || '');   // 远程价格表 URL 可能改了（内部幂等）
         emit('status', { configUpdated: true });
         return json(res, 200, { ok: true, config: sanitizeConfig(next) });
@@ -1053,6 +1099,43 @@ export function createApp({ log = console.log } = {}) {
 
       if (pathname === '/api/daily-moments/status' && method === 'GET') {
         return json(res, 200, dailyMoments.status());
+      }
+
+      if (pathname === '/api/qzone-interactions/status' && method === 'GET') {
+        return json(res, 200, qzoneInteractions.status());
+      }
+
+      if (pathname === '/api/qzone-interactions/run' && method === 'POST') {
+        const body = await readBody(req);
+        if (body.confirm !== true) {
+          return json(res, 409, { error: '手动执行动态互动需要显式确认' });
+        }
+        try {
+          return json(res, 200, await qzoneInteractions.runNow(String(body.kind || 'all')));
+        } catch (error) {
+          return json(
+            res,
+            error.httpStatus || (error.code === 'TIME_CONTROL_INACTIVE' ? 409 : 500),
+            { error: String(error?.message ?? error), code: error.code || '' }
+          );
+        }
+      }
+
+      if (pathname === '/api/time-control/status' && method === 'GET') {
+        const now = Date.now();
+        const keys = [...new Set([
+          ...store.listChats(),
+          ...(cfgNow.allow?.groups || []).map((id) => `group:${id}`),
+          ...(cfgNow.allow?.private || []).map((id) => `private:${id}`),
+          ...Object.keys(cfgNow.timeControl?.overrides || {})
+        ])];
+        return json(res, 200, {
+          timeZone: TIME_ZONE, now,
+          global: timeControlState(cfgNow.timeControl, '', now),
+          chats: keys.map((chatKey) => ({
+            chatKey, ...timeControlState(cfgNow.timeControl, chatKey, now)
+          }))
+        });
       }
 
       if (pathname === '/api/daily-moments/run' && method === 'POST') {
@@ -1069,7 +1152,27 @@ export function createApp({ log = console.log } = {}) {
           });
           return json(res, 200, result);
         } catch (error) {
-          return json(res, 500, { error: String(error?.message ?? error) });
+          return json(res, error.httpStatus || (error.code === 'TIME_CONTROL_INACTIVE' ? 409 : 500), {
+            error: String(error?.message ?? error), code: error.code || ''
+          });
+        }
+      }
+
+      const momentAction = /^\/api\/daily-moments\/records\/([\w-]+)\/(publish|reconcile)$/.exec(pathname);
+      if (momentAction && method === 'POST') {
+        const body = await readBody(req);
+        if (momentAction[2] === 'publish' && body.confirm !== true) {
+          return json(res, 409, { error: '发布草稿需要显式确认' });
+        }
+        try {
+          const result = momentAction[2] === 'publish'
+            ? await dailyMoments.publishDraft(momentAction[1])
+            : await dailyMoments.reconcile(momentAction[1]);
+          return json(res, 200, result);
+        } catch (error) {
+          return json(res, error.httpStatus || (error.code === 'TIME_CONTROL_INACTIVE' ? 409 : 500), {
+            error: String(error?.message ?? error), code: error.code || ''
+          });
         }
       }
 
@@ -1093,11 +1196,15 @@ export function createApp({ log = console.log } = {}) {
       if (sessionMatch && method === 'GET') {
         const s = sessions.get(sessionMatch[1]);
         if (!s) return json(res, 404, { error: '会话不存在' });
-        return json(res, 200, s);
+        return json(res, 200, { ...s, sessionMetrics: buildSessionMetrics(s) });
       }
 
       if (pathname === '/api/chats' && method === 'GET') {
-        const chats = store.listChats().map((key) => ({ key, ...store.getChatMeta(key) }))
+        const chats = store.listChats().map((key) => ({
+          key, ...store.getChatMeta(key),
+          ...(cfgNow.timeControl?.enabled
+            ? { timeControl: timeControlState(cfgNow.timeControl, key) } : {})
+        }))
           .sort((a, b) => b.lastTs - a.lastTs);
         // 附带群名，让 UI 能显示"群名（群号）"。
         // 群名要调 OneBot 拿，可能慢或失败 —— 用 allSettled 保证绝不影响主流程：
@@ -1282,8 +1389,8 @@ export function createApp({ log = console.log } = {}) {
       const chatWakeMatch = /^\/api\/chats\/(group|private)_(\d+)\/wake$/.exec(pathname);
       if (chatWakeMatch && method === 'POST') {
         const chatKey = `${chatWakeMatch[1]}:${chatWakeMatch[2]}`;
-        const ok = orchestrator.forceWake(chatKey);
-        return json(res, 200, { ok });
+        const result = orchestrator.requestManualWake(chatKey);
+        return json(res, result.ok ? 202 : 409, result);
       }
 
       const chatThreadMatch = /^\/api\/chats\/(group|private)_(\d+)\/thread$/.exec(pathname);
@@ -1442,9 +1549,11 @@ export function createApp({ log = console.log } = {}) {
     if (port == null) throw lastError ?? new Error('无法监听端口');
 
     await onebot.connect();
+    refreshTimeControl();
     orchestrator.startRecoveryLoop();
-    if (getConfig().proactive?.enabled) orchestrator.startProactiveLoop();
     if (getConfig().dailyMoments?.enabled) dailyMoments.start();
+    if (getConfig().qzoneInteractions?.enabled) qzoneInteractions.start();
+    if (getConfig().proactive?.enabled) orchestrator.startProactiveLoop();
     log(`控制台已就绪：http://${serverCfg.host}:${port} (${getConfig().runtime.mode})`);
     log(`OneBot: ws=${getConfig().onebot?.wsUrl} http=${getConfig().onebot?.httpUrl}`);
     log(`模型: ${getConfig().api.model || '（未设置，请在设置里选择）'} @ ${getConfig().api.baseUrl}`);
@@ -1452,8 +1561,12 @@ export function createApp({ log = console.log } = {}) {
   }
 
   async function stop() {
+    clearTimeout(timeControlTimer);
+    releaseTimeControl();
     dailyMoments.stop();
     dailyMoments.abort();
+    qzoneInteractions.stop();
+    await qzoneInteractions.abort();
     onebot.close();
     await orchestrator.abortAll();
     await Promise.allSettled([...ingress.values()]);
@@ -1486,6 +1599,7 @@ export function createApp({ log = console.log } = {}) {
     sessions,
     orchestrator,
     dailyMoments,
+    qzoneInteractions,
     start,
     stop,
     emit,
@@ -1529,6 +1643,84 @@ function resolveRange(raw) {
 /** 上海时区的 YYYY-MM-DD（用于按天分桶）。 */
 function dayKeyOf(ts) {
   return todayKey(ts);
+}
+
+/** 把一个 Session 展开为与用量页完全相同的逐调用计价行。 */
+function usageRowsForSession(s) {
+  const started = Number(s?.startedAt) || 0;
+  if (!started) return [];
+  const base = {
+    vendor: String(s.vendor || '').trim() || UNKNOWN_VENDOR,
+    chatKey: String(s.chatKey || '(未知)'),
+    sessionId: s.id
+  };
+  const calls = [];
+  for (const m of (s.messages || [])) {
+    const raw = m?.raw;
+    if (!raw || typeof raw !== 'object') continue;
+    const ru = raw.usage || {};
+    const promptTokens = Number(ru.prompt_tokens) || 0;
+    const completionTokens = Number(ru.completion_tokens) || 0;
+    if (!promptTokens && !completionTokens) continue;
+    calls.push({
+      ...base,
+      promptTokens,
+      completionTokens,
+      cachedTokens: cachedTokensOfUsage(ru),
+      at: Number(raw.created) ? Number(raw.created) * 1000 : started,
+      model: String(raw.model || s.model || '') || '(未知)',
+      exact: true
+    });
+  }
+  const rows = calls.length ? calls : (() => {
+    const usage = s.usage || {};
+    const promptTokens = Number(usage.promptTokens) || 0;
+    const completionTokens = Number(usage.completionTokens) || 0;
+    if (!promptTokens && !completionTokens) return [];
+    return [{
+      ...base,
+      promptTokens,
+      completionTokens,
+      cachedTokens: Number(usage.cachedTokens) || 0,
+      at: started,
+      model: String(s.model || '') || '(未知)',
+      exact: false
+    }];
+  })();
+  return rows.map((row) => ({
+    ...row,
+    modelKey: modelLabel(row.vendor, row.model)
+  }));
+}
+
+/** Session 详情使用的全局指标；成本与用量页共用同一计价函数。 */
+function buildSessionMetrics(s) {
+  const usage = s?.usage || {};
+  const calls = Array.isArray(s?.callUsage) ? s.callUsage : [];
+  const promptTokens = Number(usage.promptTokens) || 0;
+  const completionTokens = Number(usage.completionTokens) || 0;
+  const cachedTokens = Math.min(promptTokens, Number(usage.cachedTokens) || 0);
+  const first = calls[0] || {};
+  const firstPromptTokens = Number(first.promptTokens) || 0;
+  const firstCachedTokens = Math.min(
+    firstPromptTokens,
+    Number(first.cachedTokens) || 0
+  );
+  const priced = costOfRows(usageRowsForSession(s));
+  return {
+    modelCalls: Number(usage.calls) || calls.length,
+    firstCallCacheHitRate: firstPromptTokens ? firstCachedTokens / firstPromptTokens : 0,
+    cacheHitRate: promptTokens ? cachedTokens / promptTokens : 0,
+    promptTokens,
+    completionTokens,
+    cachedTokens,
+    totalTokens: Number(usage.totalTokens) || promptTokens + completionTokens,
+    toolCalls: (s?.messages || []).filter((message) => message?.toolCall).length,
+    webSearchCount: Number(s?.webSearchCount) || 0,
+    estimatedCost: priced.cost,
+    costBreakdown: priced.breakdown,
+    exactCostCalls: priced.exactCalls
+  };
 }
 
 /**
@@ -1604,56 +1796,10 @@ function collectUsageRows({ range }) {
       }
     }
 
-    // 逐次调用展开：每条 message.raw 有独立的 usage / created / model
-    const calls = [];
-    for (const m of (s.messages || [])) {
-      const raw = m?.raw;
-      if (!raw || typeof raw !== 'object') continue;
-      const ru = raw.usage || {};
-      const rp = Number(ru.prompt_tokens) || 0;
-      const rc = Number(ru.completion_tokens) || 0;
-      if (!rp && !rc) continue;
-      const at = Number(raw.created) ? Number(raw.created) * 1000 : started;
-      calls.push({
-        promptTokens: rp,
-        completionTokens: rc,
-        cachedTokens: cachedTokensOfUsage(ru),
-        at,
-        model: String(raw.model || s.model || '') || '(未知)'
-      });
+    for (const row of usageRowsForSession(s)) {
+      if (row.at < win.start || row.at > win.end) continue;
+      rows.push(row);
     }
-
-    if (calls.length) {
-      for (const c of calls) {
-        if (c.at < win.start || c.at > win.end) continue;
-        rows.push({ ...c, vendor: String(s.vendor || ''), chatKey: String(s.chatKey || '(未知)'), sessionId: s.id, exact: true });
-      }
-    } else {
-      const u = s.usage || {};
-      const p = Number(u.promptTokens) || 0;
-      const c = Number(u.completionTokens) || 0;
-      if (!p && !c) continue;
-      if (started < win.start || started > win.end) continue;
-      rows.push({
-        promptTokens: p,
-        completionTokens: c,
-        cachedTokens: Number(u.cachedTokens) || 0,
-        at: started,
-        model: String(s.model || '') || '(未知)',
-        chatKey: String(s.chatKey || '(未知)'),
-        vendor: String(s.vendor || ''),
-        sessionId: s.id,
-        exact: false
-      });
-    }
-  }
-  // 模型身份 = 渠道 + 模型 id。
-  // 渠道取**会话自己记录的** vendor（创建会话时由当时的配置派生）。
-  // 老会话没这个字段 → 标为「未知渠道」，绝不拿当前配置去倒推历史 ——
-  // 用户很可能早就换过渠道了，猜出来的结果是错的。
-  for (const r of rows) {
-    r.vendor = String(r.vendor || '').trim() || UNKNOWN_VENDOR;
-    r.modelKey = modelLabel(r.vendor, r.model);
   }
   // 写缓存：存的是"清洗完的 rows"，取用时给副本避免调用方污染
   usageRowsCache.key = sig;

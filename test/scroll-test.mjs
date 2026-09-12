@@ -181,6 +181,19 @@ check('加载更多时 detail.innerHTML 未被整体重写',
 const wakeBtn = document.getElementById('chat-wake-btn');
 const wakeCount = (listeners.get(wakeBtn)?.click || []).length;
 check('唤醒按钮只绑 1 次点击', wakeCount <= 1, `实际 ${wakeCount}`);
+const originalFetch = sandbox.fetch;
+sandbox.fetch = async (url) => ({
+  ok: true,
+  json: async () => String(url).includes('/wake')
+    ? { ok: true, mode: 'context' }
+    : { onebot: {}, orchestrator: {}, usage: {}, cost: {} }
+});
+await listeners.get(wakeBtn).click[0]();
+check('主动唤醒成功后显示明确反馈',
+  document.getElementById('chat-wake-result').textContent === '已基于最近存档开始思考',
+  document.getElementById('chat-wake-result').textContent);
+check('主动唤醒请求结束后按钮恢复可用', wakeBtn.disabled === false);
+sandbox.fetch = originalFetch;
 
 console.log('\n=== ④ 到底部后不再增长 ===');
 // 一直加载到底（每次先滚到底）

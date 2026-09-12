@@ -3,6 +3,7 @@
 import { getConfig } from './config.js';
 import { resolveOfficialPrice, resolveModelPrice, priceAt } from './model-prices.js';
 import { setTimeout as delay } from 'node:timers/promises';
+import { assertTimeAllowed, watchTimeWindow } from './time-gate.js';
 
 function joinUrl(base, path) {
   return `${String(base).replace(/\/+$/, '')}${path}`;
@@ -72,6 +73,7 @@ function effectiveApi() {
  *   - 主动中止（abort）
  */
 export function isRetryableError(error) {
+  if (error?.code === 'TIME_CONTROL_INACTIVE') return false;
   const msg = String(error?.message ?? error ?? '');
 
   // 主动中止（用户/系统取消）：重试没有意义
@@ -142,6 +144,7 @@ export async function chatCompletion({
   overrides = null,
   cacheKey = ''
 }) {
+  assertTimeAllowed();
   const api = overrides || effectiveApi();
   const body = {
     model: api.model,
@@ -174,8 +177,11 @@ export async function chatCompletion({
     if (signal.aborted) controller.abort(signal.reason ?? new Error('aborted'));
     else signal.addEventListener('abort', abort, { once: true });
   }
+  const releaseTimeGuard = watchTimeWindow((error) => controller.abort(error));
 
   try {
+    controller.signal.throwIfAborted();
+    assertTimeAllowed();
     const res = await fetch(joinUrl(api.baseUrl, '/chat/completions'), {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...authHeaders(api.apiKey, api.baseUrl, api.model) },
@@ -194,11 +200,13 @@ export async function chatCompletion({
       usage: data.usage ?? null, model: data.model ?? api.model, raw: data
     };
   } catch (error) {
+    if (controller.signal.reason?.code === 'TIME_CONTROL_INACTIVE') throw controller.signal.reason;
     if (signal?.aborted) throw signal.reason ?? new Error('Run cancelled');
     if (controller.signal.aborted) throw new Error(`模型请求超时（${timeoutMs}ms）`);
     if (/模型 API HTTP/.test(String(error.message))) throw error;
     throw new Error(`模型请求失败：${error?.cause?.message ?? error?.message ?? error}`);
   } finally {
+    releaseTimeGuard();
     clearTimeout(timer);
     signal?.removeEventListener('abort', abort);
   }

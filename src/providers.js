@@ -1,5 +1,6 @@
 // 多提供商模型目录：统一使用 OpenAI 兼容接口，由控制台维护。
 import { getConfig, updateConfig } from './config.js';
+import { assertTimeAllowed, watchTimeWindow } from './time-gate.js';
 
 /** 当前生效的提供商目录（配置里的 providers）。 */
 export function currentProviders() {
@@ -87,13 +88,16 @@ export async function fetchModelsFrom(baseUrl, apiKey, timeoutMs = 15000) {
 
 /** 用用户提供的 baseUrl + apiKey + modelId 发送一次最小 chat 测试请求。 */
 export async function testModelChat({ baseUrl, apiKey, model }) {
+  assertTimeAllowed('');
   const base = normalizeBaseUrl(baseUrl);
   if (!base) throw new Error('请先填写 Base URL');
   if (!String(model || '').trim()) throw new Error('请先填写模型 ID');
   const startedAt = Date.now();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error('超时')), 20000);
+  const releaseTimeGuard = watchTimeWindow((error) => controller.abort(error), '');
   try {
+    controller.signal.throwIfAborted();
     const res = await fetch(`${base}/chat/completions`, {
       method: 'POST',
       headers: {
@@ -122,6 +126,7 @@ export async function testModelChat({ baseUrl, apiKey, model }) {
     const msg = String(error?.cause?.message ?? error?.message ?? error);
     return { ok: false, latencyMs, note: msg === '超时' ? '连接超时' : `网络错误：${msg}` };
   } finally {
+    releaseTimeGuard();
     clearTimeout(timer);
   }
 }
