@@ -120,10 +120,11 @@ if ! node_ready "$NODE_BIN"; then
   NODE_BIN="$RUNTIME_DIR/node-v${NODE_VERSION}-linux-${NODE_ARCH}/bin/node"
 fi
 node_ready "$NODE_BIN" || { printf 'Node.js >=22.13 with node:sqlite is required\n' >&2; exit 1; }
+NODE_BIN="$("$NODE_BIN" -p 'process.execPath')"
 [[ "$NODE_BIN" != *[[:space:]%\"]* ]] || { printf 'Node path contains unsupported characters\n' >&2; exit 2; }
 export PATH="$(dirname "$NODE_BIN"):$PATH"
 
-for required in package.json package-lock.json src/server.js scripts/configure-linux.mjs scripts/install-service.mjs manage.sh; do
+for required in package.json package-lock.json src/server.js scripts/configure-linux.mjs scripts/install-service.mjs scripts/manage.mjs manage.sh; do
   [[ -f "$ROOT/$required" ]] || {
     printf 'Source repository is incomplete: missing %s\n' "$required" >&2
     exit 1
@@ -138,6 +139,7 @@ RSYNC_PRESERVE=(
   --exclude=/.git/
   --exclude=/.runtime/
   --exclude=/.deployment.json
+  --exclude=/.deployment-node
   --exclude=/.dbg/
   --exclude='/debug-*.md'
   --exclude=/.env
@@ -171,6 +173,8 @@ mkdir -p "$LOCK_DIR/state"
 HAD_CONFIG=false
 HAD_ACCESS_FILE=false
 HAD_UNIT=false
+HAD_DEPLOYMENT_JSON=false
+HAD_DEPLOYMENT_NODE=false
 if [[ -f "$DATA_DIR/config.json" ]]; then
   HAD_CONFIG=true
   cp -p "$DATA_DIR/config.json" "$LOCK_DIR/state/config.json"
@@ -182,6 +186,14 @@ fi
 if [[ -f "$UNIT_FILE" ]]; then
   HAD_UNIT=true
   cp -p "$UNIT_FILE" "$LOCK_DIR/state/service.unit"
+fi
+if [[ -f "$INSTALL_DIR/.deployment.json" ]]; then
+  HAD_DEPLOYMENT_JSON=true
+  cp -p "$INSTALL_DIR/.deployment.json" "$LOCK_DIR/state/deployment.json"
+fi
+if [[ -f "$INSTALL_DIR/.deployment-node" ]]; then
+  HAD_DEPLOYMENT_NODE=true
+  cp -p "$INSTALL_DIR/.deployment-node" "$LOCK_DIR/state/deployment-node"
 fi
 
 rollback_deployment() {
@@ -208,6 +220,16 @@ rollback_deployment() {
     cp -p "$LOCK_DIR/state/service.unit" "$UNIT_FILE"
   else
     rm -f -- "$UNIT_FILE"
+  fi
+  if [[ "$HAD_DEPLOYMENT_JSON" == true ]]; then
+    cp -p "$LOCK_DIR/state/deployment.json" "$INSTALL_DIR/.deployment.json"
+  else
+    rm -f -- "$INSTALL_DIR/.deployment.json"
+  fi
+  if [[ "$HAD_DEPLOYMENT_NODE" == true ]]; then
+    cp -p "$LOCK_DIR/state/deployment-node" "$INSTALL_DIR/.deployment-node"
+  else
+    rm -f -- "$INSTALL_DIR/.deployment-node"
   fi
   systemctl --user daemon-reload
   if [[ "$WAS_ACTIVE" == true ]]; then

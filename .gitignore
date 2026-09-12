@@ -38,6 +38,7 @@ desktop.ini
 .env
 .env.local
 .deployment.json
+.deployment-node
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm

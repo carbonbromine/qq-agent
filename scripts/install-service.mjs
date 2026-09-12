@@ -30,4 +30,5 @@ WantedBy=default.target
 `;
 fs.writeFileSync(path.join(dir, `${service}.service`), unit, { mode: 0o600 });
 fs.writeFileSync(path.join(root, '.deployment.json'), JSON.stringify({ root, data, node, service }), { mode: 0o600 });
+fs.writeFileSync(path.join(root, '.deployment-node'), `${node}\n`, { mode: 0o600 });
 console.log(`Installed ${service}.service`);
