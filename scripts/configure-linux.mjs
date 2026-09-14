@@ -15,9 +15,26 @@ const exists = fs.existsSync(CONFIG_FILE);
 const patch = {
   server: { host: values.host, port: Number(values.port), strictPort: true }
 };
+const consoleToken = String(process.env.QQ_AGENT_CONSOLE_TOKEN || '').trim();
+const onebotToken = String(process.env.QQ_AGENT_ONEBOT_TOKEN || '').trim();
+const onebotHttpToken = String(process.env.QQ_AGENT_ONEBOT_HTTP_TOKEN || onebotToken).trim();
+const onebotWsUrl = String(process.env.QQ_AGENT_ONEBOT_WS_URL || '').trim();
+const onebotHttpUrl = String(process.env.QQ_AGENT_ONEBOT_HTTP_URL || '').trim();
+const modelBaseUrl = String(process.env.QQ_AGENT_MODEL_BASE_URL || '').trim();
+const modelApiKey = String(process.env.QQ_AGENT_MODEL_API_KEY || '').trim();
+const model = String(process.env.QQ_AGENT_MODEL || '').trim();
+const parseIds = (name) => {
+  if (!(name in process.env)) return null;
+  const ids = String(process.env[name] || '').split(',').map((value) => value.trim()).filter(Boolean);
+  if (ids.some((id) => !/^\d+$/.test(id))) throw new Error(`${name} must contain comma-separated numeric IDs`);
+  return [...new Set(ids)];
+};
+const allowGroups = parseIds('QQ_AGENT_ALLOW_GROUPS');
+const allowPrivate = parseIds('QQ_AGENT_ALLOW_PRIVATE');
+if (consoleToken) patch.server.token = consoleToken;
 if (!exists) {
   patch.runtime = { mode: 'observe', paused: false };
-  patch.server.token = crypto.randomBytes(24).toString('hex');
+  patch.server.token ||= crypto.randomBytes(24).toString('hex');
   if (values['import-bridge']) {
     const old = JSON.parse(fs.readFileSync(values['import-bridge'], 'utf8'));
     const oldOneBot = old.onebot || old.snowluma || {};
@@ -40,6 +57,30 @@ if (!exists) {
       }
     }
   }
+}
+if (onebotToken || onebotHttpToken || onebotWsUrl || onebotHttpUrl) {
+  patch.onebot = {
+    ...(patch.onebot || {}),
+    ...(onebotWsUrl ? { wsUrl: onebotWsUrl } : {}),
+    ...(onebotHttpUrl ? { httpUrl: onebotHttpUrl } : {}),
+    ...(onebotToken ? { accessToken: onebotToken } : {}),
+    ...(onebotHttpToken ? { httpAccessToken: onebotHttpToken } : {})
+  };
+}
+if (modelBaseUrl || modelApiKey || model) {
+  patch.api = {
+    ...(patch.api || {}),
+    ...(modelBaseUrl ? { baseUrl: modelBaseUrl } : {}),
+    ...(modelApiKey ? { apiKey: modelApiKey } : {}),
+    ...(model ? { model } : {})
+  };
+}
+if (allowGroups !== null || allowPrivate !== null) {
+  patch.allow = {
+    ...(patch.allow || {}),
+    ...(allowGroups !== null ? { groups: allowGroups } : {}),
+    ...(allowPrivate !== null ? { private: allowPrivate } : {})
+  };
 }
 updateConfig(patch);
 fs.chmodSync(CONFIG_FILE, 0o600);

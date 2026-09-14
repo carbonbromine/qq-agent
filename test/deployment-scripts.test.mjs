@@ -56,6 +56,74 @@ test('configure-linux creates observe config and preserves runtime mode on updat
   assert.equal(updated.server.token, initial.server.token);
 });
 
+test('configure-linux accepts full-stack credentials and OneBot endpoints', (t) => {
+  const dataDir = tempDir(t, 'qq-full-deploy-config-');
+  const result = runNode(path.join(repo, 'scripts/configure-linux.mjs'), [
+    '--data-dir', dataDir,
+    '--host', '0.0.0.0',
+    '--port', '43212'
+  ], {
+    env: {
+      ...process.env,
+      QQ_AGENT_CONSOLE_TOKEN: 'agent-console-token-1234',
+      QQ_AGENT_ONEBOT_TOKEN: 'onebot-ws-token-1234',
+      QQ_AGENT_ONEBOT_HTTP_TOKEN: 'onebot-http-token-1234',
+      QQ_AGENT_ONEBOT_WS_URL: 'ws://127.0.0.1:33001',
+      QQ_AGENT_ONEBOT_HTTP_URL: 'http://127.0.0.1:33000',
+      QQ_AGENT_MODEL_BASE_URL: 'https://model.example/v1',
+      QQ_AGENT_MODEL_API_KEY: 'model-secret',
+      QQ_AGENT_MODEL: 'model-name',
+      QQ_AGENT_ALLOW_GROUPS: '123,456',
+      QQ_AGENT_ALLOW_PRIVATE: '789'
+    }
+  });
+  assert.equal(result.status, 0, result.stderr);
+
+  const config = JSON.parse(fs.readFileSync(path.join(dataDir, 'config.json'), 'utf8'));
+  assert.equal(config.server.token, 'agent-console-token-1234');
+  assert.equal(config.onebot.wsUrl, 'ws://127.0.0.1:33001');
+  assert.equal(config.onebot.httpUrl, 'http://127.0.0.1:33000');
+  assert.equal(config.onebot.accessToken, 'onebot-ws-token-1234');
+  assert.equal(config.onebot.httpAccessToken, 'onebot-http-token-1234');
+  assert.equal(config.api.baseUrl, 'https://model.example/v1');
+  assert.equal(config.api.apiKey, 'model-secret');
+  assert.equal(config.api.model, 'model-name');
+  assert.deepEqual(config.allow.groups, ['123', '456']);
+  assert.deepEqual(config.allow.private, ['789']);
+});
+
+test('configure-snowluma synchronizes global and per-account server tokens', (t) => {
+  const dataDir = tempDir(t, 'qq-snowluma-config-');
+  const configDir = path.join(dataDir, 'config');
+  fs.mkdirSync(configDir);
+  fs.writeFileSync(path.join(configDir, 'onebot_12345.json'), JSON.stringify({
+    mode: 'snapshot',
+    networks: {
+      httpServers: [{ name: 'custom-http', host: '127.0.0.1', port: 3100 }],
+      wsServers: [{ name: 'custom-ws', host: '127.0.0.1', port: 3101, role: 'Event' }]
+    }
+  }));
+
+  const result = runNode(path.join(repo, 'scripts/configure-snowluma.mjs'), [
+    '--data-dir', dataDir,
+    '--token', 'shared-onebot-token-1234',
+    '--http-port', '3000',
+    '--ws-port', '3001'
+  ]);
+  assert.equal(result.status, 0, result.stderr);
+
+  for (const name of ['onebot.json', 'onebot_12345.json']) {
+    const config = JSON.parse(fs.readFileSync(path.join(configDir, name), 'utf8'));
+    assert.equal(config.networks.httpServers[0].host, '0.0.0.0');
+    assert.equal(config.networks.httpServers[0].port, 3000);
+    assert.equal(config.networks.httpServers[0].accessToken, 'shared-onebot-token-1234');
+    assert.equal(config.networks.wsServers[0].host, '0.0.0.0');
+    assert.equal(config.networks.wsServers[0].port, 3001);
+    assert.equal(config.networks.wsServers[0].accessToken, 'shared-onebot-token-1234');
+  }
+  assert.ok(fs.existsSync(path.join(configDir, 'onebot_12345.json.bak')));
+});
+
 test('installed manage launcher uses the exact deployed Node runtime', (t) => {
   const root = tempDir(t, 'qq-deploy-root-');
   const home = tempDir(t, 'qq-deploy-home-');
@@ -75,12 +143,15 @@ test('installed manage launcher uses the exact deployed Node runtime', (t) => {
       QQ_INSTALL_DIR: root,
       QQ_DATA_DIR: data,
       QQ_NODE: fakeNode,
-      QQ_SERVICE: 'qq-agent-test'
+      QQ_SERVICE: 'qq-agent-test',
+      QQ_SNOWLUMA_WEBUI_URL: 'http://127.0.0.1:15099'
     }
   });
   assert.equal(install.status, 0, install.stderr);
   assert.equal(fs.readFileSync(path.join(root, '.deployment-node'), 'utf8'), `${fakeNode}\n`);
   assert.equal(fs.statSync(path.join(root, '.deployment-node')).mode & 0o777, 0o600);
+  const unit = fs.readFileSync(path.join(home, '.config/systemd/user/qq-agent-test.service'), 'utf8');
+  assert.match(unit, /Environment="SNOWLUMA_WEBUI_URL=http:\/\/127\.0\.0\.1:15099"/);
 
   const manage = spawnSync('/bin/bash', [path.join(root, 'manage.sh'), 'health'], {
     cwd: root,

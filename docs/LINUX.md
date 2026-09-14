@@ -17,10 +17,64 @@ exclusive-use confirmation; it does not automatically stop the old instance.
 
 - Linux with systemd user services, curl, tar, sha256sum and rsync.
 - A mounted local filesystem for SQLite (not NFS/SMB).
-- A separately managed OneBot v11 HTTP/forward WebSocket service.
+- A separately managed OneBot v11 HTTP/forward WebSocket service when using
+  `deploy.sh`; `deploy-all.sh` installs SnowLuma/OneBot.
 - An OpenAI Chat Completions compatible model with function calling.
 - For boot without interactive login: `loginctl enable-linger USER`.
 - A fixed free port; LAN binding requires a console token.
+
+## Full-stack Installation
+
+Use `deploy-all.sh` on a new host when SnowLuma/OneBot is not installed yet:
+
+```bash
+bash deploy-all.sh
+```
+
+The installer asks for the stack root and all five host ports. It does not ask
+for a local/LAN IP. The Agent console, SnowLuma WebUI and noVNC bind all host
+interfaces; OneBot HTTP and WebSocket bind only `127.0.0.1`. If Docker is
+missing, the installer asks before installing Docker Engine and Compose through
+the host package manager.
+It does not modify UFW, firewalld or cloud security-group policy. Allow only the
+three selected user-facing ports from trusted LAN/VPN ranges when host firewall
+rules are enabled; never expose noVNC or OneBot directly to the public Internet.
+
+The resulting layout is:
+
+```text
+STACK_ROOT/
+  app/                    deployed QQ Agent code
+  data/                   QQ Agent persistent data
+  snowluma/
+    docker-compose.yml
+    .env                   generated service credentials
+    data/                  SnowLuma and OneBot configuration
+    client-config/         QQ client configuration
+    client-data/           QQ login state and cache
+  deployment-access.txt   generated URLs and credentials (0600)
+```
+
+The SnowLuma image is pinned to the tested `v1.14.15` release by default.
+Download or container startup failures stop the installation with an error.
+One shared OneBot token is written to SnowLuma's global template, every existing
+per-account config and QQ Agent's configuration. Existing installations retain
+their credentials unless `--rotate-credentials` is selected.
+
+On a fresh interactive install, the script also asks for the model endpoint,
+API key, model name and QQ allowlists. After the infrastructure checks pass,
+open the printed noVNC URL and scan the QQ login QR code, then return to the
+terminal. The installer verifies `get_login_info` and offers to activate the
+Agent. QQ login is intentionally the only unavoidable manual protocol step.
+Until activation, the Agent stays in `observe`.
+
+Non-interactive `--yes` installation requires `--model-base-url`,
+`--model-api-key` and `--model`. Use `--skip-model-config` only when the model
+will deliberately be configured later in the management console. An empty
+allowlist remains deny-by-default.
+
+Use `deploy.sh` directly when a compatible OneBot service already exists or
+when only the QQ Agent process should be installed or updated:
 
 ```bash
 bash deploy.sh \

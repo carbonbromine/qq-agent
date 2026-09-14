@@ -5,6 +5,16 @@ const { QQ_INSTALL_DIR: root, QQ_DATA_DIR: data, QQ_NODE: node, QQ_SERVICE: serv
 if (![root, data, node, service].every(Boolean)) throw new Error('Missing deployment environment');
 const quote = (v) => JSON.stringify(v);
 const dir = path.join(os.homedir(), '.config/systemd/user');
+const deploymentFile = path.join(root, '.deployment.json');
+let previous = {};
+try {
+  previous = JSON.parse(fs.readFileSync(deploymentFile, 'utf8'));
+} catch {
+  previous = {};
+}
+const snowlumaWebuiUrl = String(
+  process.env.QQ_SNOWLUMA_WEBUI_URL || previous.snowlumaWebuiUrl || ''
+).trim();
 fs.mkdirSync(dir, { recursive: true });
 const unit = `[Unit]
 Description=QQ Agent Linux (isolated stateless instance)
@@ -17,7 +27,7 @@ Type=simple
 WorkingDirectory=${root}
 Environment=${quote(`QQ_AGENT_DATA_DIR=${data}`)}
 Environment=NODE_ENV=production
-ExecStart=${quote(node)} ${quote(path.join(root, 'src/server.js'))}
+${snowlumaWebuiUrl ? `Environment=${quote(`SNOWLUMA_WEBUI_URL=${snowlumaWebuiUrl}`)}\n` : ''}ExecStart=${quote(node)} ${quote(path.join(root, 'src/server.js'))}
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
@@ -29,6 +39,12 @@ NoNewPrivileges=true
 WantedBy=default.target
 `;
 fs.writeFileSync(path.join(dir, `${service}.service`), unit, { mode: 0o600 });
-fs.writeFileSync(path.join(root, '.deployment.json'), JSON.stringify({ root, data, node, service }), { mode: 0o600 });
+fs.writeFileSync(deploymentFile, JSON.stringify({
+  root,
+  data,
+  node,
+  service,
+  ...(snowlumaWebuiUrl ? { snowlumaWebuiUrl } : {})
+}), { mode: 0o600 });
 fs.writeFileSync(path.join(root, '.deployment-node'), `${node}\n`, { mode: 0o600 });
 console.log(`Installed ${service}.service`);

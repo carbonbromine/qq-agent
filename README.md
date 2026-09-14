@@ -24,7 +24,61 @@ OneBot WebSocket
 消息只在处理成功后确认。模型或进程失败时，未发送批次自动重试；
 发送结果无法确认时进入 `held`，必须人工核对，避免重复发言。
 
-## 一键部署
+## 全栈一键部署
+
+全新 Linux 机器推荐运行交互式安装器。它会询问部署目录和端口，自动安装
+Docker（需要 sudo 确认）、下载 SnowLuma、配置 OneBot、安装 QQ Agent，并生成和
+同步全部服务凭据。SnowLuma 已经包含 OneBot，不需要再安装 NapCat 或 Lagrange。
+
+```bash
+git clone https://github.com/carbonbromine/qq-agent.git
+cd qq-agent
+bash deploy-all.sh
+```
+
+默认目录为 `/mnt/data/qq-agent`，默认对外端口为：
+
+- `3210`：QQ Agent 控制台；
+- `5099`：SnowLuma WebUI；
+- `6081`：QQ 登录使用的 noVNC。
+
+OneBot HTTP `3000` 和 WebSocket `3001` 默认只绑定
+`127.0.0.1`，不会暴露到局域网。安装器不会要求填写本机 IP，而是在完成后自动
+检测并打印访问地址。所有生成的凭据保存在
+`/mnt/data/qq-agent/deployment-access.txt`，权限为 `0600`。
+脚本不会擅自修改 UFW、firewalld 或云安全组；需要跨主机访问时，应只向可信
+局域网或 VPN 放行上述三个用户入口，不要把 noVNC 或 OneBot 暴露到公网。
+
+首次安装会同时询问模型 Base URL、API Key、模型名和 QQ 白名单。基础设施启动后，
+打开脚本给出的 noVNC 地址并扫码登录 QQ，再回到终端按 Enter；脚本会验证 OneBot
+登录并询问是否激活。确认旧机器人已停止或排除相同群聊后，也可手动执行：
+
+```bash
+/mnt/data/qq-agent/app/manage.sh activate --confirm-exclusive
+```
+
+无人值守安装可使用：
+
+```bash
+bash deploy-all.sh --yes --root-dir /mnt/data/qq-agent \
+  --agent-port 3210 --snowluma-port 5099 --novnc-port 6081 \
+  --model-base-url https://api.deepseek.com \
+  --model-api-key "$DEEPSEEK_API_KEY" --model deepseek-chat \
+  --allow-groups 123456789
+```
+
+无人值守模式必须提供模型配置，或者显式增加 `--skip-model-config`，部署后再从控制台
+填写。白名单可以留空，但机器人在配置允许的会话前不会响应。
+
+重新运行脚本会保留 SnowLuma 数据、QQ 登录态和现有凭据。如需同步轮换 Agent、
+OneBot、SnowLuma WebUI 与 noVNC 凭据，增加 `--rotate-credentials`；启用
+SnowLuma 2FA 后还需提供 `--snowluma-totp`。完整参数见：
+
+```bash
+bash deploy-all.sh --help
+```
+
+## 仅部署 QQ Agent
 
 要求：
 
@@ -44,7 +98,7 @@ bash deploy.sh \
   --port 3210
 ```
 
-部署脚本会：
+`deploy.sh` 不安装 SnowLuma，适合已有 OneBot 服务或只更新 Agent。该脚本会：
 
 - 校验参数、源码和 Node.js `node:sqlite` 能力
 - 安装生产依赖
