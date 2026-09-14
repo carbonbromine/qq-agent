@@ -519,7 +519,8 @@ export class MemoryStore {
     const uid = String(userId ?? '').trim();
     if (!/^\d{1,15}$/.test(uid)) return false;
     const map = this.#ensureChat(chatKey);
-    const m = map.get(uid) || loadMember(chatKey, uid);
+    const m = map.get(uid);
+    if (!m) return false;
     map.delete(uid);
     try { fs.rmSync(memberFile(chatKey, uid, m.name), { force: true }); } catch { /* ignore */ }
     return true;

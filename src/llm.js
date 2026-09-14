@@ -142,7 +142,8 @@ export async function chatCompletion({
   temperature = null,
   signal = null,
   overrides = null,
-  cacheKey = ''
+  cacheKey = '',
+  maxTokens = null
 }) {
   assertTimeAllowed();
   const api = overrides || effectiveApi();
@@ -161,6 +162,9 @@ export async function chatCompletion({
   }
   const temp = temperature === null ? (api.temperature ?? 0.8) : temperature;
   if (temp !== null && temp !== undefined && Number.isFinite(Number(temp))) body.temperature = Number(temp);
+  if (Number.isFinite(Number(maxTokens)) && Number(maxTokens) > 0) {
+    body.max_tokens = Math.round(Number(maxTokens));
+  }
   // OpenAI/Azure 可用显式 key 提高相同前缀的路由稳定性。兼容网关不盲传，
   // 避免它们因未知字段返回 400；DeepSeek 使用自动前缀缓存，无需该字段。
   if (cacheKey && /(^|\.)openai\.com$|\.openai\.azure\.com$|\.services\.ai\.azure\.com$/i.test((() => {

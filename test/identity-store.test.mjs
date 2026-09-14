@@ -11,6 +11,7 @@ process.on('exit', () => fs.rmSync(root, { recursive: true, force: true }));
 
 const { ChatStore } = await import('../src/store.js');
 const {
+  IdentityStore,
   identityDatabasePath,
   readLegacyIdentityMemories
 } = await import('../src/identity-store.js');
@@ -259,24 +260,28 @@ test('friend proposals require eligibility, deduplicate, cool down, and close on
   assert.equal(duplicate.created, false);
   assert.equal(manager.listFriendProposals().length, 1);
 
-  const approved = manager.decideFriendProposal(
+  const approved = await manager.decideFriendProposal(
     created.proposal.id,
     'approve',
     { decidedBy: '900001' }
   );
   assert.equal(approved.proposal.status, 'approved_manual');
   assert.equal(approved.execution, 'manual-required');
-  assert.equal(approved.protocolDispatchSupported, false);
-  assert.match(approved.note, /OneBot/);
-  assert.deepEqual(onebotActions, ['get_friend_list']);
+  assert.equal(approved.protocolDispatchSupported, true);
+  assert.match(approved.note, /实验开关未开启/);
+  assert.deepEqual(onebotActions, ['get_friend_list', 'get_friend_list']);
 
-  assert.equal(manager.markFriendAdded('123456'), 1);
+  assert.equal(await manager.markFriendAdded('123456'), 1);
   assert.equal(manager.listFriendProposals()[0].status, 'accepted');
   assert.equal(manager.listPeople()[0].isFriend, true);
   assert.deepEqual(manager.status().friendProposal.counts, {
     total: 1,
     pending: 0,
     approvedManual: 0,
+    dispatching: 0,
+    sent: 0,
+    heldUnknown: 0,
+    failed: 0,
     accepted: 1,
     rejected: 0
   });
@@ -287,7 +292,11 @@ test('friend proposals require eligibility, deduplicate, cool down, and close on
     reasonCode: 'banter',
     reason: '想以后继续互怼'
   });
-  manager.decideFriendProposal(rejected.proposal.id, 'reject', { decidedBy: '900001' });
+  await manager.decideFriendProposal(
+    rejected.proposal.id,
+    'reject',
+    { decidedBy: '900001' }
+  );
   await assert.rejects(
     manager.proposeFriend({
       userId: '654321',
@@ -357,4 +366,394 @@ test('friend proposal validation enforces message threshold and administrator co
     }),
     /管理员 QQ/
   );
+});
+
+test('approved friend proposal dispatches once and waits for friend_add confirmation', async (t) => {
+  const dir = fs.mkdtempSync(path.join(root, 'friend-dispatch-success-'));
+  const store = new ChatStore(0, { dataDir: dir });
+  t.after(() => {
+    store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const cfg = {
+    identityPilot: {
+      enabled: true,
+      friendProposal: {
+        enabled: true,
+        activeDispatchEnabled: true,
+        ownerUin: '900001',
+        minMessageCount: 1,
+        cooldownDays: 30,
+        maxPending: 2
+      }
+    },
+    allow: { groups: ['100'], private: ['900001'] },
+    deny: { groups: [], private: [] },
+    allowAllWhenEmpty: false,
+    blocklist: {}
+  };
+  store.appendIncoming('group:100', {
+    mid: 1,
+    ts: Date.now(),
+    senderId: '123456',
+    senderName: '候选成员',
+    text: '测试发送'
+  });
+  const dispatches = [];
+  const whitelisted = [];
+  const manager = new IdentityPilotManager({
+    store,
+    dataDir: dir,
+    config: () => cfg,
+    onebot: {
+      selfId: '888888',
+      connected: true,
+      call: async () => []
+    },
+    sendFriendRequest: async (_onebot, params) => {
+      dispatches.push(params);
+      return { accepted: true, businessCode: 0, setting: 1, wording: '' };
+    },
+    allowPrivateUser: async (userId) => {
+      whitelisted.push(userId);
+    },
+    log: () => {}
+  });
+  t.after(() => manager.stop());
+  await manager.start();
+  const created = await manager.proposeFriend({
+    userId: '123456',
+    chatKey: 'group:100',
+    reasonCode: 'interest',
+    reason: '希望继续交流',
+    verificationMessage: '继续聊'
+  });
+  const approved = await manager.decideFriendProposal(
+    created.proposal.id,
+    'approve',
+    { decidedBy: '900001' }
+  );
+  assert.equal(approved.execution, 'sent');
+  assert.equal(approved.proposal.status, 'sent');
+  assert.equal(approved.proposal.dispatchStartedAt > 0, true);
+  assert.equal(approved.proposal.dispatchedAt > 0, true);
+  assert.equal(dispatches.length, 1);
+  assert.equal(dispatches[0].userId, '123456');
+  assert.equal(dispatches[0].sourceChatKey, 'group:100');
+  assert.equal(dispatches[0].verificationMessage, '继续聊');
+  await assert.rejects(
+    manager.decideFriendProposal(created.proposal.id, 'approve', {
+      decidedBy: '900001'
+    }),
+    /已处理：sent/
+  );
+  assert.equal(dispatches.length, 1, 'sent proposal must never be dispatched twice');
+  assert.equal(await manager.markFriendAdded('123456'), 1);
+  assert.equal(manager.listFriendProposals()[0].status, 'accepted');
+  assert.deepEqual(whitelisted, ['123456']);
+});
+
+test('unknown friend request result is held and a crashed dispatch is recovered as unknown', async (t) => {
+  const dir = fs.mkdtempSync(path.join(root, 'friend-dispatch-unknown-'));
+  const store = new ChatStore(0, { dataDir: dir });
+  t.after(() => {
+    store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const cfg = {
+    identityPilot: {
+      enabled: true,
+      friendProposal: {
+        enabled: true,
+        activeDispatchEnabled: true,
+        ownerUin: '900001',
+        minMessageCount: 1,
+        cooldownDays: 30,
+        maxPending: 2
+      }
+    },
+    allow: { groups: ['100'], private: ['900001'] },
+    deny: { groups: [], private: [] },
+    allowAllWhenEmpty: false,
+    blocklist: {}
+  };
+  for (const userId of ['123456', '654321']) {
+    store.appendIncoming('group:100', {
+      mid: Number(userId),
+      ts: Date.now(),
+      senderId: userId,
+      senderName: `候选${userId}`,
+      text: '测试未知结果'
+    });
+  }
+  let attempts = 0;
+  const manager = new IdentityPilotManager({
+    store,
+    dataDir: dir,
+    config: () => cfg,
+    onebot: {
+      selfId: '888888',
+      connected: true,
+      call: async () => []
+    },
+    sendFriendRequest: async () => {
+      attempts += 1;
+      throw new Error('socket closed after write');
+    },
+    log: () => {}
+  });
+  await manager.start();
+  const first = await manager.proposeFriend({
+    userId: '123456',
+    chatKey: 'group:100',
+    reasonCode: 'frequent',
+    reason: '经常聊天'
+  });
+  const unknown = await manager.decideFriendProposal(
+    first.proposal.id,
+    'approve',
+    { decidedBy: '900001' }
+  );
+  assert.equal(unknown.execution, 'held-unknown');
+  assert.equal(unknown.proposal.status, 'held_unknown');
+  assert.match(unknown.proposal.dispatchError, /socket closed/);
+  await assert.rejects(
+    manager.decideFriendProposal(first.proposal.id, 'approve', {
+      decidedBy: '900001'
+    }),
+    /已处理：held_unknown/
+  );
+  assert.equal(attempts, 1, 'unknown result must never be retried automatically');
+
+  const second = await manager.proposeFriend({
+    userId: '654321',
+    chatKey: 'group:100',
+    reasonCode: 'banter',
+    reason: '继续互怼'
+  });
+  manager.identityStore.decideFriendProposal(
+    second.proposal.id,
+    'approve',
+    { decidedBy: '900001', dispatch: true }
+  );
+  manager.stop();
+  const reopened = new IdentityStore({ dataDir: dir });
+  t.after(() => reopened.close());
+  assert.equal(reopened.getFriendProposal(second.proposal.id).status, 'held_unknown');
+  assert.match(
+    reopened.getFriendProposal(second.proposal.id).dispatchError,
+    /结果确认前重启/
+  );
+});
+
+test('incoming friend requests notify once, require approval, and add the private whitelist', async (t) => {
+  const dir = fs.mkdtempSync(path.join(root, 'incoming-friend-request-'));
+  const store = new ChatStore(0, { dataDir: dir });
+  t.after(() => {
+    store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const cfg = {
+    identityPilot: {
+      enabled: true,
+      incomingFriendRequest: {
+        enabled: true,
+        autoWhitelist: true
+      },
+      friendProposal: {
+        enabled: true,
+        activeDispatchEnabled: true,
+        ownerUin: '900001',
+        minMessageCount: 1,
+        cooldownDays: 30,
+        maxPending: 10
+      }
+    },
+    allow: { groups: ['100'], private: ['900001'] },
+    deny: { groups: [], private: [] },
+    allowAllWhenEmpty: false,
+    blocklist: {}
+  };
+  const calls = [];
+  const notices = [];
+  const whitelisted = [];
+  const manager = new IdentityPilotManager({
+    store,
+    dataDir: dir,
+    config: () => cfg,
+    onebot: {
+      call: async (action, params) => {
+        calls.push({ action, params });
+        return [];
+      }
+    },
+    notifyIncomingFriendRequest: async (request, ownerUin) => {
+      notices.push({ request, ownerUin });
+    },
+    allowPrivateUser: async (userId) => {
+      whitelisted.push(userId);
+    },
+    log: () => {}
+  });
+  t.after(() => manager.stop());
+  await manager.start();
+
+  const first = await manager.receiveIncomingFriendRequest({
+    userId: '123456',
+    flag: 'request-flag-1',
+    comment: '想认识一下'
+  });
+  assert.equal(first.created, true);
+  assert.equal(first.request.status, 'pending');
+  assert.equal(first.request.notifiedAt > 0, true);
+  assert.equal(notices.length, 1);
+  assert.equal(notices[0].ownerUin, '900001');
+
+  const duplicate = await manager.receiveIncomingFriendRequest({
+    userId: '123456',
+    flag: 'request-flag-1',
+    comment: '重复事件'
+  });
+  assert.equal(duplicate.created, false);
+  assert.equal(notices.length, 1, '同一 OneBot flag 不应重复通知管理员');
+  const refreshed = await manager.receiveIncomingFriendRequest({
+    userId: '123456',
+    flag: 'request-flag-2',
+    comment: '重新发送申请'
+  });
+  assert.equal(refreshed.created, false);
+  assert.equal(refreshed.refreshed, true);
+  assert.equal(notices.length, 1, '同一用户的待审批请求只保留一条');
+
+  const approved = await manager.decideIncomingFriendRequest(
+    first.request.id,
+    'approve',
+    { decidedBy: '900001', remark: '新朋友' }
+  );
+  assert.equal(approved.execution, 'approved');
+  assert.equal(approved.request.status, 'approved');
+  assert.equal(approved.request.whitelistApplied, true);
+  assert.deepEqual(whitelisted, ['123456']);
+  assert.deepEqual(calls.at(-1), {
+    action: 'set_friend_add_request',
+    params: {
+      flag: 'request-flag-2',
+      approve: true,
+      remark: '新朋友'
+    }
+  });
+  await assert.rejects(
+    manager.decideIncomingFriendRequest(first.request.id, 'approve', {
+      decidedBy: '900001'
+    }),
+    /已处理：approved/
+  );
+  assert.equal(calls.filter((item) => item.action === 'set_friend_add_request').length, 1);
+
+  assert.equal(await manager.markFriendAdded('123456'), 1);
+  const accepted = manager.listIncomingFriendRequests()[0];
+  assert.equal(accepted.status, 'accepted');
+  assert.equal(accepted.whitelistApplied, true);
+  assert.equal(manager.status().incomingFriendRequest.counts.accepted, 1);
+
+  const rejectedRequest = await manager.receiveIncomingFriendRequest({
+    userId: '654321',
+    flag: 'request-flag-reject',
+    comment: '请拒绝'
+  });
+  const rejected = await manager.decideIncomingFriendRequest(
+    rejectedRequest.request.id,
+    'reject',
+    { decidedBy: '900001' }
+  );
+  assert.equal(rejected.execution, 'rejected');
+  assert.equal(rejected.request.status, 'rejected');
+  assert.deepEqual(calls.at(-1), {
+    action: 'set_friend_add_request',
+    params: {
+      flag: 'request-flag-reject',
+      approve: false
+    }
+  });
+  assert.deepEqual(whitelisted, ['123456']);
+});
+
+test('incoming friend request keeps an unknown result and never retries automatically', async (t) => {
+  const dir = fs.mkdtempSync(path.join(root, 'incoming-friend-request-unknown-'));
+  const store = new ChatStore(0, { dataDir: dir });
+  t.after(() => {
+    store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const cfg = {
+    identityPilot: {
+      enabled: true,
+      incomingFriendRequest: { enabled: true, autoWhitelist: true },
+      friendProposal: {
+        enabled: false,
+        ownerUin: '900001',
+        minMessageCount: 1,
+        cooldownDays: 30,
+        maxPending: 10
+      }
+    },
+    allow: { groups: [], private: ['900001'] },
+    deny: { groups: [], private: [] },
+    allowAllWhenEmpty: false,
+    blocklist: {}
+  };
+  let attempts = 0;
+  const manager = new IdentityPilotManager({
+    store,
+    dataDir: dir,
+    config: () => cfg,
+    onebot: {
+      call: async (action) => {
+        if (action === 'get_friend_list') return [];
+        attempts += 1;
+        throw new Error('socket closed after write');
+      }
+    },
+    notifyIncomingFriendRequest: async () => {},
+    log: () => {}
+  });
+  t.after(() => manager.stop());
+  await manager.start();
+  const created = await manager.receiveIncomingFriendRequest({
+    userId: '654321',
+    flag: 'request-flag-unknown',
+    comment: ''
+  });
+  const result = await manager.decideIncomingFriendRequest(
+    created.request.id,
+    'approve',
+    { decidedBy: '900001' }
+  );
+  assert.equal(result.execution, 'held-unknown');
+  assert.equal(result.request.status, 'held_unknown');
+  assert.match(result.request.actionError, /socket closed/);
+  await assert.rejects(
+    manager.decideIncomingFriendRequest(created.request.id, 'approve', {
+      decidedBy: '900001'
+    }),
+    /已处理：held_unknown/
+  );
+  assert.equal(attempts, 1);
+
+  const interrupted = await manager.receiveIncomingFriendRequest({
+    userId: '777777',
+    flag: 'request-flag-interrupted',
+    comment: '测试重启恢复'
+  });
+  manager.identityStore.beginIncomingFriendRequestDecision(
+    interrupted.request.id,
+    'approve',
+    { decidedBy: '900001' }
+  );
+  manager.stop();
+  const reopened = new IdentityStore({ dataDir: dir });
+  t.after(() => reopened.close());
+  const recovered = reopened.getIncomingFriendRequest(interrupted.request.id);
+  assert.equal(recovered.status, 'held_unknown');
+  assert.match(recovered.actionError, /结果确认前重启/);
 });

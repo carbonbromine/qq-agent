@@ -693,6 +693,16 @@ body {
 
 /* ── 存档 ── */
 .chat-item-title { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.chat-item-title .chat-runtime-control { margin-left: auto; flex: 0 0 28px; width: 28px; height: 28px; }
+.incident-severity { font-weight: 600; }
+.incident-severity.severity-critical { color: var(--red); }
+.incident-severity.severity-error { color: var(--orange); }
+.incident-severity.severity-warning { color: var(--yellow, #e6b94a); }
+.incident-severity.severity-info { color: var(--muted); }
+.incident-table td { vertical-align: top; }
+.incident-table summary { cursor: pointer; max-width: 420px; white-space: normal; }
+.incident-detail { margin-top: 8px; color: var(--muted); line-height: 1.6; max-width: 520px; overflow-wrap: anywhere; }
+.incident-actions { min-width: 72px; flex-wrap: nowrap; }
 .chat-item.unread-row { background: rgba(255,180,84,.07); }
 .unread-pill { background: var(--red); color: #fff; font-size: 11px; border-radius: 9px; padding: 0 7px; }
 .chat-item-sub { color: var(--muted); font-size: 12px; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -917,6 +927,7 @@ body {
   display: flex; flex-direction: column; gap: 12px;
   min-height: 0; flex: 1; overflow: hidden;
 }
+.model-modal-body:not(.row) { overflow-y: auto; overflow-x: hidden; }
 .model-modal-body.row { flex-direction: row; }
 /* 纵向模式下表格自己滚动，不再依赖外层横向布局 */
 .model-modal-body > .usage-table-scroll { flex: 1; min-height: 0; overflow: auto; }
@@ -960,7 +971,7 @@ body {
 .field-row { display: flex; gap: 14px; margin-bottom: 10px; flex-wrap: wrap; }
 .field { flex: 1; min-width: 220px; }
 .field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
-.field input[type=text], .field input[type=password], .field input[type=number], .field select, .field textarea {
+.field input[type=text], .field input[type=password], .field input[type=number], .moment-window-row input[type=time], .field select, .field textarea {
   width: 100%;
   background: var(--bg-2);
   border: 1px solid var(--border);
@@ -973,13 +984,31 @@ body {
 .field textarea { min-height: 84px; resize: vertical; font-family: inherit; }
 .field input:focus, .field textarea:focus, .field select:focus { border-color: var(--accent); }
 .checkbox-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 13px; }
+.experimental-settings .checkbox-row { flex-wrap: wrap; }
+.experimental-settings .checkbox-row .muted { flex: 1 1 220px; min-width: 0; }
 .hint { font-size: 11.5px; color: var(--muted); margin-top: 3px; line-height: 1.5; }
 .settings-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 14px 0; }
 .daily-moments-status { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
 .daily-moments-content { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
 .daily-moments-status .field { min-width: 0; margin-bottom: 12px; overflow-wrap: anywhere; }
 .daily-moments-status .table-wrap { overflow-x: auto; }
+.moment-window-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(60px, .7fr) 32px; align-items: end; gap: 10px; margin-bottom: 10px; }
+.moment-window-row .field { min-width: 0; margin: 0; }
+.moment-window-row input { min-width: 0; width: 100%; height: 34px; box-sizing: border-box; }
+.moment-window-remove { width: 32px; height: 32px; padding: 0; margin-bottom: 2px; }
+.moment-schedule { margin-bottom: 14px; min-width: 0; }
+.moment-schedule summary { cursor: pointer; padding: 8px 0; font-size: 13px; }
+@media (max-width: 420px) {
+  .moment-window-row { gap: 6px; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 58px 28px; }
+  .moment-window-row input { padding: 6px 3px; }
+  .moment-window-remove { width: 28px; }
+}
 .moment-error { color: var(--red); overflow-wrap: anywhere; margin: 12px 0; font-size: 13px; }
+.qzone-run-detail-row td { padding: 0 10px 10px; background: var(--bg-2); }
+.qzone-run-details { display: grid; gap: 10px; min-width: 280px; }
+.qzone-run-detail { display: grid; gap: 4px; padding-left: 10px; border-left: 2px solid var(--border); }
+.qzone-run-detail div { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
+.qzone-run-detail small { display: block; color: var(--muted); overflow-wrap: anywhere; }
 .moment-summaries { padding: 12px 0; border-top: 1px solid var(--border); }
 .moment-summaries summary { cursor: pointer; font-size: 13px; margin-bottom: 12px; }
 .time-control-settings { max-width: 960px; min-width: 0; }
@@ -1549,7 +1578,7 @@ body {
 .asset-head > div > span { font-size: 11px; }
 .asset-summary {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 8px;
 }
 .asset-summary-item {
@@ -1573,6 +1602,15 @@ body {
   gap: 12px;
   margin: 16px 0 12px;
 }
+.asset-toolbar-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+.asset-toolbar-actions .asset-search { flex: 1; }
+.asset-toolbar-actions > .btn { flex: 0 0 auto; }
 .asset-kinds {
   display: flex;
   gap: 2px;
@@ -1625,6 +1663,14 @@ body {
 .asset-sticker-body strong { font-size: 12px; }
 .asset-sticker-body > span { margin-top: 3px; color: var(--muted); font-size: 10px; }
 .asset-sticker-body small { margin-top: 6px; color: var(--faint); font-size: 10px; }
+.asset-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 8px;
+  white-space: nowrap;
+}
 .asset-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 .asset-tags span {
   padding: 2px 5px;
@@ -1660,6 +1706,12 @@ body {
 .asset-table td small { display: block; margin-top: 3px; color: var(--faint); }
 .asset-table .r { text-align: right; }
 .asset-table tr:last-child td { border-bottom: 0; }
+
+@media (max-width: 600px) {
+  .asset-toolbar-actions { width: 100%; align-items: stretch; flex-direction: column; }
+  .asset-toolbar-actions .asset-search { width: 100%; }
+  .asset-actions { justify-content: flex-start; }
+}
 
 .usage-wrap { max-width: 940px; margin: 0 auto; }
 .usage-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; gap: 12px; flex-wrap: wrap; }

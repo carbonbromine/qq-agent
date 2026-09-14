@@ -139,7 +139,7 @@ function memoryRules(identityPilotAvailable = false, friendProposalAvailable = f
   }
   if (friendProposalAvailable) {
     lines.push(
-      '- 如果你基于真实互动对某个人产生了持续兴趣、已经长期频繁交流，或真心想以后继续互怼，可以偶尔调用 friend_request_propose 向管理员提交好友候选。',
+      '- 你可以自行判断是否主动交朋友：如果基于真实互动对某个人产生了持续兴趣、已经长期频繁交流，或真心想以后继续互怼，可以不等任何人要求，偶尔调用 friend_request_propose 向管理员提交好友候选。',
       '- 好友候选不是好友申请。提交后不要告诉对方“已经加了”，不要催管理员，也不要为了完成任务而凑候选；管理员拥有最终决定权。'
     );
   }
@@ -587,6 +587,12 @@ export function buildUserPrompt(ctx) {
   if (!lifecycleContinuation && cfg.sticker?.enabled !== false) {
     const stickerCtx = buildStickerContext(ctx.stickerEntries || [], Number(cfg.sticker?.promptMaxStickers) || 10);
     if (stickerCtx) parts.push(stickerCtx);
+  }
+  if (!lifecycleContinuation && ctx.slangContext) {
+    parts.push(String(ctx.slangContext));
+  }
+  if (ctx.incidentContext) {
+    parts.push(String(ctx.incidentContext));
   }
 
   if (ctx.thread || ctx.conversationMode === 'lifecycle') {

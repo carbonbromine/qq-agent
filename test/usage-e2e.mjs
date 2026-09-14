@@ -211,9 +211,10 @@ for (let i = 0; i < 40; i++) {
   if (assetHtml.includes('AI 资产观测')) break;
 }
 check('点击后 state.tab = assets', vm.runInContext('state.tab', ctx) === 'assets');
-check('观测页展示表情包、黑话、人物和记忆',
-  ['AI 资产观测', '表情包', '黑话', '统一人物', '会话印象'].every((text) =>
-    assetHtml.includes(text)),
+check('观测页只展示共享表情与黑话资产',
+  ['AI 资产观测', '表情包', '黑话'].every((text) => assetHtml.includes(text))
+    && !assetHtml.includes('统一人物')
+    && !assetHtml.includes('会话印象'),
   assetHtml.slice(0, 120));
 check('观测页不是错误提示', !assetHtml.includes('资产读取失败'), assetHtml.slice(0, 120));
 

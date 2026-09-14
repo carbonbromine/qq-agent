@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { conversationConfigForChat, getConfig, identityPilotEnabled, updateConfig, onTimeControlChange, DATA_DIR } from './config.js';
+import { conversationConfigForChat, getConfig, identityPilotEnabled, incidentPilotEnabled, slangPilotEnabled, updateConfig, onTimeControlChange, DATA_DIR } from './config.js';
 import { customSearch } from './web-search.js';
 import { OneBotClient, segmentsToText, extractMediaFromSegments, expandForwardNodes } from './onebot.js';
 import { ChatStore } from './store.js';
@@ -27,6 +27,12 @@ import { isTimeActive } from './time-gate.js';
 import { timeControlState, TIME_ZONE } from './time-control.js';
 import { IdentityPilotManager, inactiveIdentityPilotStatus } from './identity-pilot.js';
 import { AssetObserver } from './asset-observer.js';
+import { inactiveSlangPilotStatus, SlangPilotManager } from './slang-pilot.js';
+import {
+  IncidentPilotManager,
+  inactiveIncidentPilotStatus,
+  incidentDatabasePath
+} from './incident-pilot.js';
 import { safeFetchBinary } from './safe-fetch.js';
 import { integrationStatus, updateSnowLumaPassword } from './integrations.js';
 
@@ -58,6 +64,16 @@ function sameSecret(a, b) {
   const left = Buffer.from(String(a ?? ''));
   const right = Buffer.from(String(b ?? ''));
   return left.length === right.length && crypto.timingSafeEqual(left, right);
+}
+
+function decodeImageDataUrl(value) {
+  const match = /^data:image\/(?:png|jpeg|gif|webp);base64,([A-Za-z0-9+/=\r\n]+)$/i
+    .exec(String(value || ''));
+  if (!match) throw new Error('图片数据格式无效');
+  const buffer = Buffer.from(match[1].replace(/\s+/g, ''), 'base64');
+  if (!buffer.length) throw new Error('图片内容为空');
+  if (buffer.length > 8 * 1024 * 1024) throw new Error('表情图片不能超过 8 MiB');
+  return buffer;
 }
 
 export function createApp({ log = console.log } = {}) {
@@ -117,17 +133,48 @@ export function createApp({ log = console.log } = {}) {
   const store = new ChatStore(cfg.store?.maxMessagesPerChat ?? 0);   // 0 = 不限
   const memory = new MemoryStore();
   const sessions = new SessionRegistry(cfg.store?.keepSessionFiles ?? 0);   // 0 = 不限
+  let incidentPilot = null;
+  let incidentPilotError = '';
+  const moduleLog = (source) => (...args) => {
+    log(...args);
+    const supplied = args.find((value) => value instanceof Error);
+    const error = supplied || new Error(args.map((value) =>
+      typeof value === 'string' ? value : JSON.stringify(value)).join(' '));
+    incidentPilot?.capture(error, {
+      source,
+      category: 'module',
+      severity: 'error'
+    });
+  };
   const onebot = new OneBotClient({
     wsUrl: cfg.onebot?.wsUrl,
     httpUrl: cfg.onebot?.httpUrl,
     accessToken: cfg.onebot?.accessToken,
     httpToken: cfg.onebot?.httpAccessToken || cfg.onebot?.accessToken,
-    onEvent: (event) => handleOneBotEvent(event).catch((error) => log('[ingest] 处理事件出错:', error?.message ?? error))
+    onEvent: (event) => handleOneBotEvent(event).catch((error) => {
+      incidentPilot?.capture(error, {
+        source: 'onebot-ingress',
+        category: 'ingress',
+        severity: 'error',
+        chatKey: event?.group_id
+          ? `group:${event.group_id}`
+          : event?.user_id
+            ? `private:${event.user_id}`
+            : '',
+        details: {
+          postType: event?.post_type || '',
+          messageType: event?.message_type || '',
+          noticeType: event?.notice_type || ''
+        }
+      });
+      log('[ingest] 处理事件出错:', error?.message ?? error);
+    })
   });
   const stickers = new StickerManager(onebot);
   const sender = new SendQueue({
     onebot, store,
-    onSent: ({ chatKey, text }) => log(`[发送 -> ${chatKey}] ${String(text).slice(0, 60)}`)
+    onSent: ({ chatKey, text }) => log(`[发送 -> ${chatKey}] ${String(text).slice(0, 60)}`),
+    onIncident: (error, context) => incidentPilot?.capture(error, context)
   });
   let identityPilot = null;
   let identityPilotError = '';
@@ -139,7 +186,8 @@ export function createApp({ log = console.log } = {}) {
     sessions,
     onebot,
     emit,
-    getIdentityPilot: () => identityPilot
+    getIdentityPilot: () => identityPilot,
+    getIncidentPilot: () => incidentPilot
   });
   const dailyMoments = new DailyMomentsManager({
     store,
@@ -151,7 +199,7 @@ export function createApp({ log = console.log } = {}) {
     setProactiveSuppressed: (suppressed) =>
       orchestrator.setProactiveSuppressed('daily-moments', suppressed),
     emit,
-    log
+    log: moduleLog('daily-moments')
   });
   const qzoneInteractions = new QzoneInteractionManager({
     onebot,
@@ -159,8 +207,74 @@ export function createApp({ log = console.log } = {}) {
     setProactiveSuppressed: (suppressed) =>
       orchestrator.setProactiveSuppressed('qzone-interactions', suppressed),
     emit,
-    log
+    log: moduleLog('qzone-interactions')
   });
+  function createIncidentPilot() {
+    return new IncidentPilotManager({
+      dataDir: DATA_DIR,
+      config: getConfig,
+      emit,
+      log,
+      notifyAvailable: () => onebot.connected === true,
+      notify: async (incident, ownerUin) => {
+        const userId = String(ownerUin || '').trim();
+        if (!onebot.connected) {
+          throw Object.assign(new Error('OneBot 未连接，告警等待发送'), {
+            beforeWrite: true
+          });
+        }
+        const severity = {
+          critical: '严重',
+          error: '错误',
+          warning: '警告',
+          info: '信息'
+        }[incident.severity] || incident.severity;
+        const text = [
+          '【实验功能 · QQ Agent 异常】',
+          `等级：${severity}`,
+          `模块：${incident.source}`,
+          ...(incident.chatKey ? [`会话：${incident.chatKey}`] : []),
+          `结果：${incident.message}`,
+          `次数：${incident.count}`,
+          `编号：${incident.id}`,
+          '',
+          '处理入口：控制台 → 异常'
+        ].join('\n');
+        const data = await onebot.sendText('private', userId, text);
+        store.appendSelf(`private:${userId}`, {
+          mid: data?.message_id ?? null,
+          ts: Date.now(),
+          text
+        });
+        emit('chat-update', `private:${userId}`);
+      }
+    });
+  }
+  function incidentPilotStatus() {
+    return incidentPilot?.status() || inactiveIncidentPilotStatus({
+      enabled: incidentPilotEnabled(),
+      error: incidentPilotError
+    });
+  }
+  function syncIncidentPilot() {
+    if (!incidentPilotEnabled()) {
+      if (!incidentPilot && fs.existsSync(incidentDatabasePath(DATA_DIR))) {
+        incidentPilot = createIncidentPilot();
+        incidentPilot.openExisting();
+      }
+      return incidentPilotStatus();
+    }
+    incidentPilot ||= createIncidentPilot();
+    try {
+      const status = incidentPilot.start();
+      incidentPilot.resumeNotifications();
+      incidentPilotError = '';
+      return status;
+    } catch (error) {
+      incidentPilotError = String(error?.message ?? error);
+      throw error;
+    }
+  }
   function identityPilotStatus() {
     return identityPilot?.status() || inactiveIdentityPilotStatus({
       enabled: identityPilotEnabled(),
@@ -179,7 +293,7 @@ export function createApp({ log = console.log } = {}) {
     emit('chat-update', `private:${userId}`);
     return data;
   }
-  async function syncIdentityPilot({ reindex = false } = {}) {
+  async function syncIdentityPilot({ reindex = false, reconfigure = false } = {}) {
     if (!identityPilotEnabled()) {
       identityPilot?.stop();
       identityPilot = null;
@@ -189,7 +303,9 @@ export function createApp({ log = console.log } = {}) {
     identityPilot ||= new IdentityPilotManager({
       store,
       onebot,
-      log,
+      sessions,
+      emit,
+      log: moduleLog('identity-pilot'),
       notifyFriendProposal: async (proposal, ownerUin, signal) => {
         const reasonLabels = {
           interest: '对这个人感兴趣',
@@ -210,13 +326,49 @@ export function createApp({ log = console.log } = {}) {
             `编号：${proposal.id}${verification}`,
             '',
             `回复“同意好友 ${proposal.id}”或“拒绝好友 ${proposal.id}”，也可以在控制台“设置 → 实验功能”审批。`,
-            '说明：当前 OneBot 适配器不支持主动发起好友申请；批准后会进入待手动执行状态，不会伪报已发送。'
+            getConfig().identityPilot?.friendProposal?.activeDispatchEnabled === true
+              ? '说明：批准后会通过 SnowLuma 实验协议发送申请；仅明确成功才标记已提交，结果未知时不会自动重试。'
+              : '说明：主动发送实验开关未开启；批准后会进入待手动执行状态，不会伪报已发送。'
           ].join('\n'),
           signal
         );
+      },
+      notifyIncomingFriendRequest: async (request, ownerUin, signal) => {
+        signal?.throwIfAborted();
+        await sendIdentityAdminText(
+          ownerUin,
+          [
+            '【实验功能 · 收到好友请求】',
+            `申请人：${request.primaryName || '未命名'}（${request.userId}）`,
+            `验证消息：${request.comment || '（无）'}`,
+            `编号：${request.id}`,
+            '',
+            `回复“同意好友申请 ${request.id}”或“拒绝好友申请 ${request.id}”，也可以在控制台“设置 → 实验功能”审批。`,
+            '同意后会调用 OneBot 接受请求，并自动加入私聊白名单；结果未知时不会自动重试。'
+          ].join('\n'),
+          signal
+        );
+      },
+      allowPrivateUser: async (userId) => {
+        const current = getConfig();
+        const id = String(userId || '').trim();
+        if (!/^\d{1,15}$/.test(id)) throw new Error('好友 QQ 号无效');
+        const privateAllow = [...new Set([
+          ...(current.allow?.private || []).map(String),
+          id
+        ])];
+        const privateDeny = (current.deny?.private || [])
+          .map(String)
+          .filter((item) => item !== id);
+        updateConfig({
+          allow: { ...(current.allow || {}), private: privateAllow },
+          deny: { ...(current.deny || {}), private: privateDeny }
+        });
+        emit('status', { configUpdated: true, friendWhitelisted: id });
       }
     });
     try {
+      if (reconfigure && identityPilot.active) identityPilot.reconfigure();
       const status = reindex && identityPilot.active
         ? await identityPilot.reindex()
         : await identityPilot.start();
@@ -232,13 +384,86 @@ export function createApp({ log = console.log } = {}) {
   }
   const assetObserver = new AssetObserver({
     stickers,
+    memory,
+    getIdentityPilot: () => identityPilot,
     getIdentityStatus: identityPilotStatus
   });
+  let slangPilot = null;
+  let slangPilotError = '';
+  function slangPilotStatus() {
+    return slangPilot?.status() || inactiveSlangPilotStatus({
+      enabled: slangPilotEnabled(),
+      error: slangPilotError
+    });
+  }
+  async function syncSlangPilot() {
+    if (!slangPilotEnabled()) {
+      await slangPilot?.stop();
+      slangPilot = null;
+      slangPilotError = '';
+      return slangPilotStatus();
+    }
+    slangPilot ||= new SlangPilotManager({
+      assetObserver,
+      chatStore: store,
+      sessions,
+      emit,
+      log: moduleLog('slang-pilot'),
+      notify: async (stage, discovery, ownerUin) => {
+        const research = discovery.research || {};
+        const lines = stage === 'pending-admission'
+          ? [
+              '【实验功能 · 黑话研究完成】',
+              `词条：${discovery.displayTerm}`,
+              `含义：${research.meaning || '不确定'}`,
+              `范围：${research.recommendedScope === 'global-safe' ? '可全局使用' : '仅来源群'}`,
+              `置信度：${Math.round((Number(research.confidence) || 0) * 100)}%`,
+              `编号：${discovery.id}`,
+              '',
+              `回复“收录黑话 ${discovery.id}”或“拒绝收录 ${discovery.id}”。`
+            ]
+          : [
+              '【实验功能 · 黑话研究候选】',
+              `词条：${discovery.displayTerm}`,
+              `来源：${discovery.scopeChatKey}`,
+              `出现：${discovery.occurrenceCount} 次 / ${discovery.speakerCount} 人`,
+              `编号：${discovery.id}`,
+              '',
+              `回复“研究黑话 ${discovery.id}”或“拒绝研究 ${discovery.id}”。`
+            ];
+        await sendIdentityAdminText(ownerUin, lines.join('\n'));
+      }
+    });
+    try {
+      const status = slangPilot.start();
+      slangPilotError = '';
+      emit('slang-pilot-update', status);
+      return status;
+    } catch (error) {
+      slangPilotError = String(error?.message ?? error);
+      await slangPilot?.stop();
+      slangPilot = null;
+      throw error;
+    }
+  }
+  async function refreshIdentityAfterAssetMutation() {
+    if (!identityPilot?.active) return;
+    try {
+      await identityPilot.reindex();
+      emit('identity-pilot-update', identityPilot.status());
+    } catch (error) {
+      log(`[assets] 统一身份索引刷新失败：${String(error?.message ?? error)}`);
+    }
+  }
   let timeControlTimer = null;
   function refreshTimeControl() {
     clearTimeout(timeControlTimer);
-    if (getConfig().timeControl?.enabled !== true) return;
+    if (getConfig().timeControl?.enabled !== true) {
+      slangPilot?.resumeQueued();
+      return;
+    }
     orchestrator.enforceTimeControl();
+    slangPilot?.resumeQueued();
     const now = Date.now();
     const keys = ['', ...store.listChats()];
     const changes = keys.map((key) =>
@@ -254,7 +479,10 @@ export function createApp({ log = console.log } = {}) {
   initPriceFeed(cfg.api?.priceRemoteUrl || '');
 
   // OneBot 连接状态推送
-  onebot.onStatus((status) => emit('onebot-status', status));
+  onebot.onStatus((status) => {
+    emit('onebot-status', status);
+    if (status.connected) incidentPilot?.resumeNotifications();
+  });
 
   // ── 入站事件处理 ──
   let atNameCache = new Map(); // groupId:userId -> name
@@ -309,6 +537,9 @@ export function createApp({ log = console.log } = {}) {
     // 放在最前面：连合并转发展开这种网络请求都不值得为它做。
     if (kind === 'group' && senderId && (cfgNow.blocklist?.[id] || []).map(String).includes(senderId)) return;
     const media = segments ? extractMediaFromSegments(segments) : [];
+    const mentionsSelf = Boolean(segments?.some((segment) =>
+      segment?.type === 'at'
+      && String(segment?.data?.qq ?? '') === String(onebot.selfId || '')));
 
     let text;
     let reply = null;
@@ -367,42 +598,72 @@ export function createApp({ log = console.log } = {}) {
       senderName,
       text: text || '[图片]' ,
       reply,
-      media
+      media,
+      mentionsSelf,
+      eventKind: 'message'
     };
     const stored = isSelf ? store.appendSelf(chatKey, message) : store.appendIncoming(chatKey, message, {
       recordOnly: arrivedInactive || !isTimeActive(chatKey)
     });
     if (stored.duplicate) return;
     if (!isSelf) identityPilot?.observeMessage(chatKey, stored);
+    if (!isSelf) slangPilot?.observeMessage(chatKey, stored);
     emit('chat-update', chatKey);
     if (
       !isSelf
-      && cfgNow.runtime?.mode === 'active'
-      && cfgNow.runtime?.paused !== true
-      && !arrivedInactive
-      && isTimeActive(chatKey)
-      && await handleFriendProposalAdminCommand(kind, id, text)
+      && (
+        await handleFriendProposalAdminCommand(kind, id, text)
+        || await handleSlangPilotAdminCommand(kind, id, text)
+      )
     ) return;
     if (!isSelf) orchestrator.onIncoming(chatKey);
   }
 
   async function handleFriendProposalAdminCommand(kind, id, text) {
-    const settings = getConfig().identityPilot?.friendProposal || {};
-    if (kind !== 'private' || settings.enabled !== true || String(settings.ownerUin) !== String(id)) {
+    const identity = getConfig().identityPilot || {};
+    const settings = identity.friendProposal || {};
+    const incoming = identity.incomingFriendRequest || {};
+    if (kind !== 'private' || String(settings.ownerUin) !== String(id)) {
       return false;
     }
+    const incomingMatch = incoming.enabled === true
+      ? /^\s*\/?(同意|拒绝)好友申请\s+(fr_[a-f0-9]{12})\s*$/i.exec(String(text || ''))
+      : null;
+    if (incomingMatch) {
+      const decision = incomingMatch[1] === '同意' ? 'approve' : 'reject';
+      let reply;
+      try {
+        const result = await identityPilot?.decideIncomingFriendRequest(
+          incomingMatch[2],
+          decision,
+          { decidedBy: String(id) }
+        );
+        if (!result) throw new Error('统一身份库当前不可用');
+        reply = result.note;
+        emit('identity-pilot-update', identityPilot.status());
+      } catch (error) {
+        reply = `好友请求审批失败：${String(error?.message ?? error)}`;
+      }
+      try {
+        await sendIdentityAdminText(id, reply);
+      } catch (error) {
+        log(`[identity-pilot] 入站好友请求审批结果通知失败：${error?.message ?? error}`);
+      }
+      return true;
+    }
+    if (settings.enabled !== true) return false;
     const match = /^\s*\/?(同意|拒绝)好友(?:申请)?\s+(fp_[a-f0-9]{12})\s*$/i.exec(String(text || ''));
     if (!match) return false;
     const decision = match[1] === '同意' ? 'approve' : 'reject';
     let reply;
     try {
-      const result = identityPilot?.decideFriendProposal(match[2], decision, {
+      const result = await identityPilot?.decideFriendProposal(match[2], decision, {
         decidedBy: String(id)
       });
       if (!result) throw new Error('统一身份库当前不可用');
       const proposal = result.proposal;
       reply = decision === 'approve'
-        ? `已批准 ${proposal.primaryName || proposal.userId}（${proposal.userId}）的好友候选。当前 OneBot 适配器不能主动发送申请，请在 QQ 客户端手动添加；收到好友成功事件后系统会自动闭环。`
+        ? `已批准 ${proposal.primaryName || proposal.userId}（${proposal.userId}）的好友候选。${result.note}`
         : `已拒绝 ${proposal.primaryName || proposal.userId}（${proposal.userId}）的好友候选。`;
       emit('identity-pilot-update', identityPilot.status());
     } catch (error) {
@@ -412,6 +673,59 @@ export function createApp({ log = console.log } = {}) {
       await sendIdentityAdminText(id, reply);
     } catch (error) {
       log(`[identity-pilot] 审批结果通知失败：${error?.message ?? error}`);
+    }
+    return true;
+  }
+
+  async function handleSlangPilotAdminCommand(kind, id, text) {
+    const settings = getConfig().slangPilot || {};
+    if (
+      kind !== 'private'
+      || settings.enabled !== true
+      || String(settings.ownerUin) !== String(id)
+    ) return false;
+    const raw = String(text || '');
+    const researchMatch =
+      /^\s*\/?(研究黑话|拒绝研究)\s+(sr_[a-f0-9]{12})\s*$/i.exec(raw);
+    const admissionMatch =
+      /^\s*\/?(收录黑话|拒绝收录)\s+(sr_[a-f0-9]{12})\s*$/i.exec(raw);
+    const retryMatch = /^\s*\/?重试黑话\s+(sr_[a-f0-9]{12})\s*$/i.exec(raw);
+    if (!researchMatch && !admissionMatch && !retryMatch) return false;
+    let reply;
+    try {
+      if (researchMatch) {
+        const decision = researchMatch[1] === '研究黑话' ? 'approve' : 'reject';
+        const result = slangPilot?.decideResearch(researchMatch[2], decision, {
+          decidedBy: String(id)
+        });
+        if (!result) throw new Error('黑话语料库当前不可用');
+        reply = decision === 'approve'
+          ? `已批准研究“${result.discovery.displayTerm}”，任务已进入队列。`
+          : `已拒绝研究“${result.discovery.displayTerm}”。`;
+      } else if (admissionMatch) {
+        const decision = admissionMatch[1] === '收录黑话' ? 'approve' : 'reject';
+        const result = slangPilot?.decideAdmission(admissionMatch[2], decision, {
+          decidedBy: String(id)
+        });
+        if (!result) throw new Error('黑话语料库当前不可用');
+        reply = decision === 'approve'
+          ? `已将“${result.discovery.displayTerm}”加入黑话候选库。`
+          : `已拒绝收录“${result.discovery.displayTerm}”。`;
+      } else {
+        const result = slangPilot?.retryResearch(retryMatch[1], {
+          decidedBy: String(id)
+        });
+        if (!result) throw new Error('黑话语料库当前不可用');
+        reply = `已重新排队研究“${result.discovery.displayTerm}”。`;
+      }
+      emit('slang-pilot-update', slangPilot.status());
+    } catch (error) {
+      reply = `黑话审批失败：${String(error?.message ?? error)}`;
+    }
+    try {
+      await sendIdentityAdminText(id, reply);
+    } catch (error) {
+      log(`[slang-pilot] 审批结果通知失败：${error?.message ?? error}`);
     }
     return true;
   }
@@ -454,7 +768,8 @@ export function createApp({ log = console.log } = {}) {
       senderId: operatorId,
       senderName: operatorName,
       text,
-      media: []
+      media: [],
+      eventKind: 'poke'
     }, { recordOnly: arrivedInactive || !isTimeActive(chatKeyNow) });
     emit('chat-update', `${isGroup ? 'group' : 'private'}:${id}`);
     orchestrator.onIncoming(`${isGroup ? 'group' : 'private'}:${id}`);
@@ -483,8 +798,22 @@ export function createApp({ log = console.log } = {}) {
     if (event.post_type === 'notice' && event.notice_type === 'notify' && event.sub_type === 'poke') {
       return ingestPoke(event, arrivedInactive);
     }
+    if (
+      event.post_type === 'request'
+      && event.request_type === 'friend'
+      && event.user_id != null
+      && event.flag
+    ) {
+      const result = await identityPilot?.receiveIncomingFriendRequest({
+        userId: String(event.user_id),
+        flag: String(event.flag),
+        comment: String(event.comment || '')
+      });
+      if (result && !result.ignored) emit('identity-pilot-update', identityPilot.status());
+      return;
+    }
     if (event.post_type === 'notice' && event.notice_type === 'friend_add' && event.user_id != null) {
-      const changed = identityPilot?.markFriendAdded(String(event.user_id)) || 0;
+      const changed = await identityPilot?.markFriendAdded(String(event.user_id)) || 0;
       if (changed) emit('identity-pilot-update', identityPilot.status());
       return;
     }
@@ -494,9 +823,15 @@ export function createApp({ log = console.log } = {}) {
   // ── HTTP API ──
   const server = http.createServer((req, res) => {
     handleHttp(req, res).catch((error) => {
+      incidentPilot?.capture(error, {
+        source: 'http',
+        category: 'http',
+        severity: 'error',
+        details: { method: req.method || '', pathname: String(req.url || '').split('?')[0] }
+      });
       log('[http] 处理出错:', error?.message ?? error);
       try {
-        res.writeHead(500, { 'content-type': 'application/json' });
+        res.writeHead(error?.httpStatus || 500, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ error: String(error?.message ?? error) }));
       } catch { /* ignore */ }
     });
@@ -507,12 +842,14 @@ export function createApp({ log = console.log } = {}) {
     res.end(JSON.stringify(data));
   }
 
-  async function readBody(req) {
+  async function readBody(req, maxBytes = 2 * 1024 * 1024) {
     const chunks = [];
     let size = 0;
     for await (const chunk of req) {
       size += chunk.length;
-      if (size > 2 * 1024 * 1024) throw new Error('请求体过大');
+      if (size > maxBytes) {
+        throw Object.assign(new Error('请求体过大'), { httpStatus: 413 });
+      }
       chunks.push(chunk);
     }
     const text = Buffer.concat(chunks).toString('utf8');
@@ -728,9 +1065,11 @@ export function createApp({ log = console.log } = {}) {
         }
         if (body.mode === 'observe') {
           for (const controller of orchestrator.controllers.values()) controller.abort(new Error('Run cancelled'));
+          slangPilot?.abortResearch('机器人已切换到观察模式');
         }
         if (body.skipBacklog === true) for (const key of store.listChats()) store.markAllRead(key);
         updateConfig({ runtime: { mode: body.mode } });
+        if (body.mode === 'active') slangPilot?.resumeQueued();
         emit('status', { mode: body.mode });
         return json(res, 200, { ok: true, mode: body.mode });
       }
@@ -743,6 +1082,83 @@ export function createApp({ log = console.log } = {}) {
         const count = recovery[3] === 'retry-failed' ? store.retryFailed(key) : store.resolveHeld(key);
         emit('chat-update', key);
         return json(res, 200, { ok: true, count });
+      }
+
+      const chatControl = /^\/api\/chats\/(group|private)_(\d+)\/runtime-control$/.exec(pathname);
+      if (chatControl && method === 'GET') {
+        const key = `${chatControl[1]}:${chatControl[2]}`;
+        const meta = store.getChatMeta(key);
+        return json(res, 200, {
+          control: incidentPilot?.getChatControl(key) || {
+            chatKey: key, mode: 'auto', reason: '', version: 0
+          },
+          decision: incidentPilot?.chatDecision(key, meta) || {
+            allowed: meta.held === 0,
+            mode: 'legacy',
+            effectiveState: meta.held > 0 ? 'blocked' : 'normal',
+            reason: meta.held > 0 ? '存在发送结果待确认' : ''
+          },
+          unread: meta.unread,
+          held: meta.held
+        });
+      }
+      if (chatControl && method === 'PUT') {
+        if (!incidentPilot?.active) {
+          return json(res, 409, { error: '异常处理实验当前未启用' });
+        }
+        const key = `${chatControl[1]}:${chatControl[2]}`;
+        const body = await readBody(req);
+        if (!['auto', 'blocked', 'continue'].includes(body.mode)) {
+          return json(res, 400, { error: 'mode 必须是 auto、blocked 或 continue' });
+        }
+        if (body.mode === 'continue' && body.confirm !== true) {
+          return json(res, 409, { error: '继续处理需要显式确认' });
+        }
+        const control = incidentPilot.setChatControl(key, {
+          mode: body.mode,
+          reason: body.reason,
+          expectedVersion: body.expectedVersion,
+          updatedBy: 'console'
+        });
+        const decision = orchestrator.enforceChatControl(key);
+        let backlog = { action: 'keep', marked: 0, kept: store.unreadCount(key) };
+        if (decision.allowed && body.backlogAction === 'discard') {
+          backlog = { action: 'discard', marked: store.markAllRead(key), kept: 0 };
+        } else if (decision.allowed && body.backlogAction === 'recent') {
+          backlog = { action: 'recent', ...store.keepLatestPending(key) };
+          if (backlog.kept > 0) orchestrator.scheduleWake(key, 0);
+        }
+        emit('chat-update', key);
+        return json(res, 200, { ok: true, control, decision, backlog });
+      }
+      const unknownOperations =
+        /^\/api\/chats\/(group|private)_(\d+)\/unknown-operations$/.exec(pathname);
+      if (unknownOperations && method === 'GET') {
+        const key = `${unknownOperations[1]}:${unknownOperations[2]}`;
+        return json(res, 200, { operations: store.listUnknownOperations(key) });
+      }
+      const unknownOperationAction =
+        /^\/api\/chats\/(group|private)_(\d+)\/unknown-operations\/([\w-]+)\/reconcile$/
+          .exec(pathname);
+      if (unknownOperationAction && method === 'POST') {
+        const body = await readBody(req);
+        if (body.confirm !== true || !['sent', 'failed'].includes(body.result)) {
+          return json(res, 409, { error: '核对未知写入需要明确结果和确认' });
+        }
+        const key = `${unknownOperationAction[1]}:${unknownOperationAction[2]}`;
+        try {
+          const result = store.reconcileUnknownOperation(
+            unknownOperationAction[3],
+            body.result
+          );
+          if (!result || result.chatKey !== key) {
+            return json(res, 404, { error: '未知写入不存在或已核对' });
+          }
+          emit('chat-update', key);
+          return json(res, 200, { ok: true, result });
+        } catch (error) {
+          return json(res, 409, { error: String(error?.message ?? error) });
+        }
       }
 
       if (pathname === '/api/status' && method === 'GET') {
@@ -790,6 +1206,7 @@ export function createApp({ log = console.log } = {}) {
             self: onebot.selfInfo ? { userId: onebot.selfId, nickname: onebot.selfNickname } : null
           },
           orchestrator: orchestrator.statusSummary(),
+          incidentPilot: incidentPilotStatus(),
           usage,
           cost,
           cacheHitRate: totals.cacheHitRate,
@@ -1213,6 +1630,9 @@ export function createApp({ log = console.log } = {}) {
         const previousDailyMoments = JSON.stringify(cfgNow.dailyMoments || {});
         const previousQzoneInteractions = JSON.stringify(cfgNow.qzoneInteractions || {});
         const previousIdentityPilot = JSON.stringify(cfgNow.identityPilot || {});
+        const previousPersona = JSON.stringify(cfgNow.persona || {});
+        const previousSlangPilot = JSON.stringify(cfgNow.slangPilot || {});
+        const previousIncidentPilot = JSON.stringify(cfgNow.incidentPilot || {});
         const previousIdentitySources = JSON.stringify({
           allow: cfgNow.allow || {},
           deny: cfgNow.deny || {},
@@ -1246,6 +1666,21 @@ export function createApp({ log = console.log } = {}) {
         if (JSON.stringify(next.qzoneInteractions || {}) !== previousQzoneInteractions) {
           qzoneInteractions.reconfigure();
         }
+        if (JSON.stringify(next.incidentPilot || {}) !== previousIncidentPilot) {
+          try {
+            syncIncidentPilot();
+            for (const chatKey of store.listChats()) orchestrator.enforceChatControl(chatKey);
+          } catch (error) {
+            const reverted = updateConfig({
+              incidentPilot: { ...(next.incidentPilot || {}), enabled: false }
+            });
+            return json(res, 500, {
+              ok: false,
+              error: `异常处理实验启动失败，开关已恢复为关闭：${String(error?.message ?? error)}`,
+              config: sanitizeConfig(reverted)
+            });
+          }
+        }
         const identityChanged = JSON.stringify(next.identityPilot || {}) !== previousIdentityPilot;
         const identitySourcesChanged = JSON.stringify({
           allow: next.allow || {},
@@ -1253,9 +1688,16 @@ export function createApp({ log = console.log } = {}) {
           allowAllWhenEmpty: next.allowAllWhenEmpty === true,
           blocklist: next.blocklist || {}
         }) !== previousIdentitySources;
-        if (identityChanged || (identityPilotEnabled(next) && identitySourcesChanged)) {
+        const personaChanged = JSON.stringify(next.persona || {}) !== previousPersona;
+        if (
+          identityChanged
+          || (identityPilotEnabled(next) && (identitySourcesChanged || personaChanged))
+        ) {
           try {
-            await syncIdentityPilot({ reindex: identitySourcesChanged });
+            await syncIdentityPilot({
+              reindex: identitySourcesChanged,
+              reconfigure: identityChanged || identitySourcesChanged || personaChanged
+            });
           } catch (error) {
             const reverted = updateConfig({
               identityPilot: { ...(next.identityPilot || {}), enabled: false }
@@ -1263,6 +1705,20 @@ export function createApp({ log = console.log } = {}) {
             return json(res, 500, {
               ok: false,
               error: `统一身份库启动失败，开关已恢复为关闭：${String(error?.message ?? error)}`,
+              config: sanitizeConfig(reverted)
+            });
+          }
+        }
+        if (JSON.stringify(next.slangPilot || {}) !== previousSlangPilot) {
+          try {
+            await syncSlangPilot();
+          } catch (error) {
+            const reverted = updateConfig({
+              slangPilot: { ...(next.slangPilot || {}), enabled: false }
+            });
+            return json(res, 500, {
+              ok: false,
+              error: `黑话语料库启动失败，开关已恢复为关闭：${String(error?.message ?? error)}`,
               config: sanitizeConfig(reverted)
             });
           }
@@ -1284,6 +1740,150 @@ export function createApp({ log = console.log } = {}) {
         return json(res, 200, identityPilotStatus());
       }
 
+      if (pathname === '/api/slang-pilot/status' && method === 'GET') {
+        return json(res, 200, slangPilotStatus());
+      }
+
+      if (pathname === '/api/incident-pilot/status' && method === 'GET') {
+        return json(res, 200, incidentPilotStatus());
+      }
+      if (pathname === '/api/incidents' && method === 'GET') {
+        return json(res, 200, {
+          status: incidentPilotStatus(),
+          incidents: incidentPilot?.list({
+            state: url.searchParams.get('state') || '',
+            severity: url.searchParams.get('severity') || '',
+            chatKey: url.searchParams.get('chatKey') || '',
+            limit: url.searchParams.get('limit') || 100
+          }) || []
+        });
+      }
+      const incidentDetail = /^\/api\/incidents\/(inc_[a-f0-9]{16})$/i.exec(pathname);
+      if (incidentDetail && method === 'GET') {
+        const incident = incidentPilot?.get(incidentDetail[1]);
+        return incident
+          ? json(res, 200, { incident })
+          : json(res, 404, { error: '异常日志不存在' });
+      }
+      if (incidentDetail && method === 'DELETE') {
+        const body = await readBody(req);
+        if (body.confirm !== true) {
+          return json(res, 409, { error: '删除异常日志需要显式确认' });
+        }
+        try {
+          return incidentPilot?.delete(incidentDetail[1])
+            ? json(res, 200, { ok: true })
+            : json(res, 404, { error: '异常日志不存在' });
+        } catch (error) {
+          return json(res, error?.httpStatus || 409, { error: String(error?.message ?? error) });
+        }
+      }
+      const incidentAction =
+        /^\/api\/incidents\/(inc_[a-f0-9]{16})\/(acknowledge|resolve)$/i.exec(pathname);
+      if (incidentAction && method === 'POST') {
+        const body = await readBody(req);
+        try {
+          const incident = incidentAction[2] === 'acknowledge'
+            ? incidentPilot?.acknowledge(incidentAction[1])
+            : incidentPilot?.resolve(incidentAction[1], body.resolution);
+          return incident
+            ? json(res, 200, { ok: true, incident })
+            : json(res, 404, { error: '异常日志不存在' });
+        } catch (error) {
+          return json(res, error?.httpStatus || 409, { error: String(error?.message ?? error) });
+        }
+      }
+
+      if (pathname === '/api/slang-pilot/discoveries' && method === 'GET') {
+        if (!slangPilot?.active) {
+          return json(res, 409, { error: '黑话语料库试点未启用' });
+        }
+        return json(res, 200, {
+          status: slangPilot.status(),
+          discoveries: slangPilot.list({
+            state: url.searchParams.get('state') || '',
+            query: url.searchParams.get('query') || '',
+            limit: Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 100))
+          })
+        });
+      }
+
+      const slangDiscoveryDetail =
+        /^\/api\/slang-pilot\/discoveries\/(sr_[a-f0-9]{12})$/i.exec(pathname);
+      if (slangDiscoveryDetail && method === 'GET') {
+        if (!slangPilot?.active) {
+          return json(res, 409, { error: '黑话语料库试点未启用' });
+        }
+        const discovery = slangPilot.detail(slangDiscoveryDetail[1]);
+        return discovery
+          ? json(res, 200, { discovery })
+          : json(res, 404, { error: '黑话发现不存在' });
+      }
+
+      const slangResearchDecision =
+        /^\/api\/slang-pilot\/discoveries\/(sr_[a-f0-9]{12})\/research-decision$/i
+          .exec(pathname);
+      if (slangResearchDecision && method === 'POST') {
+        if (!slangPilot?.active) {
+          return json(res, 409, { error: '黑话语料库试点未启用' });
+        }
+        const body = await readBody(req);
+        if (!['approve', 'reject'].includes(body.decision)) {
+          return json(res, 400, { error: 'decision 必须是 approve 或 reject' });
+        }
+        try {
+          return json(res, 200, slangPilot?.decideResearch(
+            slangResearchDecision[1],
+            body.decision,
+            { decidedBy: 'console', expectedVersion: body.expectedVersion }
+          ));
+        } catch (error) {
+          return json(res, 409, { error: String(error?.message ?? error) });
+        }
+      }
+
+      const slangAdmissionDecision =
+        /^\/api\/slang-pilot\/discoveries\/(sr_[a-f0-9]{12})\/admission-decision$/i
+          .exec(pathname);
+      if (slangAdmissionDecision && method === 'POST') {
+        if (!slangPilot?.active) {
+          return json(res, 409, { error: '黑话语料库试点未启用' });
+        }
+        const body = await readBody(req);
+        if (!['approve', 'reject'].includes(body.decision)) {
+          return json(res, 400, { error: 'decision 必须是 approve 或 reject' });
+        }
+        try {
+          return json(res, 200, slangPilot?.decideAdmission(
+            slangAdmissionDecision[1],
+            body.decision,
+            {
+              decidedBy: 'console',
+              expectedVersion: body.expectedVersion,
+              edits: body.edits || {}
+            }
+          ));
+        } catch (error) {
+          return json(res, 409, { error: String(error?.message ?? error) });
+        }
+      }
+
+      const slangResearchRetry =
+        /^\/api\/slang-pilot\/discoveries\/(sr_[a-f0-9]{12})\/retry$/i.exec(pathname);
+      if (slangResearchRetry && method === 'POST') {
+        if (!slangPilot?.active) {
+          return json(res, 409, { error: '黑话语料库试点未启用' });
+        }
+        try {
+          return json(res, 200, slangPilot?.retryResearch(
+            slangResearchRetry[1],
+            { decidedBy: 'console' }
+          ));
+        } catch (error) {
+          return json(res, 409, { error: String(error?.message ?? error) });
+        }
+      }
+
       if (pathname === '/api/identity-pilot/people' && method === 'GET') {
         if (!identityPilot?.active) {
           return json(res, 409, { error: '统一身份库未启用' });
@@ -1295,6 +1895,54 @@ export function createApp({ log = console.log } = {}) {
         });
       }
 
+      if (pathname === '/api/identity-pilot/incoming-friend-requests' && method === 'GET') {
+        if (
+          !identityPilot?.active
+          || getConfig().identityPilot?.incomingFriendRequest?.enabled !== true
+        ) {
+          return json(res, 409, { error: '入站好友请求审批功能未启用' });
+        }
+        return json(res, 200, {
+          status: identityPilot.status(),
+          requests: identityPilot.listIncomingFriendRequests({
+            status: url.searchParams.get('status') || '',
+            limit: Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 100))
+          })
+        });
+      }
+
+      const incomingFriendDecision =
+        /^\/api\/identity-pilot\/incoming-friend-requests\/(fr_[a-f0-9]{12})\/decision$/i
+          .exec(pathname);
+      if (incomingFriendDecision && method === 'POST') {
+        if (
+          !identityPilot?.active
+          || getConfig().identityPilot?.incomingFriendRequest?.enabled !== true
+        ) {
+          return json(res, 409, { error: '入站好友请求审批功能未启用' });
+        }
+        const body = await readBody(req);
+        if (!['approve', 'reject'].includes(body.decision)) {
+          return json(res, 400, { error: 'decision 必须是 approve 或 reject' });
+        }
+        try {
+          const result = await identityPilot.decideIncomingFriendRequest(
+            incomingFriendDecision[1],
+            body.decision,
+            {
+              decidedBy: 'console',
+              remark: String(body.remark || '')
+            }
+          );
+          emit('identity-pilot-update', identityPilot.status());
+          return json(res, 200, result);
+        } catch (error) {
+          return json(res, error?.httpStatus || 409, {
+            error: String(error?.message ?? error)
+          });
+        }
+      }
+
       if (pathname === '/api/identity-pilot/friend-proposals' && method === 'GET') {
         if (!identityPilot?.active || getConfig().identityPilot?.friendProposal?.enabled !== true) {
           return json(res, 409, { error: '主动好友候选功能未启用' });
@@ -1302,6 +1950,19 @@ export function createApp({ log = console.log } = {}) {
         return json(res, 200, {
           status: identityPilot.status(),
           proposals: identityPilot.listFriendProposals({
+            status: url.searchParams.get('status') || '',
+            limit: Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 100))
+          })
+        });
+      }
+
+      if (pathname === '/api/identity-pilot/friend-opportunities' && method === 'GET') {
+        if (!identityPilot?.active || getConfig().identityPilot?.friendProposal?.enabled !== true) {
+          return json(res, 409, { error: '主动好友候选功能未启用' });
+        }
+        return json(res, 200, {
+          status: identityPilot.status(),
+          opportunities: identityPilot.listFriendOpportunities({
             status: url.searchParams.get('status') || '',
             limit: Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 100))
           })
@@ -1318,7 +1979,7 @@ export function createApp({ log = console.log } = {}) {
           return json(res, 400, { error: 'decision 必须是 approve 或 reject' });
         }
         try {
-          const result = identityPilot.decideFriendProposal(
+          const result = await identityPilot.decideFriendProposal(
             friendProposalDecision[1],
             body.decision,
             { decidedBy: 'console' }
@@ -1331,7 +1992,13 @@ export function createApp({ log = console.log } = {}) {
       }
 
       if (pathname === '/api/assets/overview' && method === 'GET') {
-        return json(res, 200, assetObserver.overview());
+        const overview = assetObserver.overview();
+        const pilotStatus = slangPilotStatus();
+        return json(res, 200, {
+          ...overview,
+          slang: { ...overview.slang, active: pilotStatus.active },
+          slangPilot: pilotStatus
+        });
       }
 
       if (pathname === '/api/assets/stickers' && method === 'GET') {
@@ -1344,10 +2011,49 @@ export function createApp({ log = console.log } = {}) {
         return json(res, 200, result);
       }
 
+      if (pathname === '/api/assets/stickers' && method === 'POST') {
+        try {
+          const body = await readBody(req, 12 * 1024 * 1024);
+          let imageBuffer;
+          if (body.imageDataUrl) {
+            imageBuffer = decodeImageDataUrl(body.imageDataUrl);
+          } else if (body.imageUrl) {
+            imageBuffer = (await safeFetchBinary(
+              String(body.imageUrl),
+              8 * 1024 * 1024
+            )).buffer;
+          } else {
+            return json(res, 400, { error: '请选择图片文件或填写图片 URL' });
+          }
+          const entry = assetObserver.addSticker({
+            imageBuffer,
+            desc: body.desc,
+            localNote: body.localNote,
+            tags: body.tags,
+            usage: body.usage
+          });
+          emit('asset-update', { kind: 'stickers', action: 'create', id: entry.id });
+          return json(res, 201, { ok: true, entry });
+        } catch (error) {
+          return json(res, error?.httpStatus || 400, { error: String(error?.message ?? error) });
+        }
+      }
+
       if (pathname === '/api/assets/stickers/image' && method === 'GET') {
         const id = String(url.searchParams.get('id') || '').trim();
         if (!id) return json(res, 400, { error: '缺少表情 ID' });
         let sticker = stickers.peek(id);
+        const localImage = stickers.readImage(id);
+        if (localImage) {
+          res.writeHead(200, {
+            'content-type': localImage.contentType,
+            'content-length': localImage.buffer.length,
+            'cache-control': 'private, max-age=300',
+            'x-content-type-options': 'nosniff'
+          });
+          res.end(localImage.buffer);
+          return;
+        }
         if (sticker?.source === 'ai') {
           sticker = await stickers.findForSend(id);
         }
@@ -1371,6 +2077,38 @@ export function createApp({ log = console.log } = {}) {
         }
       }
 
+      const stickerAssetMatch = /^\/api\/assets\/stickers\/([^/]+)$/.exec(pathname);
+      if (stickerAssetMatch && method === 'PUT') {
+        try {
+          const id = decodeURIComponent(stickerAssetMatch[1]);
+          const body = await readBody(req);
+          const entry = assetObserver.updateSticker(id, {
+            desc: body.desc,
+            localNote: body.localNote,
+            tags: body.tags,
+            usage: body.usage
+          });
+          if (!entry) return json(res, 404, { error: '表情不存在' });
+          emit('asset-update', { kind: 'stickers', action: 'update', id });
+          return json(res, 200, { ok: true, entry });
+        } catch (error) {
+          return json(res, error?.httpStatus || 400, { error: String(error?.message ?? error) });
+        }
+      }
+      if (stickerAssetMatch && method === 'DELETE') {
+        try {
+          const body = await readBody(req);
+          if (body.confirm !== true) return json(res, 409, { error: '删除表情需要显式确认' });
+          const id = decodeURIComponent(stickerAssetMatch[1]);
+          const result = assetObserver.deleteSticker(id);
+          if (!result?.removed) return json(res, 404, { error: '表情不存在' });
+          emit('asset-update', { kind: 'stickers', action: 'delete', id });
+          return json(res, 200, { ok: true, ...result });
+        } catch (error) {
+          return json(res, error?.httpStatus || 400, { error: String(error?.message ?? error) });
+        }
+      }
+
       if (pathname === '/api/assets/slang' && method === 'GET') {
         return json(res, 200, assetObserver.listSlang({
           query: url.searchParams.get('query') || '',
@@ -1380,13 +2118,127 @@ export function createApp({ log = console.log } = {}) {
         }));
       }
 
+      if (pathname === '/api/assets/slang' && method === 'POST') {
+        try {
+          const entry = assetObserver.addSlang(await readBody(req));
+          emit('asset-update', { kind: 'slang', action: 'create', id: entry.id });
+          return json(res, 201, { ok: true, entry });
+        } catch (error) {
+          return json(res, error?.httpStatus || 400, { error: String(error?.message ?? error) });
+        }
+      }
+      const slangAssetMatch = /^\/api\/assets\/slang\/([^/]+)$/.exec(pathname);
+      if (slangAssetMatch && method === 'PUT') {
+        try {
+          const id = decodeURIComponent(slangAssetMatch[1]);
+          const entry = assetObserver.updateSlang(id, await readBody(req));
+          if (!entry) return json(res, 404, { error: '黑话词条不存在' });
+          emit('asset-update', { kind: 'slang', action: 'update', id });
+          return json(res, 200, { ok: true, entry });
+        } catch (error) {
+          return json(res, error?.httpStatus || 400, { error: String(error?.message ?? error) });
+        }
+      }
+      if (slangAssetMatch && method === 'DELETE') {
+        try {
+          const body = await readBody(req);
+          if (body.confirm !== true) return json(res, 409, { error: '删除黑话需要显式确认' });
+          const id = decodeURIComponent(slangAssetMatch[1]);
+          if (!assetObserver.deleteSlang(id)) return json(res, 404, { error: '黑话词条不存在' });
+          emit('asset-update', { kind: 'slang', action: 'delete', id });
+          return json(res, 200, { ok: true });
+        } catch (error) {
+          return json(res, error?.httpStatus || 400, { error: String(error?.message ?? error) });
+        }
+      }
+
       if (pathname === '/api/assets/identities' && method === 'GET') {
         const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 500));
-        return json(res, 200, assetObserver.identitySnapshot(limit));
+        return json(res, 200, assetObserver.identitySnapshot({
+          limit,
+          query: url.searchParams.get('query') || ''
+        }));
+      }
+
+      if (pathname === '/api/assets/identities' && method === 'POST') {
+        try {
+          const person = assetObserver.upsertIdentity(await readBody(req));
+          emit('asset-update', { kind: 'identities', action: 'create', id: person.userId });
+          emit('identity-pilot-update', identityPilotStatus());
+          return json(res, 201, { ok: true, person });
+        } catch (error) {
+          return json(res, error?.httpStatus || 400, { error: String(error?.message ?? error) });
+        }
+      }
+      const identityAssetMatch = /^\/api\/assets\/identities\/(\d+)$/.exec(pathname);
+      if (identityAssetMatch && method === 'PUT') {
+        try {
+          const person = assetObserver.upsertIdentity({
+            ...(await readBody(req)),
+            userId: identityAssetMatch[1]
+          });
+          emit('asset-update', { kind: 'identities', action: 'update', id: person.userId });
+          emit('identity-pilot-update', identityPilotStatus());
+          return json(res, 200, { ok: true, person });
+        } catch (error) {
+          return json(res, error?.httpStatus || 400, { error: String(error?.message ?? error) });
+        }
+      }
+      if (identityAssetMatch && method === 'DELETE') {
+        try {
+          const body = await readBody(req);
+          if (body.confirm !== true) return json(res, 409, { error: '删除人物需要显式确认' });
+          if (!assetObserver.deleteIdentity(identityAssetMatch[1])) {
+            return json(res, 404, { error: '人物不存在' });
+          }
+          emit('asset-update', { kind: 'identities', action: 'delete', id: identityAssetMatch[1] });
+          emit('identity-pilot-update', identityPilotStatus());
+          return json(res, 200, { ok: true });
+        } catch (error) {
+          return json(res, error?.httpStatus || 400, { error: String(error?.message ?? error) });
+        }
       }
 
       if (pathname === '/api/assets/memory' && method === 'GET') {
-        return json(res, 200, assetObserver.memorySummary());
+        return json(res, 200, assetObserver.memorySummary({
+          query: url.searchParams.get('query') || ''
+        }));
+      }
+      if (pathname === '/api/assets/memory' && method === 'POST') {
+        try {
+          const entry = assetObserver.addMemory(await readBody(req));
+          await refreshIdentityAfterAssetMutation();
+          emit('memory-update', { chatKey: String(entry.chatKey || '') });
+          emit('asset-update', { kind: 'memory', action: 'create' });
+          return json(res, 201, { ok: true, entry });
+        } catch (error) {
+          return json(res, error?.httpStatus || 400, { error: String(error?.message ?? error) });
+        }
+      }
+      if (pathname === '/api/assets/memory' && method === 'PUT') {
+        try {
+          const body = await readBody(req);
+          const member = assetObserver.updateMemory(body);
+          await refreshIdentityAfterAssetMutation();
+          emit('memory-update', { chatKey: String(body.chatKey || '') });
+          emit('asset-update', { kind: 'memory', action: 'update' });
+          return json(res, 200, { ok: true, member });
+        } catch (error) {
+          return json(res, error?.httpStatus || 400, { error: String(error?.message ?? error) });
+        }
+      }
+      if (pathname === '/api/assets/memory' && method === 'DELETE') {
+        try {
+          const body = await readBody(req);
+          if (body.confirm !== true) return json(res, 409, { error: '删除记忆需要显式确认' });
+          if (!assetObserver.deleteMemory(body)) return json(res, 404, { error: '记忆不存在' });
+          await refreshIdentityAfterAssetMutation();
+          emit('memory-update', { chatKey: String(body.chatKey || '') });
+          emit('asset-update', { kind: 'memory', action: 'delete' });
+          return json(res, 200, { ok: true });
+        } catch (error) {
+          return json(res, error?.httpStatus || 400, { error: String(error?.message ?? error) });
+        }
       }
 
       if (pathname === '/api/qzone-interactions/run' && method === 'POST') {
@@ -1450,7 +2302,10 @@ export function createApp({ log = console.log } = {}) {
         }
         try {
           const result = momentAction[2] === 'publish'
-            ? await dailyMoments.publishDraft(momentAction[1])
+            ? await dailyMoments.publishDraft(momentAction[1], {
+                force: body.force === true,
+                confirmDuplicateRisk: body.confirmDuplicateRisk === true
+              })
             : await dailyMoments.reconcile(momentAction[1]);
           return json(res, 200, result);
         } catch (error) {
@@ -1484,11 +2339,17 @@ export function createApp({ log = console.log } = {}) {
       }
 
       if (pathname === '/api/chats' && method === 'GET') {
-        const chats = store.listChats().map((key) => ({
-          key, ...store.getChatMeta(key),
-          ...(cfgNow.timeControl?.enabled
-            ? { timeControl: timeControlState(cfgNow.timeControl, key) } : {})
-        }))
+        const chats = store.listChats().map((key) => {
+          const meta = store.getChatMeta(key);
+          return {
+            key,
+            ...meta,
+            incidentControl: incidentPilot?.getChatControl(key) || null,
+            incidentDecision: incidentPilot?.chatDecision(key, meta) || null,
+            ...(cfgNow.timeControl?.enabled
+              ? { timeControl: timeControlState(cfgNow.timeControl, key) } : {})
+          };
+        })
           .sort((a, b) => b.lastTs - a.lastTs);
         // 附带群名，让 UI 能显示"群名（群号）"。
         // 群名要调 OneBot 拿，可能慢或失败 —— 用 allSettled 保证绝不影响主流程：
@@ -1703,6 +2564,10 @@ export function createApp({ log = console.log } = {}) {
         try {
           const chatKey = `${chatTestSendMatch[1]}:${chatTestSendMatch[2]}`;
           assertCanSend(chatKey);
+          const decision = incidentPilot?.chatDecision(chatKey, store.getChatMeta(chatKey));
+          if (decision && !decision.allowed) {
+            return json(res, 409, { error: decision.reason || '该会话当前被阻塞' });
+          }
           const data = await sender.sendTextBatch(chatKey, [text]);
           emit('chat-update', chatKey);
           return json(res, 200, { ok: true, messageId: data.sent[0]?.messageId ?? null });
@@ -1722,6 +2587,8 @@ export function createApp({ log = console.log } = {}) {
         const body = await readBody(req);
         const wasPaused = orchestrator.paused;
         orchestrator.setPaused(!!body.paused);
+        if (body.paused) slangPilot?.abortResearch('机器人已暂停');
+        else slangPilot?.resumeQueued();
         if (wasPaused && !orchestrator.paused && !body.skipBacklog) {
           // 恢复时自动补处理暂停期间积压的未读消息
           orchestrator.drainBacklogAfterResume();
@@ -1732,6 +2599,7 @@ export function createApp({ log = console.log } = {}) {
       // 恢复运行，并把所有会话当前未读一次性标记为已读（用户明确选择丢弃积压）
       if (pathname === '/api/pause' && method === 'DELETE') {
         orchestrator.setPaused(false);
+        slangPilot?.resumeQueued();
         const marked = {};
         for (const chatKey of store.listChats()) {
           const n = store.drainUnread(chatKey).length;
@@ -1833,11 +2701,28 @@ export function createApp({ log = console.log } = {}) {
     if (port == null) throw lastError ?? new Error('无法监听端口');
 
     await onebot.connect();
+    if (
+      incidentPilotEnabled()
+      || fs.existsSync(incidentDatabasePath(DATA_DIR))
+    ) {
+      try {
+        syncIncidentPilot();
+      } catch (error) {
+        log(`[incident-pilot] 启动失败，聊天主流程继续：${error?.message ?? error}`);
+      }
+    }
     if (identityPilotEnabled()) {
       try {
         await syncIdentityPilot();
       } catch (error) {
         log(`[identity-pilot] 启动失败，聊天主流程继续：${error?.message ?? error}`);
+      }
+    }
+    if (slangPilotEnabled()) {
+      try {
+        await syncSlangPilot();
+      } catch (error) {
+        log(`[slang-pilot] 启动失败，聊天主流程继续：${error?.message ?? error}`);
       }
     }
     refreshTimeControl();
@@ -1860,6 +2745,10 @@ export function createApp({ log = console.log } = {}) {
     await qzoneInteractions.abort();
     identityPilot?.stop();
     identityPilot = null;
+    await slangPilot?.stop();
+    slangPilot = null;
+    await incidentPilot?.stop();
+    incidentPilot = null;
     onebot.close();
     await orchestrator.abortAll();
     await Promise.allSettled([...ingress.values()]);
@@ -1894,8 +2783,15 @@ export function createApp({ log = console.log } = {}) {
     dailyMoments,
     qzoneInteractions,
     assetObserver,
+    get incidentPilot() { return incidentPilot; },
+    incidentPilotStatus,
+    captureIncident(error, context = {}) {
+      return incidentPilot?.capture(error, context) || null;
+    },
     get identityPilot() { return identityPilot; },
     identityPilotStatus,
+    get slangPilot() { return slangPilot; },
+    slangPilotStatus,
     start,
     stop,
     emit,

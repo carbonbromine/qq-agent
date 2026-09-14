@@ -63,6 +63,29 @@ describe('ChatStore', () => {
     assert.equal(store.resolveHeld('group:1'), 1);
   });
 
+  it('reconciles unknown operations individually without deleting business history', (t) => {
+    const { store } = fixture(t);
+    const message = store.appendIncoming('group:9', {
+      mid: 901, ts: Date.now(), senderId: '42', text: 'unknown write'
+    });
+    const lease = store.claimUnread('group:9');
+    const first = store.beginSend('group:9', lease.id, { type: 'text', text: 'one' });
+    const second = store.beginSend('group:9', lease.id, { type: 'poke', targetUserId: '42' });
+    store.finishSend(first, { error: 'response lost' });
+    store.finishSend(second, { error: 'response lost' });
+    store.failLease(lease.id, 'Delivery uncertain; batch held for operator review');
+    assert.equal(store.getChatMeta('group:9').held, 1);
+    assert.equal(store.listUnknownOperations('group:9').length, 2);
+
+    const one = store.reconcileUnknownOperation(first, 'sent');
+    assert.equal(one.remaining, 1);
+    assert.equal(store.findByMid('group:9', message.mid).state, 'held');
+    const two = store.reconcileUnknownOperation(second, 'failed');
+    assert.equal(two.remaining, 0);
+    assert.equal(store.findByMid('group:9', message.mid).state, 'acked');
+    assert.equal(store.getChatMeta('group:9').held, 0);
+  });
+
   it('persists leases and recovers an interrupted unsent run after reopening', (t) => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-store-reopen-'));
     t.after(() => fs.rmSync(dir, { recursive: true, force: true }));

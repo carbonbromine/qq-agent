@@ -254,7 +254,7 @@ export async function safeFetchBinary(urlString, maxBytes = 12 * 1024 * 1024, si
   let { url, ip } = await validateFetchUrl(urlString, { allowPrivate });
   for (let i = 0; i <= MAX_REDIRECTS; i++) {
     signal?.throwIfAborted();
-    const result = await requestOnce(url, ip, { asBinary: true, maxBytes, signal });
+    const result = await requestOnce(url, ip, { asBinary: true, maxBytes: maxBytes + 1, signal });
     if ([301, 302, 303, 307, 308].includes(result.statusCode)) {
       if (!result.redirect) throw new Error(`重定向缺少 Location: ${result.statusCode}`);
       const next = new URL(result.redirect, url).toString();
@@ -262,6 +262,7 @@ export async function safeFetchBinary(urlString, maxBytes = 12 * 1024 * 1024, si
       continue;
     }
     if (result.statusCode !== 200) throw new Error(`HTTP ${result.statusCode}`);
+    if (result.body.length > maxBytes) throw new Error(`响应体超过 ${maxBytes} 字节限制`);
     return { buffer: result.body, contentType: result.contentType };
   }
   throw new Error('重定向次数过多，已停止');

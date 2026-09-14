@@ -213,8 +213,9 @@ test('submits all unread feeds in one newest-first batch and never repeats write
   let calls = 0;
   const f = fixture({
     feed,
-    complete: async ({ messages }) => {
+    complete: async ({ messages, toolChoice }) => {
       calls += 1;
+      assert.equal(toolChoice, 'auto');
       assert.ok(String(messages.at(-1).content).indexOf('newer')
         < String(messages.at(-1).content).indexOf('older'));
       const ids = idsFromMessages(messages, 'feed');
@@ -409,6 +410,13 @@ test('a new comment on the bot own moment is submitted as one reply decision', a
   assert.equal(result.run.selectedReplies, 1);
   assert.equal(f.writes[0].action, 'reply_qzone_comment');
   assert.equal(f.writes[0].params.ownerUin, '888');
+  const detail = f.manager.status().records[0].details[0];
+  assert.equal(detail.kind, 'reply');
+  assert.ok(detail.post, JSON.stringify(detail));
+  assert.equal(detail.post.content, 'bot post');
+  assert.equal(detail.comment.content, 'where is this from');
+  assert.equal(detail.response, '刚翻到的');
+  assert.deepEqual(detail.operations, [{ type: 'reply', status: 'done' }]);
 });
 
 test('friend reply under the bot comment triggers one model-decided native reply', async () => {

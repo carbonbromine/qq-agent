@@ -5,6 +5,23 @@ import { sanitizeUserText, escapeCqText } from './util.js';
 const RECONNECT_MIN_MS = 3000;
 const RECONNECT_MAX_MS = 30000;
 
+export class OneBotActionError extends Error {
+  constructor(message, {
+    action = '',
+    outcome = 'unknown',
+    retcode = null,
+    httpStatus = null,
+    cause
+  } = {}) {
+    super(message, cause ? { cause } : undefined);
+    this.name = 'OneBotActionError';
+    this.action = action;
+    this.outcome = outcome;
+    this.retcode = retcode;
+    this.httpStatus = httpStatus;
+  }
+}
+
 export class OneBotClient {
   constructor({ wsUrl, httpUrl, accessToken, httpToken, onEvent }) {
     this.wsUrl = String(wsUrl || 'ws://127.0.0.1:3001');
@@ -35,6 +52,9 @@ export class OneBotClient {
   #setStatus(connected) {
     this.connected = connected;
     if (connected) this.everConnected = true;
+    // #region debug-point A-C:onebot-status-transition
+    if (!String(process.argv[1]).includes('/test/')) (() => { try { const payload = JSON.stringify({ sessionId: 'onebot-status-offline', runId: 'post-fix', hypothesisId: 'A,B,C', location: 'src/onebot.js:#setStatus', msg: '[DEBUG] OneBot status transition', data: { connected, everConnected: this.everConnected, readyState: this.socket?.readyState ?? null, error: String(this.lastConnectError || '').slice(0, 160) }, ts: Date.now() }); const req = process.getBuiltinModule('node:http').request('http://192.168.31.10:7778/event', { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } }, (response) => response.resume()); req.on('error', () => {}); req.on('socket', (socket) => socket.unref()); req.setTimeout(500, () => req.destroy()); req.end(payload); } catch {} })();
+    // #endregion
     for (const fn of this.statusListeners) {
       try { fn({ connected, everConnected: this.everConnected, error: this.lastConnectError }); } catch { /* ignore */ }
     }
@@ -80,6 +100,9 @@ export class OneBotClient {
     const isCurrent = (s) => this.socket === s;
 
     socket.on('open', async () => {
+      // #region debug-point B-D:onebot-open
+      if (!String(process.argv[1]).includes('/test/')) (() => { try { const payload = JSON.stringify({ sessionId: 'onebot-status-offline', runId: 'post-fix', hypothesisId: 'B,D', location: 'src/onebot.js:socket.open', msg: '[DEBUG] OneBot WebSocket open event', data: { isCurrent: isCurrent(socket), readyState: socket.readyState }, ts: Date.now() }); const req = process.getBuiltinModule('node:http').request('http://192.168.31.10:7778/event', { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } }, (response) => response.resume()); req.on('error', () => {}); req.on('socket', (stream) => stream.unref()); req.setTimeout(500, () => req.destroy()); req.end(payload); } catch {} })();
+      // #endregion
       if (!isCurrent(socket)) return;
       this.lastConnectError = '';
       this.reconnectAttempt = 0;
@@ -107,13 +130,19 @@ export class OneBotClient {
       if (!event || typeof event !== 'object') return;
       try { this.onEvent(event); } catch (error) { console.error('[onebot] 事件处理出错:', error); }
     });
-    socket.on('close', () => {
+    socket.on('close', (code, reason) => {
+      // #region debug-point B-D:onebot-close
+      if (!String(process.argv[1]).includes('/test/')) (() => { try { const payload = JSON.stringify({ sessionId: 'onebot-status-offline', runId: 'post-fix', hypothesisId: 'B,D', location: 'src/onebot.js:socket.close', msg: '[DEBUG] OneBot WebSocket close event', data: { isCurrent: isCurrent(socket), readyState: socket.readyState, code, reason: String(reason || '').slice(0, 120) }, ts: Date.now() }); const req = process.getBuiltinModule('node:http').request('http://192.168.31.10:7778/event', { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } }, (response) => response.resume()); req.on('error', () => {}); req.on('socket', (stream) => stream.unref()); req.setTimeout(500, () => req.destroy()); req.end(payload); } catch {} })();
+      // #endregion
       if (!isCurrent(socket)) return; // 旧连接的迟到 close：新连接已在处理
       clearInterval(this.heartbeatTimer);
       this.#setStatus(false);
       if (!this.#closedByUs) this.#scheduleReconnect();
     });
     socket.on('error', (error) => {
+      // #region debug-point A-C:onebot-error
+      if (!String(process.argv[1]).includes('/test/')) (() => { try { const payload = JSON.stringify({ sessionId: 'onebot-status-offline', runId: 'post-fix', hypothesisId: 'A,C', location: 'src/onebot.js:socket.error', msg: '[DEBUG] OneBot WebSocket error event', data: { isCurrent: isCurrent(socket), readyState: socket.readyState, error: String(error?.message ?? error).slice(0, 160) }, ts: Date.now() }); const req = process.getBuiltinModule('node:http').request('http://192.168.31.10:7778/event', { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } }, (response) => response.resume()); req.on('error', () => {}); req.on('socket', (stream) => stream.unref()); req.setTimeout(500, () => req.destroy()); req.end(payload); } catch {} })();
+      // #endregion
       if (!isCurrent(socket)) return;
       this.lastConnectError = String(error?.message ?? error);
       if (!this.everConnected) {
@@ -142,6 +171,9 @@ export class OneBotClient {
 
   /** OneBot HTTP API（发送与查询都走这里）。 */
   async call(action, params = {}, timeoutMs = 15000, signal) {
+    // #region debug-point A-B:friend-packet-request
+    if (!String(process.argv[1]).includes('/test/') && ((action === 'send_packet' && /^friendlist\./i.test(String(params?.cmd || ''))) || action === 'send_friend_request')) (() => { try { const payload = JSON.stringify({ sessionId: 'outbound-friend-request', runId: 'post-fix', hypothesisId: 'A,B', location: 'src/onebot.js:call:request', msg: '[DEBUG] Friend protocol request started', data: { action, command: action === 'send_packet' ? String(params?.cmd || '') : 'send_friend_request', payloadBytes: action === 'send_packet' ? Math.floor(String(params?.data || '').length / 2) : null }, ts: Date.now() }); const req = process.getBuiltinModule('node:http').request('http://192.168.31.10:7777/event', { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } }, (response) => response.resume()); req.on('error', () => {}); req.on('socket', (socket) => socket.unref()); req.setTimeout(500, () => req.destroy()); req.end(payload); } catch {} })();
+    // #endregion
     const res = await fetch(`${this.httpUrl}/${action}`, {
       method: 'POST',
       headers: {
@@ -151,18 +183,46 @@ export class OneBotClient {
       body: JSON.stringify(params),
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs)
     });
+    // #region debug-point C:friend-packet-http-response
+    if (!String(process.argv[1]).includes('/test/') && ((action === 'send_packet' && /^friendlist\./i.test(String(params?.cmd || ''))) || action === 'send_friend_request')) (() => { try { const payload = JSON.stringify({ sessionId: 'outbound-friend-request', runId: 'post-fix', hypothesisId: 'C', location: 'src/onebot.js:call:http-response', msg: '[DEBUG] Friend protocol HTTP response received', data: { action, command: action === 'send_packet' ? String(params?.cmd || '') : 'send_friend_request', httpStatus: res.status }, ts: Date.now() }); const req = process.getBuiltinModule('node:http').request('http://192.168.31.10:7777/event', { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } }, (response) => response.resume()); req.on('error', () => {}); req.on('socket', (socket) => socket.unref()); req.setTimeout(500, () => req.destroy()); req.end(payload); } catch {} })();
+    // #endregion
     if (!res.ok) {
       const hint = res.status === 426
         ? '（HTTP 426：httpUrl 可能指向了 WebSocket 端口，请检查 onebot.httpUrl）'
         : '';
-      throw new Error(`OneBot ${action} HTTP ${res.status}${hint}`);
+      throw new OneBotActionError(`OneBot ${action} HTTP ${res.status}${hint}`, {
+        action,
+        outcome: 'unknown',
+        httpStatus: res.status
+      });
     }
-    const body = await res.json().catch(() => ({}));
+    let body;
+    try {
+      body = await res.json();
+    } catch (cause) {
+      throw new OneBotActionError(`OneBot ${action} 返回了无法解析的响应`, {
+        action,
+        outcome: 'unknown',
+        httpStatus: res.status,
+        cause
+      });
+    }
+    // #region debug-point A-D:friend-packet-result
+    if (!String(process.argv[1]).includes('/test/') && ((action === 'send_packet' && /^friendlist\./i.test(String(params?.cmd || ''))) || action === 'send_friend_request')) (() => { try { const payload = JSON.stringify({ sessionId: 'outbound-friend-request', runId: 'post-fix', hypothesisId: 'A,B,C,D', location: 'src/onebot.js:call:result', msg: '[DEBUG] Friend protocol result received', data: { action, command: action === 'send_packet' ? String(params?.cmd || '') : 'send_friend_request', onebotStatus: body.status ?? null, retcode: body.retcode ?? null, responseBytes: typeof body.data === 'string' ? Math.floor(body.data.length / 2) : null, wording: String(body.wording || '').slice(0, 160) }, ts: Date.now() }); const req = process.getBuiltinModule('node:http').request('http://192.168.31.10:7777/event', { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } }, (response) => response.resume()); req.on('error', () => {}); req.on('socket', (socket) => socket.unref()); req.setTimeout(500, () => req.destroy()); req.end(payload); } catch {} })();
+    // #endregion
     // #region debug-point C-D:onebot-image-result
     if (!String(process.argv[1]).includes('/test/') && (action === 'send_group_msg' || action === 'send_private_msg') && Array.isArray(params.message) && params.message.some((segment) => segment?.type === 'image')) (() => { try { const file = String(params.message.find((segment) => segment?.type === 'image')?.data?.file || ''); let host = '', pathname = '', queryKeys = []; try { const parsed = new URL(file); host = parsed.host; pathname = parsed.pathname; queryKeys = [...parsed.searchParams.keys()]; } catch {} const payload = JSON.stringify({ sessionId: 'agent-time-sticker-download', runId: 'post-fix', hypothesisId: 'C,D', location: 'src/onebot.js:call', msg: '[DEBUG] OneBot image send result', data: { action, targetId: params.group_id ?? params.user_id ?? null, segmentTypes: params.message.map((segment) => segment?.type), fileHost: host, filePathname: pathname, fileQueryKeys: queryKeys, fileLength: file.length, httpStatus: res.status, onebotStatus: body.status ?? null, retcode: body.retcode ?? null, wording: body.wording ?? '' }, ts: Date.now() }); const req = process.getBuiltinModule('node:http').request('http://192.168.31.10:7777/event', { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } }, (response) => response.resume()); req.on('error', () => {}); req.on('socket', (socket) => socket.unref()); req.setTimeout(500, () => req.destroy()); req.end(payload); } catch {} })();
     // #endregion
     if (body.status !== 'ok' && body.retcode !== 0) {
-      throw new Error(`OneBot ${action} 失败: retcode=${body.retcode ?? body.status} ${body.wording ?? ''}`);
+      throw new OneBotActionError(
+        `OneBot ${action} 失败: retcode=${body.retcode ?? body.status} ${body.wording ?? ''}`,
+        {
+          action,
+          outcome: 'failed',
+          retcode: body.retcode ?? body.status,
+          httpStatus: res.status
+        }
+      );
     }
     return body.data;
   }
@@ -188,12 +248,22 @@ export class OneBotClient {
     const segments = [];
     if (replyToMessageId !== undefined && replyToMessageId !== null && String(replyToMessageId).trim() !== '') {
       const rid = String(replyToMessageId).trim();
-      if (!/^-?[1-9]\d*$/.test(rid)) throw new Error('replyToMessageId 必须是非零整数（消息 id 可能为负数）');
+      if (!/^-?[1-9]\d*$/.test(rid)) {
+        throw new OneBotActionError('replyToMessageId 必须是非零整数（消息 id 可能为负数）', {
+          action: kind === 'private' ? 'send_private_msg' : 'send_group_msg',
+          outcome: 'failed'
+        });
+      }
       segments.push({ type: 'reply', data: { id: rid } });
     }
     if (atUserId !== undefined && atUserId !== null && String(atUserId).trim() !== '') {
       const at = String(atUserId).trim();
-      if (!/^\d+$/.test(at)) throw new Error('atUserId 必须是正整数 QQ 号，且不能为 all');
+      if (!/^\d+$/.test(at)) {
+        throw new OneBotActionError('atUserId 必须是正整数 QQ 号，且不能为 all', {
+          action: kind === 'private' ? 'send_private_msg' : 'send_group_msg',
+          outcome: 'failed'
+        });
+      }
       segments.push({ type: 'at', data: { qq: at } });
     }
     segments.push({ type: 'text', data: { text: escapeCqText(String(text ?? '')) } });
@@ -204,12 +274,22 @@ export class OneBotClient {
     const segments = [];
     if (replyToMessageId !== undefined && replyToMessageId !== null && String(replyToMessageId).trim() !== '') {
       const rid = String(replyToMessageId).trim();
-      if (!/^-?[1-9]\d*$/.test(rid)) throw new Error('replyToMessageId 必须是非零整数');
+      if (!/^-?[1-9]\d*$/.test(rid)) {
+        throw new OneBotActionError('replyToMessageId 必须是非零整数', {
+          action: kind === 'private' ? 'send_private_msg' : 'send_group_msg',
+          outcome: 'failed'
+        });
+      }
       segments.push({ type: 'reply', data: { id: rid } });
     }
     if (atUserId !== undefined && atUserId !== null && String(atUserId).trim() !== '') {
       const at = String(atUserId).trim();
-      if (!/^\d+$/.test(at)) throw new Error('atUserId 必须是正整数 QQ 号，且不能为 all');
+      if (!/^\d+$/.test(at)) {
+        throw new OneBotActionError('atUserId 必须是正整数 QQ 号，且不能为 all', {
+          action: kind === 'private' ? 'send_private_msg' : 'send_group_msg',
+          outcome: 'failed'
+        });
+      }
       segments.push({ type: 'at', data: { qq: at } });
     }
     segments.push({ type: 'image', data: { file: String(imageUrl) } });
@@ -219,6 +299,12 @@ export class OneBotClient {
   async sendPoke(kind, id, targetUserId, signal) {
     if (kind === 'private') {
       return this.call('friend_poke', { user_id: Number(id) }, 15000, signal);
+    }
+    if (!/^\d+$/.test(String(targetUserId ?? '').trim())) {
+      throw new OneBotActionError('群聊拍一拍需要有效的目标 QQ 号', {
+        action: 'group_poke',
+        outcome: 'failed'
+      });
     }
     return this.call('group_poke', { group_id: Number(id), user_id: Number(targetUserId || id) }, 15000, signal);
   }

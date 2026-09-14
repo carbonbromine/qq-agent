@@ -10,7 +10,10 @@ function entry(row) {
     ...row, senderId: row.sender_id, senderName: row.sender_name,
     self: !!row.self, read: row.state === 'acked',
     reply: row.reply ? JSON.parse(row.reply) : null,
-    media: JSON.parse(row.media || '[]')
+    media: JSON.parse(row.media || '[]'),
+    mentionsSelf: Boolean(row.mentions_self),
+    targetUserId: String(row.target_user_id || ''),
+    eventKind: String(row.event_kind || 'message')
   };
 }
 
@@ -67,6 +70,9 @@ export class ChatStore {
         chat_key TEXT NOT NULL, id INTEGER NOT NULL, mid TEXT, ts INTEGER NOT NULL,
         sender_id TEXT, sender_name TEXT, text TEXT NOT NULL, self INTEGER NOT NULL DEFAULT 0,
         reply TEXT, media TEXT NOT NULL DEFAULT '[]',
+        mentions_self INTEGER NOT NULL DEFAULT 0,
+        target_user_id TEXT NOT NULL DEFAULT '',
+        event_kind TEXT NOT NULL DEFAULT 'message',
         state TEXT NOT NULL DEFAULT 'pending', lease_id TEXT, attempts INTEGER NOT NULL DEFAULT 0,
         available_at INTEGER NOT NULL DEFAULT 0, error TEXT,
         PRIMARY KEY (chat_key, id), UNIQUE (chat_key, mid)
@@ -124,6 +130,9 @@ export class ChatStore {
     ensureColumn(this.db, 'conversation_threads', 'prompt_hash', "TEXT NOT NULL DEFAULT ''");
     ensureColumn(this.db, 'conversation_threads', 'transcript_chars', 'INTEGER NOT NULL DEFAULT 0');
     ensureColumn(this.db, 'conversation_threads', 'prompt_tokens', 'INTEGER NOT NULL DEFAULT 0');
+    ensureColumn(this.db, 'messages', 'mentions_self', 'INTEGER NOT NULL DEFAULT 0');
+    ensureColumn(this.db, 'messages', 'target_user_id', "TEXT NOT NULL DEFAULT ''");
+    ensureColumn(this.db, 'messages', 'event_kind', "TEXT NOT NULL DEFAULT 'message'");
     this.#importJson(dataDir);
   }
 
@@ -170,11 +179,14 @@ export class ChatStore {
     this.db.prepare('INSERT OR IGNORE INTO chats(chat_key) VALUES (?)').run(chatKey);
     const id = this.db.prepare('SELECT next_id FROM chats WHERE chat_key=?').get(chatKey).next_id;
     this.db.prepare(`INSERT INTO messages
-      (chat_key,id,mid,ts,sender_id,sender_name,text,self,reply,media,state)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(
+      (chat_key,id,mid,ts,sender_id,sender_name,text,self,reply,media,
+       mentions_self,target_user_id,event_kind,state)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
       chatKey, id, mid, Number(m.ts) || Date.now(), String(m.senderId || ''),
       String(m.senderName || ''), String(m.text || ''), m.self ? 1 : 0,
-      m.reply ? JSON.stringify(m.reply) : null, JSON.stringify(m.media || []), state
+      m.reply ? JSON.stringify(m.reply) : null, JSON.stringify(m.media || []),
+      m.mentionsSelf ? 1 : 0, String(m.targetUserId || ''),
+      String(m.eventKind || 'message'), state
     );
     this.db.prepare('UPDATE chats SET next_id=next_id+1 WHERE chat_key=?').run(chatKey);
     if (this.maxPerChat > 0) {
@@ -257,6 +269,29 @@ export class ChatStore {
     return this.db.prepare(`UPDATE messages SET state='acked' WHERE chat_key=? AND state='pending'`).run(chatKey).changes;
   }
 
+  keepLatestPending(chatKey, { limit = 100, maxChars = 32000 } = {}) {
+    return this.#transaction(() => {
+      const pending = this.db.prepare(`SELECT id, text FROM messages
+        WHERE chat_key=? AND state='pending' ORDER BY id DESC`).all(chatKey);
+      const keep = new Set();
+      let chars = 0;
+      for (const row of pending) {
+        const length = Math.min(String(row.text || '').length, 2000) + 100;
+        if (keep.size >= Math.max(1, Number(limit) || 100)) break;
+        if (keep.size && chars + length > Math.max(1000, Number(maxChars) || 32000)) break;
+        keep.add(Number(row.id));
+        chars += length;
+      }
+      const mark = this.db.prepare(`UPDATE messages SET state='acked'
+        WHERE chat_key=? AND id=? AND state='pending'`);
+      let discarded = 0;
+      for (const row of pending) {
+        if (!keep.has(Number(row.id))) discarded += mark.run(chatKey, row.id).changes;
+      }
+      return { kept: keep.size, discarded };
+    });
+  }
+
   // Administrative compatibility API. Agent execution uses claimUnread/ackLease instead.
   drainUnread(chatKey) {
     const messages = this.peekUnread(chatKey, 1000000);
@@ -290,13 +325,13 @@ export class ChatStore {
     return this.#transaction(() => {
       const changed = this.db.prepare("UPDATE messages SET state='acked',lease_id=NULL WHERE lease_id=? AND state='leased'").run(id).changes;
       this.db.prepare("UPDATE runs SET state='acked' WHERE id=? AND state='leased'").run(id);
-      this.db.prepare("DELETE FROM outbox WHERE run_id=? AND state='sent'").run(id);
+      this.db.prepare("DELETE FROM outbox WHERE run_id=? AND state IN ('sent','failed')").run(id);
       return changed;
     });
   }
 
   completeRun(id) {
-    return this.db.prepare("DELETE FROM outbox WHERE run_id=? AND state='sent'").run(id).changes;
+    return this.db.prepare("DELETE FROM outbox WHERE run_id=? AND state IN ('sent','failed')").run(id).changes;
   }
 
   hasEffects(id) {
@@ -342,6 +377,51 @@ export class ChatStore {
     });
   }
 
+  listUnknownOperations(chatKey, limit = 100) {
+    return this.db.prepare(`SELECT id, run_id AS runId, chat_key AS chatKey,
+      state, payload, message_id AS messageId, error
+      FROM outbox WHERE chat_key=? AND state IN ('sending','unknown')
+      ORDER BY rowid DESC LIMIT ?`).all(
+      String(chatKey || ''),
+      Math.min(500, Math.max(1, Number(limit) || 100))
+    ).map((row) => {
+      let payload = {};
+      try { payload = JSON.parse(row.payload || '{}'); } catch { payload = {}; }
+      return { ...row, payload };
+    });
+  }
+
+  reconcileUnknownOperation(operationId, result) {
+    if (!['sent', 'failed'].includes(result)) {
+      throw new Error('未知写入核对结果必须是 sent 或 failed');
+    }
+    return this.#transaction(() => {
+      const row = this.db.prepare(`SELECT id, run_id AS runId, chat_key AS chatKey
+        FROM outbox WHERE id=? AND state IN ('sending','unknown')`).get(String(operationId || ''));
+      if (!row) return null;
+      this.db.prepare(`UPDATE outbox SET state=?, error=? WHERE id=?`).run(
+        result === 'sent' ? 'reconciled_sent' : 'reconciled_failed',
+        result === 'sent' ? '管理员确认已发送' : '管理员确认未发送',
+        row.id
+      );
+      const remaining = Number(this.db.prepare(`SELECT COUNT(*) AS count FROM outbox
+        WHERE run_id=? AND state IN ('sending','unknown')`).get(row.runId).count) || 0;
+      if (remaining === 0) {
+        this.db.prepare(`UPDATE messages SET state='acked', lease_id=NULL
+          WHERE chat_key=? AND state='held' AND error LIKE '%Delivery uncertain%'`).run(row.chatKey);
+        this.db.prepare(`UPDATE runs SET state='acked', error=? WHERE id=? AND state='held'`)
+          .run('管理员已核对全部未知写入', row.runId);
+      }
+      return {
+        operationId: row.id,
+        runId: row.runId,
+        chatKey: row.chatKey,
+        result,
+        remaining
+      };
+    });
+  }
+
   beginSend(chatKey, runId, payload) {
     const id = crypto.randomUUID();
     this.db.prepare("INSERT INTO outbox(id,run_id,chat_key,state,payload) VALUES (?,?,?,'sending',?)")
@@ -349,9 +429,10 @@ export class ChatStore {
     return id;
   }
 
-  finishSend(id, { messageId, error } = {}) {
+  finishSend(id, { messageId, error, outcome = 'unknown' } = {}) {
+    const state = error ? (outcome === 'failed' ? 'failed' : 'unknown') : 'sent';
     this.db.prepare('UPDATE outbox SET state=?,message_id=?,error=? WHERE id=?')
-      .run(error ? 'unknown' : 'sent', messageId == null ? null : String(messageId),
+      .run(state, messageId == null ? null : String(messageId),
         error ? String(error).slice(0, 1000) : null, id);
   }
 
@@ -806,10 +887,161 @@ export class ChatStore {
       GROUP BY sender_id ORDER BY lastTs DESC LIMIT ?`).all(chatKey, Math.max(1, limit));
   }
 
+  hasParticipant(chatKey, userId) {
+    const id = String(userId ?? '').trim();
+    if (!id) return false;
+    return Boolean(this.db.prepare(`SELECT 1 FROM messages
+      WHERE chat_key=? AND self=0 AND sender_id=? LIMIT 1`).get(chatKey, id));
+  }
+
   /** 实验身份库启用时才调用：为跨会话 QQ 查询创建索引。 */
   ensureIdentityLookupIndex() {
     this.db.exec(`CREATE INDEX IF NOT EXISTS messages_sender_time
       ON messages(sender_id, ts DESC) WHERE self=0`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS messages_chat_sender_time
+      ON messages(chat_key, sender_id, ts DESC)`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS messages_chat_target_time
+      ON messages(chat_key, target_user_id, ts DESC) WHERE self=1`);
+  }
+
+  friendEligibilityMetrics(chatKey, userId, {
+    since = 0,
+    until = Date.now(),
+    exchangeWindowMs = 300000,
+    selfId = ''
+  } = {}) {
+    const source = String(chatKey || '');
+    const uin = String(userId || '').trim();
+    if (!/^(group|private):\d+$/.test(source) || !/^\d{1,15}$/.test(uin)) {
+      return { messageCount: 0, activeDays: 0, directExchanges: 0 };
+    }
+    const start = Math.max(0, Number(since) || 0);
+    const end = Math.max(start, Number(until) || Date.now());
+    const incoming = this.db.prepare(`
+      SELECT id, ts, reply, mentions_self
+      FROM messages
+      WHERE chat_key=? AND self=0 AND sender_id=? AND ts BETWEEN ? AND ?
+        AND event_kind='message'
+      ORDER BY ts, id
+      LIMIT 10000
+    `).all(source, uin, start, end);
+    const activeDays = new Set(incoming.map((row) =>
+      new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Asia/Shanghai',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit'
+      }).format(new Date(Number(row.ts) || 0)))).size;
+    const privateChat = source === `private:${uin}`;
+    const directIncoming = incoming.filter((row) => {
+      if (privateChat) return true;
+      if (Number(row.mentions_self)) return true;
+      try {
+        const reply = row.reply ? JSON.parse(row.reply) : null;
+        return ['self', String(selfId || '')].includes(String(reply?.senderId || ''));
+      } catch {
+        return false;
+      }
+    });
+    const outgoing = this.db.prepare(`
+      SELECT id, ts
+      FROM messages
+      WHERE chat_key=? AND self=1 AND ts BETWEEN ? AND ?
+        AND event_kind='message'
+        AND (?=1 OR target_user_id=?)
+      ORDER BY ts, id
+      LIMIT 10000
+    `).all(source, start, end, privateChat ? 1 : 0, uin);
+    let directExchanges = 0;
+    let lastExchangeAt = -Infinity;
+    let outgoingIndex = 0;
+    for (const input of directIncoming) {
+      while (
+        outgoingIndex < outgoing.length
+        && Number(outgoing[outgoingIndex].ts) < Number(input.ts) - exchangeWindowMs
+      ) outgoingIndex += 1;
+      const output = outgoing[outgoingIndex];
+      if (!output || Math.abs(Number(output.ts) - Number(input.ts)) > exchangeWindowMs) continue;
+      const at = Math.max(Number(input.ts), Number(output.ts));
+      if (at - lastExchangeAt < exchangeWindowMs) continue;
+      directExchanges += 1;
+      lastExchangeAt = at;
+      outgoingIndex += 1;
+    }
+    return {
+      messageCount: incoming.length,
+      activeDays,
+      directExchanges
+    };
+  }
+
+  friendReviewHistory(chatKey, userId, {
+    since = 0,
+    until = Date.now(),
+    maxCandidate = 24,
+    maxAgent = 24,
+    maxChars = 12000
+  } = {}) {
+    const source = String(chatKey || '');
+    const uin = String(userId || '').trim();
+    if (!/^(group|private):\d+$/.test(source) || !/^\d{1,15}$/.test(uin)) {
+      return { messages: [], evidenceIds: [], truncated: false };
+    }
+    const privateChat = source === `private:${uin}`;
+    const candidateRows = this.db.prepare(`
+      SELECT * FROM messages
+      WHERE chat_key=? AND self=0 AND sender_id=? AND ts BETWEEN ? AND ?
+        AND event_kind='message'
+      ORDER BY ts DESC, id DESC
+      LIMIT ?
+    `).all(
+      source,
+      uin,
+      Math.max(0, Number(since) || 0),
+      Number(until) || Date.now(),
+      Math.min(100, Math.max(1, Number(maxCandidate) || 24))
+    );
+    const agentRows = this.db.prepare(`
+      SELECT * FROM messages
+      WHERE chat_key=? AND self=1 AND ts BETWEEN ? AND ?
+        AND event_kind='message'
+        AND (?=1 OR target_user_id=?)
+      ORDER BY ts DESC, id DESC
+      LIMIT ?
+    `).all(
+      source,
+      Math.max(0, Number(since) || 0),
+      Number(until) || Date.now(),
+      privateChat ? 1 : 0,
+      uin,
+      Math.min(100, Math.max(1, Number(maxAgent) || 24))
+    );
+    const rows = [...candidateRows, ...agentRows]
+      .sort((a, b) => Number(a.ts) - Number(b.ts) || Number(a.id) - Number(b.id));
+    const messages = [];
+    let chars = 0;
+    let truncated = false;
+    for (const row of rows) {
+      const text = String(row.text || '').replace(/\s+/g, ' ').trim().slice(0, 400);
+      const size = text.length + 120;
+      if (messages.length && chars + size > Math.max(1000, Number(maxChars) || 12000)) {
+        truncated = true;
+        continue;
+      }
+      const id = `message:${source}:${row.id}`;
+      messages.push({
+        id,
+        at: Number(row.ts) || 0,
+        speaker: Number(row.self) ? 'agent' : 'candidate',
+        text
+      });
+      chars += size;
+    }
+    return {
+      messages,
+      evidenceIds: messages.map((message) => message.id),
+      truncated
+    };
   }
 
   /**

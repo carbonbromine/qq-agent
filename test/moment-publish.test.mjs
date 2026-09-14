@@ -104,6 +104,23 @@ test('malformed JSON is returned as a tool error, then a corrected decision publ
   assert.equal(f.sends.length, 1);
 });
 
+test('all decision rounds use auto tool choice for thinking-mode compatibility', async () => {
+  const toolChoices = [];
+  const f = fixture({ complete: async ({ toolChoice }) => {
+    toolChoices.push(toolChoice);
+    if (toolChoices.length < 3) {
+      return {
+        message: { content: 'still deciding' },
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 }
+      };
+    }
+    return response(decision());
+  } });
+  const result = await f.manager.run({ dayKey, publish: false });
+  assert.equal(result.record.status, 'preview');
+  assert.deepEqual(toolChoices, ['auto', 'auto', 'auto']);
+});
+
 test('empty or invalid submissions never become successful skip decisions', async () => {
   for (const bad of [{}, null, [], decision({ decision: 'other' }), decision({ reason: '' }),
     decision({ groupSummaries: [] }), decision({ imageIds: ['unknown'] })]) {
@@ -151,6 +168,42 @@ test('preview is isolated from publishing, exact draft can publish without anoth
   const again = await f.manager.publishDraft(preview.record.id);
   assert.equal(again.alreadyAttempted, true);
   assert.equal(f.sends.length, 1);
+});
+
+test('explicit confirmation allows manual same-day draft publishing and regeneration', async () => {
+  let generated = 0;
+  const f = fixture({ complete: async () =>
+    response(decision({ content: `manual moment ${++generated}` })) });
+  const first = await f.manager.runNow({ dayKey, publish: true });
+  const preview = await f.manager.runNow({ dayKey, publish: false });
+
+  const blocked = await f.manager.publishDraft(preview.record.id);
+  assert.equal(blocked.alreadyAttempted, true);
+  assert.equal(blocked.record.id, first.record.id);
+  assert.equal(f.sends.length, 1);
+
+  await assert.rejects(
+    f.manager.publishDraft(preview.record.id, { force: true }),
+    { code: 'MOMENT_DUPLICATE_CONFIRMATION_REQUIRED' }
+  );
+  const publishedDraft = await f.manager.publishDraft(preview.record.id, {
+    force: true,
+    confirmDuplicateRisk: true
+  });
+  assert.equal(publishedDraft.record.id, preview.record.id);
+  assert.equal(publishedDraft.record.status, 'published');
+  assert.equal(f.sends.length, 2);
+
+  const rerun = await f.manager.runNow({
+    dayKey,
+    publish: true,
+    force: true,
+    confirmDuplicateRisk: true
+  });
+  assert.equal(rerun.record.status, 'published');
+  assert.equal(rerun.alreadyAttempted, undefined);
+  assert.equal(f.sends.length, 3);
+  assert.equal(generated, 3);
 });
 
 test('concurrent publish requests cannot accidentally return a preview result', async () => {
@@ -242,4 +295,213 @@ test('current persona self-reference survives public name redaction', async () =
   const result = await f.manager.run({ dayKey, publish: false });
   assert.match(result.record.content, /Mori/);
   assert.doesNotMatch(result.record.content, /Member/);
+});
+
+test('manual and scheduled publication scopes do not consume each other', async () => {
+  for (const manualFirst of [true, false]) {
+    const f = fixture();
+    const manual = () => f.manager.runNow({ dayKey, publish: true });
+    const automatic = () => f.manager.run({ dayKey, publish: true, source: 'scheduled' });
+    const first = await (manualFirst ? manual() : automatic());
+    const second = await (manualFirst ? automatic() : manual());
+    assert.equal(first.record.status, 'published');
+    assert.equal(second.record.status, 'published');
+    assert.notEqual(first.record.id, second.record.id);
+    assert.equal(f.sends.length, 2);
+    assert.equal((await manual()).alreadyAttempted, true);
+    assert.equal((await automatic()).alreadyAttempted, true);
+    assert.equal(f.sends.length, 2);
+  }
+});
+
+test('publishing a saved manual draft does not block the automatic task', async () => {
+  const f = fixture();
+  const draft = await f.manager.runNow({ publish: false });
+  await f.manager.publishDraft(draft.record.id);
+  const automatic = await f.manager.run({ dayKey, publish: true });
+  assert.equal(automatic.record.status, 'published');
+  assert.equal(f.sends.length, 2);
+});
+
+test('unresolved manual sends hold automatic work without a second external write', async () => {
+  const f = fixture({ onebot: { selfId: '888', call: async (action) => {
+    if (action === 'get_qzone_msg_list') return { msglist: [] };
+    throw new Error('response lost');
+  } } });
+  await assert.rejects(f.manager.runNow({ publish: true }));
+  const result = await f.manager.run({ dayKey, publish: true });
+  assert.equal(result.alreadyAttempted, true);
+  assert.equal(result.record.status, 'publish-unknown');
+  assert.equal(f.requests.length, 1);
+});
+
+async function settleTimers() {
+  for (let i = 0; i < 80; i++) await Promise.resolve();
+}
+
+function scheduledFixture(t, patch = {}) {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.parse('2026-09-12T16:59:45+08:00') });
+  const f = fixture({ now: () => Date.now(), ...patch });
+  f.cfg.dailyMoments.scheduleWindows = [{ start: '17:00', end: '18:00', count: 2 }];
+  f.cfg.dailyMoments.startupCatchup = true;
+  t.after(() => f.manager.stop());
+  return f;
+}
+
+test('random scheduler persists independent slots, publishes twice and survives restart', async (t) => {
+  const f = scheduledFixture(t);
+  await f.manager.runNow({ publish: true });
+  // The manual post predates the first slot by enough to clear the safety gap.
+  f.manager.state.records[0].publishStartedAt -= 10 * 60000;
+  f.manager.state.records[0].publishedAt -= 10 * 60000;
+  f.manager.start();
+  const before = f.manager.status().scheduleSlots.map((slot) => ({ id: slot.id, at: slot.at }));
+  t.mock.timers.tick(15000);
+  await settleTimers();
+  assert.equal(f.sends.length, 2);
+  assert.equal(f.manager.status().scheduleSlots[0].status, 'published');
+  t.mock.timers.tick(30 * 60000);
+  await settleTimers();
+  assert.equal(f.sends.length, 3);
+  assert.equal(f.manager.status().scheduleSlots[1].status, 'published');
+  f.manager.stop();
+  const restarted = new DailyMomentsManager(f.options);
+  t.after(() => restarted.stop());
+  restarted.start();
+  t.mock.timers.tick(15000);
+  await settleTimers();
+  assert.equal(f.sends.length, 3);
+  assert.deepEqual(restarted.status().scheduleSlots.map((slot) => ({ id: slot.id, at: slot.at })), before);
+});
+
+test('pause and time-control gates defer only until the allowed window expires', async (t) => {
+  const f = scheduledFixture(t);
+  f.cfg.runtime.paused = true;
+  f.manager.start();
+  t.mock.timers.tick(15000);
+  await settleTimers();
+  assert.equal(f.requests.length, 0);
+  assert.match(f.manager.status().scheduleSlots[0].reason, /暂停/);
+  f.cfg.runtime.paused = false;
+  f.cfg.timeControl = { enabled: true, schedule: { mode: 'custom', windows: [] }, overrides: {} };
+  setRuntimeConfig(f.cfg);
+  t.mock.timers.tick(30000);
+  await settleTimers();
+  assert.equal(f.requests.length, 0);
+  assert.match(f.manager.status().scheduleSlots[0].reason, /活跃时间/);
+  t.mock.timers.tick(60 * 60000);
+  await settleTimers();
+  assert.equal(f.sends.length, 0);
+  assert.equal(f.manager.status().scheduleSlots.filter((slot) => slot.dayKey === dayKey && slot.status === 'missed').length, 2);
+});
+
+test('no catchup starts no late fixed-time task after deployment', async (t) => {
+  const f = scheduledFixture(t);
+  f.cfg.dailyMoments.scheduleWindows = null;
+  f.cfg.dailyMoments.hour = 16;
+  f.cfg.dailyMoments.minute = 30;
+  f.cfg.dailyMoments.startupCatchup = false;
+  f.manager.start();
+  t.mock.timers.tick(15000);
+  await settleTimers();
+  assert.equal(f.requests.length, 0);
+  assert.equal(f.manager.status().lastScheduleCheck.status, 'missed');
+});
+
+test('unknown slot publication prevents retries and later slots wait for reconciliation', async (t) => {
+  let sends = 0;
+  let msglist = [];
+  const f = scheduledFixture(t, { onebot: { selfId: '888', call: async (action) => {
+    if (action === 'get_qzone_msg_list') return { msglist };
+    sends++;
+    throw new Error('response lost');
+  } } });
+  f.manager.start();
+  t.mock.timers.tick(15000);
+  await settleTimers();
+  assert.equal(sends, 1);
+  assert.equal(f.manager.status().scheduleSlots[0].status, 'publish-unknown');
+  t.mock.timers.tick(30 * 60000);
+  await settleTimers();
+  assert.equal(sends, 1);
+  assert.match(f.manager.status().scheduleSlots[1].reason, /待核对/);
+  const record = f.manager.status().latest;
+  assert.equal((await f.manager.reconcile(record.id)).matched, false);
+  assert.equal(f.manager.status().scheduleSlots[0].status, 'publish-unknown');
+  msglist = [{ tid: 'confirmed-tid', content: record.content }];
+  assert.equal((await f.manager.reconcile(record.id)).matched, true);
+  assert.equal(f.manager.status().scheduleSlots[0].status, 'published');
+  assert.equal(sends, 1);
+  const restored = new DailyMomentsManager(f.options);
+  assert.equal(restored.status().scheduleSlots[0].status, 'published');
+});
+
+test('expiry while generating prevents an out-of-window send', async (t) => {
+  let finish;
+  const f = scheduledFixture(t, { complete: async () => {
+    await new Promise((resolve) => { finish = resolve; });
+    return response(decision());
+  } });
+  f.cfg.dailyMoments.scheduleWindows = [{ start: '17:00', end: '17:05', count: 1 }];
+  f.manager.start();
+  t.mock.timers.tick(15000);
+  await settleTimers();
+  assert.ok(finish);
+  t.mock.timers.tick(5 * 60000);
+  finish();
+  await settleTimers();
+  assert.equal(f.sends.length, 0);
+  assert.equal(f.manager.status().scheduleSlots[0].status, 'missed');
+});
+
+test('a restarted claimed slot is interrupted instead of automatically retried', (t) => {
+  const f = scheduledFixture(t);
+  f.manager.start();
+  const state = JSON.parse(fs.readFileSync(f.options.stateFile, 'utf8'));
+  state.scheduleSlots[0].status = 'running';
+  fs.writeFileSync(f.options.stateFile, JSON.stringify(state));
+  f.manager.stop();
+  const restarted = new DailyMomentsManager(f.options);
+  assert.equal(restarted.status().scheduleSlots[0].status, 'interrupted');
+});
+
+test('live configuration saves preserve overdue waiting slots without startup catchup', async (t) => {
+  const f = scheduledFixture(t);
+  f.cfg.dailyMoments.startupCatchup = false;
+  f.cfg.runtime.paused = true;
+  f.manager.start();
+  t.mock.timers.tick(15000);
+  await settleTimers();
+  const before = f.manager.status().scheduleSlots.map((slot) => slot.at);
+  t.mock.timers.tick(1000);
+  f.cfg.runtime.paused = false;
+  f.manager.reconfigure();
+  assert.equal(f.manager.status().scheduleSlots[0].status, 'pending');
+  assert.deepEqual(f.manager.status().scheduleSlots.map((slot) => slot.at), before);
+  t.mock.timers.tick(15000);
+  await settleTimers();
+  assert.equal(f.sends.length, 1);
+  assert.equal(f.manager.status().scheduleSlots[0].status, 'published');
+});
+
+test('changing an in-flight window cancels its send without replacing the new timer', async (t) => {
+  let finish;
+  let calls = 0;
+  const f = scheduledFixture(t, { complete: async () => {
+    if (++calls === 1) await new Promise((resolve) => { finish = resolve; });
+    return response(decision());
+  } });
+  f.manager.start();
+  t.mock.timers.tick(15000);
+  await settleTimers();
+  f.cfg.dailyMoments.scheduleWindows = [{ start: '17:01', end: '17:10', count: 1 }];
+  f.manager.reconfigure();
+  finish();
+  await settleTimers();
+  assert.equal(f.sends.length, 0);
+  assert.match(f.manager.status().latest.error, /计划已取消或修改/);
+  t.mock.timers.tick(60000);
+  await settleTimers();
+  assert.equal(f.sends.length, 1);
+  assert.equal(f.manager.status().latest.scheduleSlotId, `${dayKey}/17:01-17:10/1`);
 });

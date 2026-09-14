@@ -11,9 +11,10 @@
 import crypto from 'node:crypto';
 import {
   conversationConfigForChat,
-  friendProposalEnabled,
   getConfig,
   identityPilotEnabled,
+  promptFriendProposalEnabled,
+  slangPilotEnabled,
   storeConfigForChat,
   updateConfig
 } from './config.js';
@@ -26,6 +27,7 @@ import { chatCompletion, chatCompletionWithRetry, addUsage, isRetryableError } f
 import { buildToolDefs, toOpenAiTools, executeTool } from './tools.js';
 import { modelImageVerdict } from './vision-scan.js';
 import { currentProviders } from './providers.js';
+import { buildSlangContextForChat } from './asset-observer.js';
 
 function handoffParticipantIds(triggerEntries) {
   return [...new Set((triggerEntries || [])
@@ -143,7 +145,8 @@ export class Orchestrator {
     onebot,
     emit = null,
     random = Math.random,
-    getIdentityPilot = null
+    getIdentityPilot = null,
+    getIncidentPilot = null
   }) {
     this.store = store;
     this.memory = memory;
@@ -153,6 +156,9 @@ export class Orchestrator {
     this.onebot = onebot;
     this.random = random;
     this.getIdentityPilot = typeof getIdentityPilot === 'function' ? getIdentityPilot : (() => null);
+    this.getIncidentPilot = typeof getIncidentPilot === 'function'
+      ? getIncidentPilot
+      : (() => null);
     this.emit = typeof emit === 'function' ? emit : ((b) => b.emit.bind(b))(createEventBus());
     this.toolDefs = buildToolDefs();
 
@@ -179,6 +185,35 @@ export class Orchestrator {
     const key = String(reason || 'background-task');
     if (suppressed) this.proactiveSuppressions.add(key);
     else this.proactiveSuppressions.delete(key);
+  }
+
+  #chatRuntimeDecision(chatKey) {
+    const meta = this.store.getChatMeta(chatKey);
+    const pilot = this.getIncidentPilot();
+    if (pilot?.active) return pilot.chatDecision(chatKey, meta);
+    return {
+      allowed: Number(meta.held) === 0,
+      mode: 'legacy',
+      effectiveState: Number(meta.held) > 0 ? 'blocked' : 'normal',
+      reason: Number(meta.held) > 0 ? '该会话存在发送结果待确认' : ''
+    };
+  }
+
+  enforceChatControl(chatKey) {
+    const decision = this.#chatRuntimeDecision(chatKey);
+    if (decision.allowed) return decision;
+    clearTimeout(this.wakeTimers.get(chatKey));
+    this.wakeTimers.delete(chatKey);
+    this.pendingWake.delete(chatKey);
+    this.firstPendingAt.delete(chatKey);
+    const waiting = this.pendingSessions.get(chatKey);
+    if (waiting) this.#discardWaiting(waiting);
+    this.pendingSessions.delete(chatKey);
+    this.controllers.get(chatKey)?.abort(Object.assign(
+      new Error(decision.reason || '会话已被管理员阻塞'),
+      { code: 'CHAT_BLOCKED' }
+    ));
+    return decision;
   }
 
   enforceTimeControl() {
@@ -218,7 +253,8 @@ export class Orchestrator {
       if (this.paused || this.aborted) return;
       for (const key of this.store.listChats()) {
         if (canRun(key) && !this.runningChats.has(key) && !this.pendingWake.has(key)
-          && this.store.getChatMeta(key).held === 0 && this.store.unreadCount(key) > 0) this.scheduleWake(key);
+          && this.#chatRuntimeDecision(key).allowed
+          && this.store.unreadCount(key) > 0) this.scheduleWake(key);
       }
     }, 5000);
     this.retryTimer.unref?.();
@@ -229,7 +265,7 @@ export class Orchestrator {
   /** 收到新消息（已通过白名单校验并写入 store）。 */
   onIncoming(chatKey) {
     if (this.paused || this.aborted || !canRun(chatKey)) return;
-    if (this.store.getChatMeta(chatKey).held > 0) return;
+    if (!this.#chatRuntimeDecision(chatKey).allowed) return;
     if (this.runningChats.has(chatKey)) return;   // 运行结束后 drain 会接管
     this.scheduleWake(chatKey);
   }
@@ -378,6 +414,7 @@ export class Orchestrator {
 
   scheduleWake(chatKey, delay = null) {
     if (this.paused || this.aborted || !canRun(chatKey)) return;
+    if (!this.#chatRuntimeDecision(chatKey).allowed) return;
     const now = Date.now();
     if (!this.firstPendingAt.has(chatKey)) this.firstPendingAt.set(chatKey, now);
     const hardLimit = Math.min(20000, Math.max(100, Number(getConfig().maxBatchWaitMs) || 20000));
@@ -498,8 +535,9 @@ export class Orchestrator {
     if (!canRun(chatKey)) {
       return { ok: false, reason: '当前运行模式、白名单或时间控制不允许唤醒' };
     }
-    if (this.store.getChatMeta(chatKey).held > 0) {
-      return { ok: false, reason: '该会话存在发送结果待确认，请先处理后再唤醒' };
+    const chatDecision = this.#chatRuntimeDecision(chatKey);
+    if (!chatDecision.allowed) {
+      return { ok: false, reason: chatDecision.reason || '该会话当前被阻塞' };
     }
     if (this.runningChats.has(chatKey)) {
       return { ok: false, reason: '该会话正在处理中' };
@@ -536,7 +574,7 @@ export class Orchestrator {
 
   async #wake(chatKey, { proactive = false, manual = false, waitingSessionId = null } = {}) {
     if (!canRun(chatKey)) { if (waitingSessionId) this.#discardWaiting(waitingSessionId); return; }
-    if (this.store.getChatMeta(chatKey).held > 0) {
+    if (!this.#chatRuntimeDecision(chatKey).allowed) {
       if (waitingSessionId) this.#discardWaiting(waitingSessionId);
       return;
     }
@@ -700,9 +738,31 @@ export class Orchestrator {
       this.sessions.finish(session.id, status);
       this.emit('session-end', { sessionId: session.id, chatKey, status,
         sent: session.sent.length, finishReason: session.finishReason, usage: session.usage });
+      if (!manual && !proactive && triggerEntries.length > 0) {
+        const identityPilot = this.getIdentityPilot();
+        identityPilot?.handleSuccessfulTurn?.({
+          chatKey,
+          triggerEntries,
+          parentSessionId: session.id,
+          triggerReason: tierResult?.reason || '',
+          repliedThisRun: session.sent.length > 0
+        }).catch((error) => {
+          console.warn(`[identity-pilot] ${chatKey} 消息触发评估失败：${error?.message ?? error}`);
+        });
+      }
     } catch (error) {
       session.error = String(error?.message ?? error);
       const timeClosed = error?.code === 'TIME_CONTROL_INACTIVE' || !isTimeActive(chatKey);
+      if (!/Delivery uncertain; batch held/.test(session.error)) {
+        this.getIncidentPilot()?.capture(error, {
+          source: 'orchestrator',
+          category: 'session',
+          severity: timeClosed ? 'info' : 'error',
+          chatKey,
+          sessionId: session.id,
+          details: { rounds: session.rounds, sentCount: session.sent.length }
+        });
+      }
       // #region debug-point C-D:agent-run-failed
       if (chatKey === 'group:1044877051' && !process.env.NODE_TEST_CONTEXT) (() => { try { const body = JSON.stringify({ sessionId: 'group-context-overflow', runId: process.env.QQ_CONTEXT_DEBUG_RUN || 'post-fix', hypothesisId: 'C,D', location: 'src/orchestrator.js:#wake.catch', msg: '[DEBUG] Agent run failed', data: { sessionId: session.id, threadId: session.threadId || null, error: session.error.slice(0, 500), rounds: session.rounds, calls: session.usage.calls, cumulativeRunTokens: session.usage.totalTokens, promptTokens: session.usage.promptTokens, completionTokens: session.usage.completionTokens, sentCount: session.sent.length, hasEffects: lease ? this.store.hasEffects(lease.id) : false, hasUncertainEffects: lease ? this.store.hasUncertainEffects(lease.id) : false, triggerCount: triggerEntries.length }, ts: Date.now() }); const req = process.getBuiltinModule('node:http').request(process.env.QQ_CONTEXT_DEBUG_URL || 'http://192.168.31.10:7781/event', { method: 'POST', signal: AbortSignal.timeout(500), headers: { 'content-type': 'application/json' } }, (res) => res.resume()); req.on('error', () => {}); req.on('socket', (socket) => socket.unref()); req.end(body); } catch {} })();
       // #endregion
@@ -952,6 +1012,12 @@ export class Orchestrator {
     if (cfg.sticker?.enabled !== false) {
       try { stickerEntries = (await this.stickers.sync(false)).entries ?? []; } catch { stickerEntries = []; }
     }
+    const slangContext = slangPilotEnabled(cfg)
+      ? buildSlangContextForChat(chatKey, { max: 8 })
+      : '';
+    const incidentContext = this.getIncidentPilot()?.active
+      ? this.getIncidentPilot().contextForChat(chatKey, this.store.getChatMeta(chatKey))
+      : '';
 
     // 工具集按配置过滤：工具列表属于缓存前缀，必须先固定后再决定是否复用生命周期 transcript。
     const visionEnabled = cfg.api.vision !== false
@@ -959,7 +1025,7 @@ export class Orchestrator {
     const searchEnabled = cfg.webSearch?.enabled !== false;
     const identityPilot = this.getIdentityPilot();
     const identityAvailable = identityPilotEnabled(cfg) && identityPilot?.active === true;
-    const friendProposalAvailable = identityAvailable && friendProposalEnabled(cfg);
+    const friendProposalAvailable = identityAvailable && promptFriendProposalEnabled(cfg);
     const toolDefs = this.toolDefs.filter((d) => {
       if (!visionEnabled && (d.name === 'get_message_images' || d.name === 'get_sticker_image')) return false;
       if (!searchEnabled && (d.name === 'web_search' || d.name === 'web_fetch')) return false;
@@ -1030,6 +1096,8 @@ export class Orchestrator {
       store: this.store,
       memory: this.memory,
       stickerEntries,
+      slangContext,
+      incidentContext,
       selfNickname,
       selfLastMessageAt,
       lastMessageAt,
@@ -1274,6 +1342,19 @@ export class Orchestrator {
         session.webSearchCount = webSearchCount;
         markActivity(`正在调用 ${name}…`);
         const result = await executeTool(toolDefs, ctx, name, argsRaw);
+        if (
+          result.isError
+          && result.incidentCaptured !== true
+        ) {
+          this.getIncidentPilot()?.capture(new Error(String(result.content || '工具执行失败')), {
+            source: `tool:${name}`,
+            category: 'tool',
+            severity: 'warning',
+            chatKey,
+            sessionId: session.id,
+            details: { tool: name }
+          });
+        }
         // 工具结果：文本走 tool 消息；图片（parts 数组）不能塞进 tool 消息——
         // 很多 OpenAI 兼容端点不接受。做法：tool 消息只带文本，图片随后以 user 消息补发
         // （[{type:'text'},{type:'image_url'}]），这是兼容面最广的视觉输入方式。

@@ -13,10 +13,11 @@ const DEFAULT_MAX_PER_MINUTE = DEFAULT_CONFIG.send.maxPerMinute;
 const DEFAULT_MAX_PER_HOUR = DEFAULT_CONFIG.send.maxPerHour;
 
 export class SendQueue {
-  constructor({ onebot, store, onSent = null }) {
+  constructor({ onebot, store, onSent = null, onIncident = null }) {
     this.onebot = onebot;
     this.store = store;
     this.onSent = onSent;
+    this.onIncident = typeof onIncident === 'function' ? onIncident : () => {};
     this.chains = new Map();      // chatKey -> enqueue fn
     this.minuteTimes = new Map(); // chatKey -> [ts]
     this.hourTimes = new Map();   // chatKey -> [ts]
@@ -63,7 +64,23 @@ export class SendQueue {
       this.store.finishSend(id, { messageId: data?.message_id });
       return data;
     } catch (error) {
-      this.store.finishSend(id, { error: error?.message ?? error });
+      const outcome = error?.outcome === 'failed' ? 'failed' : 'unknown';
+      this.store.finishSend(id, {
+        error: error?.message ?? error,
+        outcome
+      });
+      try {
+        const incident = this.onIncident(error, {
+          source: 'sender',
+          category: 'external_write',
+          severity: outcome === 'unknown' ? 'critical' : 'error',
+          outcome,
+          chatKey,
+          operationId: id,
+          details: { type: payload?.type || 'unknown', runId: options.runId || '' }
+        });
+        if (incident && error && typeof error === 'object') error.incidentCaptured = true;
+      } catch { /* 异常记录失败不能改变原发送结果 */ }
       throw error;
     }
   }
@@ -108,7 +125,19 @@ export class SendQueue {
           signal: options.signal
         }));
         const ts = Date.now();
-        this.store.appendSelf(chatKey, { text, ts, mid: data?.message_id ?? null });
+        let targetUserId = String(options.atUserId || '');
+        if (!targetUserId && options.replyToMessageId != null) {
+          const replied = this.store.findByMid(chatKey, options.replyToMessageId);
+          if (replied && !replied.self) targetUserId = String(replied.senderId || '');
+        }
+        if (!targetUserId && kind === 'private') targetUserId = String(id);
+        this.store.appendSelf(chatKey, {
+          text,
+          ts,
+          mid: data?.message_id ?? null,
+          targetUserId,
+          eventKind: 'message'
+        });
         this.onSent?.({ chatKey, text, messageId: data?.message_id ?? null });
         return { text, messageId: data?.message_id ?? null, at: formatClockTime(ts) };
       }));
@@ -146,7 +175,19 @@ export class SendQueue {
         signal: options.signal
       }));
       const ts = Date.now();
-      this.store.appendSelf(chatKey, { text: `[表情包:${sticker.desc || sticker.localNote || sticker.id}]`, ts, mid: data?.message_id ?? null });
+      let targetUserId = String(options.atUserId || '');
+      if (!targetUserId && options.replyToMessageId != null) {
+        const replied = this.store.findByMid(chatKey, options.replyToMessageId);
+        if (replied && !replied.self) targetUserId = String(replied.senderId || '');
+      }
+      if (!targetUserId && kind === 'private') targetUserId = String(id);
+      this.store.appendSelf(chatKey, {
+        text: `[表情包:${sticker.desc || sticker.localNote || sticker.id}]`,
+        ts,
+        mid: data?.message_id ?? null,
+        targetUserId,
+        eventKind: 'message'
+      });
       this.onSent?.({ chatKey, text: `[表情包]`, messageId: data?.message_id ?? null, sticker: sticker.id });
       return { message_id: data?.message_id ?? null };
     });
@@ -163,7 +204,13 @@ export class SendQueue {
         () => this.onebot.sendPoke(kind, id, targetUserId, options.signal));
       const ts = Date.now();
       const target = kind === 'group' && targetUserId != null ? ` ${targetUserId}` : '对方';
-      this.store.appendSelf(chatKey, { text: `[拍一拍] 你拍了拍${target}`, ts, mid: data?.message_id ?? null });
+      this.store.appendSelf(chatKey, {
+        text: `[拍一拍] 你拍了拍${target}`,
+        ts,
+        mid: data?.message_id ?? null,
+        targetUserId: String(targetUserId || (kind === 'private' ? id : '')),
+        eventKind: 'poke'
+      });
       this.onSent?.({ chatKey, text: `[拍一拍]${target}`, messageId: null });
       return data;
     });

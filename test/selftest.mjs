@@ -10,6 +10,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
+import jce from 'jce';
 
 // ── 基础设施 ──
 async function freePort() {
@@ -35,6 +36,27 @@ function readBody(req) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+function encodeJceStruct(fields) {
+  return jce.encode([jce.encodeNested(fields)]);
+}
+
+function friendProtocolResponse(functionName, fields) {
+  const key = functionName === 'AddFriendReq' ? 'AFRESP' : 'FSRESP';
+  return jce.encode([
+    null,
+    3,
+    0,
+    0,
+    0,
+    'mqq.IMService.FriendListServiceServantObj',
+    functionName,
+    jce.encode([{ [key]: encodeJceStruct(fields) }]),
+    0,
+    {},
+    {}
+  ]).toString('hex');
+}
+
 async function waitFor(fn, timeoutMs = 8000, label = 'condition') {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -49,7 +71,7 @@ async function waitFor(fn, timeoutMs = 8000, label = 'condition') {
 
 // ── Mock OneBot（HTTP + WS） ──
 function createMockOneBotHttp() {
-  const state = { sends: [], pokes: [] };
+  const state = { sends: [], pokes: [], friendPackets: [], friendDecisions: [] };
   const TINY_PNG = Buffer.from('89504e470d0a1a0a0000000d4948445200000001000000010806000000', 'hex');
   const server = http.createServer(async (req, res) => {
     const body = await readBody(req);
@@ -77,6 +99,24 @@ function createMockOneBotHttp() {
       });
     }
     if (action === 'fetch_custom_face_detail') return reply([{ emoji_id: 'st1', res_id: 'st1', md5: 'aaa', desc: '滑稽', url: `http://127.0.0.1:${PORTS.onebotHttp}/img.png` }]);
+    if (action === 'send_packet') {
+      state.friendPackets.push(body);
+      if (body.cmd === 'friendlist.getUserAddFriendSetting') {
+        return reply(friendProtocolResponse('GetUserAddFriendSettingReq', [
+          888, 0, 1, [], 1, 0, Buffer.alloc(0), 0, Buffer.alloc(0)
+        ]));
+      }
+      if (body.cmd === 'friendlist.addFriend') {
+        return reply(friendProtocolResponse('AddFriendReq', [
+          888, 0, 1, 0, 0, null, 0, 0, '', Buffer.alloc(0),
+          Buffer.alloc(0), Buffer.alloc(0), Buffer.alloc(0)
+        ]));
+      }
+    }
+    if (action === 'set_friend_add_request') {
+      state.friendDecisions.push(body);
+      return reply({});
+    }
     if (action.startsWith('search')) {
       // 模拟 Bing 结果页（b_algo 块结构）
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
@@ -768,8 +808,13 @@ async function main() {
     body: JSON.stringify({
       identityPilot: {
         enabled: true,
+        incomingFriendRequest: {
+          enabled: true,
+          autoWhitelist: true
+        },
         friendProposal: {
           enabled: true,
+          mode: 'prompt',
           ownerUin: '777777',
           minMessageCount: 1,
           cooldownDays: 30,
@@ -779,6 +824,70 @@ async function main() {
     })
   });
   assert.equal(friendProposalEnable.status, 200);
+  assert.equal(app.getConfig().identityPilot.friendProposal.enabled, true);
+  assert.equal(app.getConfig().identityPilot.friendProposal.mode, 'prompt');
+
+  onebotWs.push({
+    post_type: 'request',
+    request_type: 'friend',
+    user_id: 222222,
+    self_id: 888,
+    comment: '测试入站好友申请',
+    flag: 'incoming-request-flag-1',
+    time: Math.floor(Date.now() / 1000)
+  });
+  const incomingRequest = await waitFor(async () => {
+    const response = await fetch(
+      `http://127.0.0.1:${cfg.server.port}/api/identity-pilot/incoming-friend-requests?limit=10`
+    );
+    if (!response.ok) return null;
+    const data = await response.json();
+    return data.requests?.find((item) => item.userId === '222222') || null;
+  }, 3000, '收到好友请求并持久化');
+  assert.equal(incomingRequest.status, 'pending');
+  await waitFor(() => onebotHttp.state.sends.some((send) =>
+    send.action === 'send_private_msg'
+    && send.body.user_id === 777777
+    && JSON.stringify(send.body.message).includes('收到好友请求')),
+  3000, '入站好友请求通知管理员');
+  const llmCallsBeforeIncomingApproval = llm.state.requests.length;
+  onebotWs.push({
+    post_type: 'message', message_type: 'private', user_id: 777777, self_id: 888,
+    message_id: 9749, time: Math.floor(Date.now() / 1000),
+    sender: { user_id: 777777, nickname: '管理员' },
+    message: [{
+      type: 'text',
+      data: { text: `同意好友申请 ${incomingRequest.id}` }
+    }]
+  });
+  await waitFor(async () => {
+    const data = await (await fetch(
+      `http://127.0.0.1:${cfg.server.port}/api/identity-pilot/incoming-friend-requests?limit=10`
+    )).json();
+    return data.requests?.find((item) =>
+      item.id === incomingRequest.id && item.status === 'approved');
+  }, 3000, '管理员同意入站好友请求');
+  assert.equal(llm.state.requests.length, llmCallsBeforeIncomingApproval);
+  assert.deepEqual(onebotHttp.state.friendDecisions.at(-1), {
+    flag: 'incoming-request-flag-1',
+    approve: true
+  });
+  assert.ok(app.getConfig().allow.private.map(String).includes('222222'));
+  onebotWs.push({
+    post_type: 'notice',
+    notice_type: 'friend_add',
+    user_id: 222222,
+    self_id: 888,
+    time: Math.floor(Date.now() / 1000)
+  });
+  await waitFor(async () => {
+    const data = await (await fetch(
+      `http://127.0.0.1:${cfg.server.port}/api/identity-pilot/incoming-friend-requests?limit=10`
+    )).json();
+    return data.requests?.find((item) =>
+      item.id === incomingRequest.id && item.status === 'accepted');
+  }, 3000, '入站好友请求 friend_add 闭环');
+
   const proposal = await app.identityPilot.proposeFriend({
     userId: '111',
     chatKey: 'group:456',
@@ -826,8 +935,82 @@ async function main() {
     )).json();
     return data.proposals[0]?.status === 'accepted';
   }, 3000, '好友成功事件闭环');
+
+  const enableFriendDispatch = await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/config`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        identityPilot: {
+          enabled: true,
+          friendProposal: { activeDispatchEnabled: true }
+        }
+      })
+    }
+  );
+  assert.equal(enableFriendDispatch.status, 200);
+  app.onebot.selfInfo = { user_id: 888888, nickname: '审计Bot' };
+  const dispatchIdentity = {
+    mid: 9755,
+    ts: Date.now(),
+    senderId: '113113',
+    senderName: '主动发送候选',
+    text: '测试主动发送',
+    self: false
+  };
+  app.store.appendIncoming('group:456', dispatchIdentity);
+  app.identityPilot.observeMessage('group:456', dispatchIdentity);
+  const dispatchedProposal = await app.identityPilot.proposeFriend({
+    userId: '113113',
+    chatKey: 'group:456',
+    reasonCode: 'frequent',
+    reason: '测试主动发送链路',
+    verificationMessage: '继续聊'
+  });
+  const dispatchResponse = await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/identity-pilot/friend-proposals/${dispatchedProposal.proposal.id}/decision`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ decision: 'approve' })
+    }
+  );
+  const dispatchBody = await dispatchResponse.json();
+  assert.equal(dispatchResponse.status, 200, JSON.stringify(dispatchBody));
+  assert.equal(dispatchBody.execution, 'sent', JSON.stringify(dispatchBody));
+  assert.equal(dispatchBody.proposal.status, 'sent', JSON.stringify(dispatchBody));
+  assert.deepEqual(onebotHttp.state.friendPackets.slice(-2).map((packet) => packet.cmd), [
+    'friendlist.getUserAddFriendSetting',
+    'friendlist.addFriend'
+  ]);
+  onebotWs.push({
+    post_type: 'notice',
+    notice_type: 'friend_add',
+    user_id: 113113,
+    self_id: 888,
+    time: Math.floor(Date.now() / 1000)
+  });
+  await waitFor(async () => {
+    const data = await (await fetch(
+      `http://127.0.0.1:${cfg.server.port}/api/identity-pilot/friend-proposals?limit=10`
+    )).json();
+    return data.proposals.some((item) =>
+      item.id === dispatchedProposal.proposal.id && item.status === 'accepted');
+  }, 3000, '主动好友申请成功事件闭环');
+
+  const rejectedIdentity = {
+    mid: 9760,
+    ts: Date.now(),
+    senderId: '116116',
+    senderName: '拒绝候选',
+    text: '测试拒绝',
+    self: false
+  };
+  app.store.appendIncoming('group:456', rejectedIdentity);
+  app.identityPilot.observeMessage('group:456', rejectedIdentity);
   const rejectedProposal = await app.identityPilot.proposeFriend({
-    userId: '113',
+    userId: '116116',
     chatKey: 'group:456',
     reasonCode: 'banter',
     reason: '测试控制台拒绝路径'
@@ -855,7 +1038,7 @@ async function main() {
   assert.equal((await fetch(
     `http://127.0.0.1:${cfg.server.port}/api/identity-pilot/friend-proposals`
   )).status, 409);
-  pass('统一 QQ 身份库：默认无副作用、主动好友审批闭环、关闭停止运行');
+  pass('统一 QQ 身份库：入站审批、主动好友闭环、白名单同步与关闭无副作用');
 
   const assetOverview = await (await fetch(
     `http://127.0.0.1:${cfg.server.port}/api/assets/overview`
@@ -887,7 +1070,299 @@ async function main() {
     `http://127.0.0.1:${cfg.server.port}/api/assets/stickers/image?id=missing`
   );
   assert.equal(missingStickerImage.status, 404);
-  pass('AI 资产观测：表情包、黑话状态、人物和记忆接口');
+
+  const oversizedAssetBody = JSON.stringify({
+    padding: 'x'.repeat(2 * 1024 * 1024)
+  });
+  for (const [method, assetPath] of [
+    ['PUT', '/api/assets/stickers/missing'],
+    ['DELETE', '/api/assets/stickers/missing'],
+    ['POST', '/api/assets/slang'],
+    ['PUT', '/api/assets/slang/missing'],
+    ['DELETE', '/api/assets/slang/missing'],
+    ['POST', '/api/assets/identities'],
+    ['PUT', '/api/assets/identities/123456'],
+    ['DELETE', '/api/assets/identities/123456'],
+    ['POST', '/api/assets/memory'],
+    ['PUT', '/api/assets/memory'],
+    ['DELETE', '/api/assets/memory']
+  ]) {
+    const response = await fetch(`http://127.0.0.1:${cfg.server.port}${assetPath}`, {
+      method,
+      headers: { 'content-type': 'application/json' },
+      body: oversizedAssetBody
+    });
+    assert.equal(response.status, 413, `${method} ${assetPath} 应保留请求体过大状态`);
+  }
+
+  const createSticker = await fetch(`http://127.0.0.1:${cfg.server.port}/api/assets/stickers`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      imageDataUrl: `data:image/png;base64,${Buffer.from('89504e470d0a1a0a00000000', 'hex').toString('base64')}`,
+      desc: '手动表情',
+      localNote: '初始备注',
+      tags: ['测试']
+    })
+  });
+  assert.equal(createSticker.status, 201);
+  const createdSticker = (await createSticker.json()).entry;
+  assert.equal(createdSticker.source, 'manual');
+  assert.equal('localFile' in createdSticker, false);
+  const updateSticker = await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/assets/stickers/${createdSticker.id}`,
+    {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ localNote: '更新备注', tags: ['测试', '更新'] })
+    }
+  );
+  assert.equal(updateSticker.status, 200);
+  assert.equal((await updateSticker.json()).entry.localNote, '更新备注');
+  assert.equal((await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/assets/stickers/image?id=${createdSticker.id}`
+  )).status, 200);
+  const deleteSticker = await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/assets/stickers/${createdSticker.id}`,
+    {
+      method: 'DELETE',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ confirm: true })
+    }
+  );
+  assert.equal(deleteSticker.status, 200);
+  assert.deepEqual(await deleteSticker.json(), {
+    ok: true,
+    removed: true,
+    cleanupPending: false,
+    warning: ''
+  });
+
+  const createSlang = await fetch(`http://127.0.0.1:${cfg.server.port}/api/assets/slang`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ content: '测试黑话', meaning: '用于回归', status: 'candidate' })
+  });
+  assert.equal(createSlang.status, 201);
+  const createdSlang = (await createSlang.json()).entry;
+  const updateSlang = await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/assets/slang/${createdSlang.id}`,
+    {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ status: 'confirmed', meaning: '已确认的回归词条' })
+    }
+  );
+  assert.equal(updateSlang.status, 200);
+  assert.equal((await updateSlang.json()).entry.status, 'confirmed');
+  assert.equal((await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/assets/slang/${createdSlang.id}`,
+    {
+      method: 'DELETE',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ confirm: true })
+    }
+  )).status, 200);
+
+  const createIdentity = await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/assets/identities`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        userId: '123456',
+        primaryName: '手动人物',
+        chatKey: 'group:456',
+        profileNote: '测试画像'
+      })
+    }
+  );
+  assert.equal(createIdentity.status, 201);
+  assert.equal((await createIdentity.json()).person.manuallyManaged, true);
+  const updateIdentity = await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/assets/identities/123456`,
+    {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        primaryName: '修改后人物',
+        chatKey: 'group:456',
+        profileNote: '修改后画像',
+        isFriend: true
+      })
+    }
+  );
+  assert.equal(updateIdentity.status, 200);
+  assert.equal((await updateIdentity.json()).person.primaryName, '修改后人物');
+  assert.equal((await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/assets/identities/123456`,
+    {
+      method: 'DELETE',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ confirm: true })
+    }
+  )).status, 200);
+
+  const createMemory = await fetch(`http://127.0.0.1:${cfg.server.port}/api/assets/memory`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      chatKey: 'group:456',
+      userId: '123456',
+      name: '记忆人物',
+      content: '新增的资产记忆'
+    })
+  });
+  assert.equal(createMemory.status, 201);
+  const updateMemory = await fetch(`http://127.0.0.1:${cfg.server.port}/api/assets/memory`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      chatKey: 'group:456',
+      userId: '123456',
+      name: '记忆人物',
+      impressions: ['修改后的资产记忆']
+    })
+  });
+  assert.equal(updateMemory.status, 200);
+  const memoryAfterUpdate = await (await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/assets/memory?query=${encodeURIComponent('修改后的资产记忆')}`
+  )).json();
+  assert.equal(memoryAfterUpdate.entries[0].impressions[0].content, '修改后的资产记忆');
+  assert.equal((await fetch(`http://127.0.0.1:${cfg.server.port}/api/assets/memory`, {
+    method: 'DELETE',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ confirm: true, chatKey: 'group:456', userId: '123456' })
+  })).status, 200);
+  pass('AI 资产观测：表情包、黑话、人物和记忆均可增删改');
+
+  const slangPilotDb = path.join(dataDir, 'slang-pilot.sqlite');
+  assert.equal(fs.existsSync(slangPilotDb), false,
+    '黑话试点未启用时不得创建数据库');
+  const enableSlangPilot = await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/config`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        slangPilot: {
+          enabled: true,
+          ownerUin: '777777',
+          minOccurrences: 2,
+          minSpeakers: 2,
+          windowHours: 72,
+          maxPending: 10,
+          perChatDailyLimit: 5,
+          rejectCooldownDays: 14,
+          maxEvidence: 12,
+          webResearch: false,
+          maxSearchResults: 5,
+          maxFetchPages: 0,
+          maxResearchRounds: 2
+        }
+      })
+    }
+  );
+  assert.equal(enableSlangPilot.status, 200);
+  assert.equal(app.slangPilotStatus().active, true);
+  assert.equal(fs.existsSync(slangPilotDb), true);
+  const slangOverview = await (await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/assets/overview`
+  )).json();
+  assert.equal(slangOverview.slang.active, true);
+  assert.equal(slangOverview.slangPilot.active, true);
+  const modelCallsBeforeSlangApproval = llm.state.requests.length;
+  app.slangPilot.observeMessage('group:456', {
+    id: 9801,
+    ts: Date.now(),
+    senderId: '111',
+    senderName: '成员甲',
+    text: '无名剑法'
+  });
+  app.slangPilot.observeMessage('group:456', {
+    id: 9802,
+    ts: Date.now() + 1,
+    senderId: '222',
+    senderName: '成员乙',
+    text: '无名剑法'
+  });
+  const slangDiscovery = await waitFor(async () => {
+    const response = await fetch(
+      `http://127.0.0.1:${cfg.server.port}/api/slang-pilot/discoveries?state=pending_research`
+    );
+    if (!response.ok) return null;
+    const data = await response.json();
+    return data.discoveries?.[0] || null;
+  }, 3000, '黑话本地提取进入待研究审批');
+  assert.equal(llm.state.requests.length, modelCallsBeforeSlangApproval,
+    '管理员批准研究前不得调用模型');
+  llm.state.script.push({
+    content: JSON.stringify({
+      canonical: '无名剑法',
+      meaning: '群内调侃没有固定套路的说法',
+      usage: '接梗时使用',
+      example: '这就是无名剑法',
+      nonExample: '',
+      origin: '',
+      risk: '仅限原群语境',
+      variants: [],
+      recommendedScope: 'chat-private',
+      confidence: 0.9,
+      evidenceAssessment: '两位群友重复使用'
+    })
+  });
+  const approveResearch = await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/slang-pilot/discoveries/${slangDiscovery.id}/research-decision`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        decision: 'approve',
+        expectedVersion: slangDiscovery.version
+      })
+    }
+  );
+  assert.equal(approveResearch.status, 200);
+  const researchedSlang = await waitFor(async () => {
+    const data = await (await fetch(
+      `http://127.0.0.1:${cfg.server.port}/api/slang-pilot/discoveries/${slangDiscovery.id}`
+    )).json();
+    return data.discovery?.state === 'pending_admission' ? data.discovery : null;
+  }, 3000, '黑话研究完成等待入库');
+  assert.equal(llm.state.requests.length, modelCallsBeforeSlangApproval + 1);
+  const admitSlang = await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/slang-pilot/discoveries/${slangDiscovery.id}/admission-decision`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        decision: 'approve',
+        expectedVersion: researchedSlang.version,
+        edits: { meaning: '管理员确认后的群内说法', scope: 'chat-private' }
+      })
+    }
+  );
+  assert.equal(admitSlang.status, 200);
+  const admittedBody = await admitSlang.json();
+  assert.equal(admittedBody.discovery.state, 'admitted_candidate');
+  assert.equal(admittedBody.entry.status, 'candidate');
+  assert.equal(admittedBody.entry.meaning, '管理员确认后的群内说法');
+  assert.equal((await fetch(
+    `http://127.0.0.1:${cfg.server.port}/api/assets/slang/${admittedBody.entry.id}`,
+    {
+      method: 'DELETE',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ confirm: true })
+    }
+  )).status, 200);
+  await fetch(`http://127.0.0.1:${cfg.server.port}/api/config`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ slangPilot: { enabled: false } })
+  });
+  assert.equal(app.slangPilotStatus().active, false);
+  assert.equal(fs.existsSync(slangPilotDb), true, '关闭后保留已建立的审计库');
+  pass('黑话语料库：零 Token 提取、两级审批、隔离研究与候选入库');
 
   const integrations = await (await fetch(
     `http://127.0.0.1:${cfg.server.port}/api/integrations/status`

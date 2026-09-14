@@ -25,8 +25,14 @@ function makeEl(id = '', cls = '') {
     checked: false,
     children: [],
     classList: null,
-    addEventListener() {},
-    removeEventListener() {},
+    addEventListener(type, handler) {
+      (el._listeners ||= {})[type] ||= [];
+      el._listeners[type].push(handler);
+    },
+    removeEventListener(type, handler) {
+      if (!el._listeners?.[type]) return;
+      el._listeners[type] = el._listeners[type].filter((entry) => entry !== handler);
+    },
     // 返回可用子元素而非 null —— 弹窗代码会拿它调 addEventListener。
     // ⚠️ 同一个 selector 必须返回**同一个**元素：updateUsagePage 用
     //    box.querySelector('[data-field="cost"]').textContent = v 填值，
@@ -116,7 +122,7 @@ try {
     'renderChatSection', 'renderDesktopSection', 'renderOnebotSection',
     'renderPersonaPicker', 'renderHealthCard',
     'renderAssetSummary', 'renderStickerAssets', 'renderSlangAssets',
-    'renderIdentityAssets', 'renderMemoryAssets'
+    'renderSlangResearch', 'renderIdentityAssets', 'renderMemoryAssets'
   ];
 
   // 直接用后端的 DEFAULT_CONFIG 做桩 —— 不要手敲字段名，
@@ -194,13 +200,84 @@ try {
     'cfg-moments-max-messages', 'cfg-moments-images',
     'cfg-moments-max-images', 'cfg-moments-research', 'cfg-moments-rounds',
     'daily-moments-preview-btn', 'daily-moments-run-btn', 'daily-moments-status'
-  ].every((id) => momentsHtml.includes(`id="${id}"`));
+  ].every((id) => momentsHtml.includes(`id="${id}"`))
+    && code.includes('confirmDuplicateRisk: action')
+    && code.includes('confirmDuplicateRisk: publish');
   if (momentControls) {
     pass++;
     console.log('  OK    每日动态调度、研究、配图和手动执行控件完整');
   } else {
     fail++;
     console.log('  FAIL  每日动态设置控件缺失');
+  }
+  const windowHtml = ctx.renderDailyMomentsSection({
+    ...cfg,
+    dailyMoments: {
+      ...cfg.dailyMoments,
+      scheduleWindows: [
+        { start: '12:00', end: '14:00', count: 2 },
+        { start: '23:00', end: '01:00', count: 3 }
+      ]
+    }
+  });
+  const scheduleHtml = ctx.renderMomentSchedule({
+    lastScheduleCheck: { reason: '<check>' },
+    scheduleSlots: [{
+      dayKey: '2026-09-14', windowKey: '23:00-01:00',
+      at: Date.parse('2026-09-15T00:15:00+08:00'),
+      status: 'pending', reason: '<reason>'
+    }, {
+      dayKey: '2026-09-14', windowKey: '12:00-14:00',
+      at: Date.parse('2026-09-14T12:15:00+08:00'),
+      status: 'missed', reason: ''
+    }]
+  });
+  const momentUiChecks = [
+    ['旧配置保留固定时刻模式',
+      /value="fixed" selected/.test(momentsHtml)
+      && /id="moment-random-windows" hidden/.test(momentsHtml)],
+    ['多个随机范围、跨午夜与每段条数正确回显',
+      /value="windows" selected/.test(windowHtml)
+      && /id="moment-fixed-time" hidden/.test(windowHtml)
+      && (windowHtml.match(/class="moment-window-row"/g) || []).length === 2
+      && ['12:00', '14:00', '23:00', '01:00'].every((time) => windowHtml.includes(`value="${time}"`))
+      && /moment-window-count[^>]*value="2"/.test(windowHtml)
+      && /moment-window-count[^>]*value="3"/.test(windowHtml)
+      && windowHtml.includes('id="moment-window-add"')
+      && windowHtml.includes('aria-label="删除时间范围"')],
+    ['随机计划显示日期、状态并转义原因',
+      scheduleHtml.includes('2026-09-14')
+      && scheduleHtml.includes('23:00-01:00')
+      && scheduleHtml.includes('待执行')
+      && scheduleHtml.includes('已错过窗口')
+      && scheduleHtml.includes('&lt;check&gt;')
+      && scheduleHtml.includes('&lt;reason&gt;')
+      && !scheduleHtml.includes('<reason>')],
+    ['固定模式无空计划表', !ctx.renderMomentSchedule({}).includes('<table')]
+  ];
+  for (const [name, ok] of momentUiChecks) {
+    ok ? pass++ : fail++;
+    console.log('  ' + (ok ? 'OK    ' : 'FAIL  ') + name);
+  }
+  const momentFetch = sandbox.fetch;
+  sandbox.fetch = async () => ({
+    ok: true, json: async () => ({
+      enabled: true, running: false, scheduleSlots: [], latest: null,
+      records: [
+        { id: 'auto', dayKey: '2026-09-14', source: 'scheduled', status: 'published' },
+        { id: 'manual', dayKey: '2026-09-14', source: 'manual-preview', status: 'published' }
+      ]
+    })
+  });
+  try {
+    await ctx.loadDailyMomentsStatus();
+    const statusHtml = store.get('#daily-moments-status').innerHTML;
+    const ok = statusHtml.includes('<th>来源</th>')
+      && statusHtml.includes('<td>定时</td>') && statusHtml.includes('<td>手动</td>');
+    ok ? pass++ : fail++;
+    console.log('  ' + (ok ? 'OK    ' : 'FAIL  ') + '动态历史区分手动与定时来源');
+  } finally {
+    sandbox.fetch = momentFetch;
   }
   const interactionsHtml = ctx.renderQzoneInteractionSection(cfg);
   const interactionControls = [
@@ -211,7 +288,12 @@ try {
     'cfg-qzi-max-likes', 'cfg-qzi-max-comments', 'cfg-qzi-max-replies',
     'qzi-run-feed-btn', 'qzi-run-reply-btn', 'qzone-interactions-status'
   ].every((id) => interactionsHtml.includes(`id="${id}"`));
-  if (interactionControls && !/id="cfg-qzi-enabled" checked/.test(interactionsHtml)) {
+  if (
+    interactionControls
+    && !/id="cfg-qzi-enabled" checked/.test(interactionsHtml)
+    && code.includes('对应动态')
+    && code.includes('record.details')
+  ) {
     pass++;
     console.log('  OK    动态互动默认关闭，调度、限额和手动执行控件完整');
   } else {
@@ -223,53 +305,103 @@ try {
     ...cfg,
     identityPilot: {
       enabled: true,
+      graduated: true,
+      incomingFriendRequest: {
+        enabled: true,
+        autoWhitelist: true,
+        maxPending: 50
+      },
       friendProposal: {
         enabled: true,
+        graduated: true,
+        activeDispatchEnabled: true,
         ownerUin: '2948771712',
         minMessageCount: 50,
         cooldownDays: 30,
         maxPending: 10
       }
+    },
+    slangPilot: {
+      enabled: true,
+      graduated: false,
+      ownerUin: '2948771712',
+      minOccurrences: 3,
+      minSpeakers: 2,
+      windowHours: 72,
+      maxPending: 100,
+      perChatDailyLimit: 5,
+      rejectCooldownDays: 14,
+      maxEvidence: 12,
+      webResearch: true,
+      maxSearchResults: 5,
+      maxFetchPages: 2,
+      maxResearchRounds: 2
+    },
+    incidentPilot: {
+      enabled: true,
+      graduated: true,
+      ownerUin: '2948771712',
+      notifyWarnings: true,
+      duplicateWindowMinutes: 10,
+      unknownWritesBlockChat: false,
+      retentionDays: 90
     }
   });
   if (
     experimentalHtml.includes('id="cfg-identity-pilot-enabled"')
-    && experimentalHtml.includes('已关闭 · 当前系统行为不变')
-    && experimentalHtml.includes('id="identity-pilot-stats" hidden')
-    && experimentalHtml.includes('id="identity-pilot-people" hidden')
+    && experimentalHtml.includes('id="cfg-auto-friend-enabled"')
+    && experimentalHtml.includes('id="cfg-slang-pilot-enabled"')
+    && experimentalHtml.includes('id="cfg-incident-pilot-enabled"')
     && !/id="cfg-identity-pilot-enabled" checked/.test(experimentalHtml)
     && /id="cfg-identity-pilot-enabled" checked/.test(experimentalOnHtml)
-    && experimentalOnHtml.includes('正在读取统一身份库')
-    && experimentalOnHtml.includes('data-identity-stat="people"')
-    && experimentalOnHtml.includes('data-identity-stat="memories"')
-    && experimentalOnHtml.includes('id="cfg-identity-friend-enabled" checked')
-    && experimentalOnHtml.includes('id="cfg-identity-friend-owner"')
-    && experimentalOnHtml.includes('id="cfg-identity-friend-min-messages"')
-    && experimentalOnHtml.includes('id="cfg-identity-friend-cooldown"')
-    && experimentalOnHtml.includes('id="identity-friend-proposals"')
+    && experimentalOnHtml.includes('id="cfg-slang-pilot-enabled" checked')
+    && experimentalOnHtml.includes('id="cfg-incident-pilot-enabled" checked')
+    && experimentalHtml.includes('id="launch-identity-feature"')
+    && experimentalHtml.includes('固化上线')
+    && experimentalHtml.includes('id="launch-auto-friend-feature"')
+    && experimentalHtml.includes('id="launch-slang-feature"')
+    && experimentalHtml.includes('id="launch-incident-feature"')
+    && experimentalOnHtml.includes('人物统一印象')
+    && experimentalOnHtml.includes('自动好友添加')
+    && experimentalOnHtml.includes('已固化')
+    && !experimentalHtml.includes('id="identity-pilot-stats"')
+    && !experimentalHtml.includes('id="identity-pilot-people"')
+    && !experimentalHtml.includes('id="cfg-identity-friend-owner"')
+    && !experimentalHtml.includes('id="cfg-slang-owner"')
+    && !experimentalHtml.includes('data-open-feature')
   ) {
     pass++;
-    console.log('  OK    人物画像实验总开关默认关闭并可展示开启状态');
+    console.log('  OK    实验页只保留启用与固化动作');
   } else {
     fail++;
     console.log('  FAIL  人物画像实验总开关缺失或默认状态错误');
   }
   const pilotPatchFn = ctx.identityPilotSettingsPatch || sandbox.identityPilotSettingsPatch;
-  const pilotOnPatch = pilotPatchFn(cfg, true, {
-    enabled: true,
-    ownerUin: '2948771712',
-    minMessageCount: 80
-  });
+  const pilotOnPatch = pilotPatchFn(
+    cfg,
+    true,
+    {
+      enabled: true,
+      activeDispatchEnabled: true,
+      ownerUin: '2948771712',
+      minMessageCount: 80
+    },
+    { enabled: true, autoWhitelist: true, maxPending: 25 }
+  );
   const pilotOffPatch = pilotPatchFn({ ...cfg, identityPilot: { enabled: true } }, false);
   if (
     pilotOnPatch.enabled === true
     && pilotOffPatch.enabled === false
     && pilotOnPatch.friendProposal.enabled === true
+    && pilotOnPatch.friendProposal.activeDispatchEnabled === true
     && pilotOnPatch.friendProposal.ownerUin === '2948771712'
     && pilotOnPatch.friendProposal.minMessageCount === 80
+    && pilotOnPatch.incomingFriendRequest.enabled === true
+    && pilotOnPatch.incomingFriendRequest.autoWhitelist === true
+    && pilotOnPatch.incomingFriendRequest.maxPending === 25
     && pilotOffPatch.friendProposal.enabled === undefined
-    && Object.keys(pilotOnPatch).length === 2
-    && Object.keys(pilotOffPatch).length === 2
+    && Object.keys(pilotOnPatch).length === 4
+    && Object.keys(pilotOffPatch).length === 3
   ) {
     pass++;
     console.log('  OK    实验总开关与主动好友候选生成最小配置补丁');
@@ -277,10 +409,140 @@ try {
     fail++;
     console.log('  FAIL  实验功能保存补丁不正确');
   }
+  const launchPatchFn =
+    ctx.experimentalFeatureLaunchPatch || sandbox.experimentalFeatureLaunchPatch;
+  const identityLaunchPatch = launchPatchFn(cfg, 'identity');
+  const friendLaunchPatch = launchPatchFn(cfg, 'auto-friend', '2948771712');
+  const slangLaunchPatch = launchPatchFn(cfg, 'slang', '2948771712');
+  const incidentLaunchPatch = launchPatchFn(cfg, 'incidents', '2948771712');
+  if (
+    identityLaunchPatch.identityPilot.enabled === true
+    && identityLaunchPatch.identityPilot.graduated === true
+    && Object.keys(identityLaunchPatch).length === 1
+    && friendLaunchPatch.identityPilot.enabled === true
+    && friendLaunchPatch.identityPilot.friendProposal.enabled === true
+    && friendLaunchPatch.identityPilot.friendProposal.graduated === true
+    && friendLaunchPatch.identityPilot.friendProposal.activeDispatchEnabled === true
+    && friendLaunchPatch.identityPilot.friendProposal.ownerUin === '2948771712'
+    && friendLaunchPatch.identityPilot.incomingFriendRequest.enabled === true
+    && friendLaunchPatch.identityPilot.incomingFriendRequest.autoWhitelist === true
+    && Object.keys(friendLaunchPatch).length === 1
+    && slangLaunchPatch.slangPilot.enabled === true
+    && slangLaunchPatch.slangPilot.graduated === true
+    && slangLaunchPatch.slangPilot.ownerUin === '2948771712'
+    && incidentLaunchPatch.incidentPilot.enabled === true
+    && incidentLaunchPatch.incidentPilot.graduated === true
+    && incidentLaunchPatch.incidentPilot.ownerUin === '2948771712'
+  ) {
+    pass++;
+    console.log('  OK    实验功能支持人物印象与自动好友添加一键上线');
+  } else {
+    fail++;
+    console.log('  FAIL  实验功能一键上线补丁不正确');
+  }
+  const featureConfig = {
+    ...cfg,
+    identityPilot: {
+      ...cfg.identityPilot,
+      enabled: true,
+      graduated: true,
+      incomingFriendRequest: { ...cfg.identityPilot.incomingFriendRequest, enabled: true },
+      friendProposal: {
+        ...cfg.identityPilot.friendProposal,
+        enabled: true,
+        graduated: true,
+        activeDispatchEnabled: true,
+        ownerUin: '2948771712'
+      }
+    }
+  };
+  ctx.renderIdentityFeaturePage(
+    { active: true, people: 1, aliases: 2, sources: 1, legacyMemories: 1, friends: 0 },
+    {
+      exists: true,
+      entries: [{
+        userId: '123456', primaryName: '测试人物', aliases: ['别名'],
+        chatCount: 1, messageCount: 5, legacyMemoryCount: 1
+      }]
+    },
+    {
+      entries: [{
+        chatKey: 'group:123', userId: '123456', name: '测试人物',
+        impressions: [{ content: '旧印象内容' }], updatedAt: Date.now()
+      }]
+    }
+  );
+  ctx.renderFriendFeaturePage(featureConfig, {
+    active: true,
+    friendProposal: { protocolNote: '可用', counts: { pending: 1, sent: 2 } },
+    incomingFriendRequest: { counts: { pending: 3 } }
+  });
+  ctx.renderSlangFeaturePage(featureConfig, { active: false, enabled: false });
+  ctx.renderIncidentFeaturePage({
+    ...featureConfig,
+    incidentPilot: {
+      ...cfg.incidentPilot,
+      enabled: true,
+      graduated: true,
+      ownerUin: '2948771712'
+    }
+  }, {
+    active: true,
+    exists: true,
+    counts: { open: 1, acknowledged: 0, resolved: 0, critical: 1 },
+    pendingNotifications: 0
+  }, [{
+    id: 'inc_1234567890abcdef',
+    code: 'TEST_ERROR',
+    severity: 'critical',
+    source: 'test',
+    chatKey: 'group:123',
+    message: '<script>alert(1)</script>',
+    count: 1,
+    state: 'open',
+    lastAt: Date.now()
+  }]);
+  const dedicatedFeaturePagesOk =
+    indexHtml.includes('data-tab="identity"')
+    && indexHtml.includes('id="view-identity"')
+    && indexHtml.includes('data-tab="friends"')
+    && indexHtml.includes('id="view-friends"')
+    && indexHtml.includes('data-tab="slang"')
+    && indexHtml.includes('id="view-slang"')
+    && indexHtml.includes('data-tab="incidents"')
+    && indexHtml.includes('id="view-incidents"')
+    && store.get('#identity-page').innerHTML.includes('人物统一印象')
+    && store.get('#identity-page').innerHTML.includes('旧印象内容')
+    && store.get('#friend-page').innerHTML.includes('好友管理')
+    && store.get('#friend-page').innerHTML.includes('cfg-identity-friend-owner')
+    && store.get('#friend-page').innerHTML.includes('cfg-identity-friend-mode')
+    && store.get('#friend-page').innerHTML.includes('cfg-friend-trigger-probability')
+    && store.get('#friend-page').innerHTML.includes('cfg-friend-trigger-min-exchanges')
+    && store.get('#friend-page').innerHTML.includes('cfg-friend-trigger-friend-age')
+    && store.get('#friend-page').innerHTML.includes('cfg-friend-trigger-skip-cooldown')
+    && store.get('#friend-page').innerHTML.includes('cfg-friend-trigger-threshold')
+    && store.get('#friend-page').innerHTML.includes('cfg-friend-weight-quality')
+    && store.get('#friend-page').innerHTML.includes('已经是好友的用户不会进入抽签')
+    && store.get('#friend-page').innerHTML.includes('identity-friend-proposals')
+    && store.get('#friend-page').innerHTML.includes('identity-friend-opportunities')
+    && store.get('#slang-page').innerHTML.includes('黑话研究')
+    && store.get('#slang-page').innerHTML.includes('cfg-slang-owner')
+    && store.get('#incident-page').innerHTML.includes('异常日志')
+    && store.get('#incident-page').innerHTML.includes('cfg-incident-owner')
+    && store.get('#incident-page').innerHTML.includes('&lt;script&gt;alert(1)&lt;/script&gt;')
+    && !store.get('#incident-page').innerHTML.includes('<script>alert(1)</script>');
+  if (dedicatedFeaturePagesOk) {
+    pass++;
+    console.log('  OK    固化实验功能拥有独立业务页面');
+  } else {
+    fail++;
+    console.log('  FAIL  固化实验功能独立页面不完整');
+  }
   const assetSummaryHtml = ctx.renderAssetSummary({
     generatedAt: Date.now(),
     stickers: { enabled: true, total: 3, annotated: 2, used: 1 },
     slang: { exists: true, active: false, total: 4 },
+    slangPilot: { active: true, pendingResearch: 2, pendingAdmission: 1 },
     identity: { enabled: true, active: true, people: 5 },
     memory: { chats: 2, people: 3, impressions: 6 }
   });
@@ -293,18 +555,71 @@ try {
   const slangAssetHtml = ctx.renderSlangAssets({
     exists: true,
     entries: [{
-      content: '开香槟', meaning: '提前庆祝', status: 'confirmed',
+      id: 'slang-1', content: '开香槟', meaning: '提前庆祝', status: 'confirmed',
       risk: '', count: 3, evidenceCount: 1
+    }]
+  });
+  const slangResearchHtml = ctx.renderSlangResearch({
+    discoveries: [{
+      id: 'sr_123456789abc',
+      displayTerm: '无名剑法',
+      scopeChatKey: 'group:123',
+      occurrenceCount: 4,
+      speakerCount: 2,
+      state: 'pending_research',
+      evidence: [{ text: '这就是无名剑法' }]
+    }, {
+      id: 'sr_abcdef123456',
+      displayTerm: '开香槟',
+      scopeChatKey: 'group:123',
+      occurrenceCount: 5,
+      speakerCount: 3,
+      state: 'pending_admission',
+      evidence: [{ text: '先别开香槟' }],
+      research: { meaning: '提前庆祝' }
+    }]
+  });
+  const identityAssetHtml = ctx.renderIdentityAssets({
+    exists: true,
+    entries: [{
+      userId: '123456', primaryName: '测试人物', aliases: ['别名'],
+      chatCount: 2, messageCount: 10, isFriend: false,
+      profileNote: '画像备注', manuallyManaged: true
+    }]
+  });
+  const memoryAssetHtml = ctx.renderMemoryAssets({
+    entries: [{
+      chatKey: 'group:123', userId: '123456', name: '测试人物',
+      impressions: [{ content: '长期记忆' }], updatedAt: Date.now()
     }]
   });
   const assetUiOk =
     indexHtml.includes('data-tab="assets"')
     && indexHtml.includes('id="view-assets"')
-    && assetSummaryHtml.includes('统一人物')
+    && !assetSummaryHtml.includes('统一人物')
+    && !assetSummaryHtml.includes('会话印象')
     && stickerAssetHtml.includes('/api/assets/stickers/image?id=sticker-1')
+    && stickerAssetHtml.includes('asset-edit')
+    && stickerAssetHtml.includes('asset-delete')
     && !stickerAssetHtml.includes('https://')
     && slangAssetHtml.includes('开香槟')
-    && slangAssetHtml.includes('已确认');
+    && slangAssetHtml.includes('已确认')
+    && slangResearchHtml.includes('无名剑法')
+    && slangResearchHtml.includes('研究')
+    && slangResearchHtml.includes('查看并收录')
+    && typeof ctx.openSlangResearchDetail === 'function'
+    && typeof ctx.openSlangAdmissionEditor === 'function'
+    && code.includes('/api/slang-pilot/discoveries')
+    && identityAssetHtml.includes('画像备注')
+    && identityAssetHtml.includes('人工维护')
+    && memoryAssetHtml.includes('长期记忆')
+    && typeof ctx.openAssetEditor === 'function'
+    && typeof ctx.deleteAsset === 'function'
+    && code.includes('id="asset-add"')
+    && code.includes('/api/assets/stickers/')
+    && code.includes('/api/assets/slang/')
+    && code.includes('/api/assets/identities/')
+    && code.includes('/api/assets/memory');
   if (assetUiOk) {
     pass++;
     console.log('  OK    AI 资产观测入口、概览、表情和黑话视图完整');
@@ -312,6 +627,70 @@ try {
     fail++;
     console.log('  FAIL  AI 资产观测视图缺失或泄露了图片源 URL');
   }
+
+  const originalFetch = sandbox.fetch;
+  const assetDeleteCalls = [];
+  sandbox.fetch = async (url, options = {}) => {
+    if (options.method === 'DELETE') {
+      assetDeleteCalls.push({
+        url: String(url),
+        body: JSON.parse(options.body || '{}')
+      });
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ chats: [], entries: [] }),
+      text: async () => ''
+    };
+  };
+  const assetDeleteCases = [
+    ['stickers', { id: 'sticker-1', desc: '测试表情' }],
+    ['slang', { id: 'slang-1', content: '测试黑话' }],
+    ['identities', { userId: '123456', primaryName: '测试人物' }],
+    ['memory', { chatKey: 'group:123', userId: '123456', name: '测试人物' }]
+  ];
+  const answerLatestConfirmation = async (accept) => {
+    const overlay = document.body.children.at(-1);
+    const button = overlay.querySelector(
+      accept ? '[data-confirm-accept]' : '[data-confirm-cancel]'
+    );
+    for (const handler of button._listeners?.click || []) {
+      await handler({ currentTarget: button, target: button });
+    }
+  };
+  for (const [kind, entry] of assetDeleteCases) {
+    const pending = ctx.deleteAsset(kind, entry);
+    await answerLatestConfirmation(false);
+    await pending;
+  }
+  const assetCancelSafe = assetDeleteCalls.length === 0;
+  assetCancelSafe ? pass++ : fail++;
+  console.log('  ' + (assetCancelSafe ? 'OK   ' : 'FAIL ')
+    + '确认弹窗取消时四类资产均不发送 DELETE');
+
+  for (const [kind, entry] of assetDeleteCases) {
+    const pending = ctx.deleteAsset(kind, entry);
+    await answerLatestConfirmation(true);
+    await pending;
+  }
+  const expectedAssetDeletePaths = [
+    '/api/assets/stickers/sticker-1',
+    '/api/assets/slang/slang-1',
+    '/api/assets/identities/123456',
+    '/api/assets/memory'
+  ];
+  const assetConfirmSafe =
+    assetDeleteCalls.length === expectedAssetDeletePaths.length
+    && assetDeleteCalls.every((call, index) =>
+      call.url === expectedAssetDeletePaths[index] && call.body.confirm === true)
+    && assetDeleteCalls[3].body.chatKey === 'group:123'
+    && assetDeleteCalls[3].body.userId === '123456';
+  assetConfirmSafe ? pass++ : fail++;
+  console.log('  ' + (assetConfirmSafe ? 'OK   ' : 'FAIL ')
+    + '确认弹窗通过后四类资产各发送一次带显式确认的 DELETE');
+  sandbox.fetch = originalFetch;
+
   ctx.renderControlHub({
     services: [
       { id: 'agent', online: true },

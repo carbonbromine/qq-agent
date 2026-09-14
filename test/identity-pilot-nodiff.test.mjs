@@ -8,7 +8,13 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-identity-pilot-nodiff-'))
 process.env.QQ_AGENT_DATA_DIR = root;
 process.env.NODE_TEST_CONTEXT = '1';
 
-const { DEFAULT_CONFIG, identityPilotEnabled, setRuntimeConfig } =
+const {
+  DEFAULT_CONFIG,
+  identityPilotEnabled,
+  incomingFriendRequestEnabled,
+  slangPilotEnabled,
+  setRuntimeConfig
+} =
   await import('../src/config.js');
 const { ChatStore } = await import('../src/store.js');
 const { SessionRegistry } = await import('../src/sessions.js');
@@ -30,8 +36,13 @@ function configWithPilot(value) {
   if (value === undefined) delete config.identityPilot;
   else config.identityPilot = {
     enabled: value,
+    incomingFriendRequest: {
+      enabled: true,
+      autoWhitelist: true
+    },
     friendProposal: {
       enabled: true,
+      activeDispatchEnabled: true,
       ownerUin: '123456',
       minMessageCount: 1,
       cooldownDays: 30,
@@ -178,8 +189,16 @@ test('identity pilot defaults off and explicit off is strict runtime nodiff', as
 
   const legacyConfig = configWithPilot(undefined);
   const disabledConfig = configWithPilot(false);
+  delete legacyConfig.slangPilot;
+  disabledConfig.slangPilot = {
+    ...structuredClone(DEFAULT_CONFIG.slangPilot),
+    enabled: false
+  };
   assert.equal(identityPilotEnabled(legacyConfig), false);
   assert.equal(identityPilotEnabled(disabledConfig), false);
+  assert.equal(incomingFriendRequestEnabled(disabledConfig), false);
+  assert.equal(slangPilotEnabled(legacyConfig), false);
+  assert.equal(slangPilotEnabled(disabledConfig), false);
   assert.deepEqual(promptSnapshot(disabledConfig), promptSnapshot(legacyConfig));
 
   const legacyRun = await runAgent(legacyConfig, 'legacy');
@@ -198,4 +217,5 @@ test('identity pilot defaults off and explicit off is strict runtime nodiff', as
     .map(String)
     .filter((name) => /identity|people|profile/i.test(path.basename(name)));
   assert.deepEqual(experimentalArtifacts, []);
+  assert.equal(fs.existsSync(path.join(root, 'slang-pilot.sqlite')), false);
 });

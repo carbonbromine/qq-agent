@@ -509,6 +509,12 @@ describe('Orchestrator', () => {
         assert.ok(body.tools.some((tool) =>
           tool.function.name === 'friend_request_propose'));
         assert.match(body.messages[0].content, /好友候选/);
+        assert.match(body.messages[0].content, /自行判断/);
+        assert.match(
+          body.tools.find((tool) =>
+            tool.function.name === 'friend_request_propose').function.description,
+          /不需要等用户或管理员要求/
+        );
         return Response.json({
           choices: [{
             message: {
@@ -554,6 +560,101 @@ describe('Orchestrator', () => {
       reason: '长期聊下来确实感兴趣',
       verificationMessage: '以后继续聊'
     });
+  });
+
+  it('removes friend proposal prompt and tool from ordinary triggered-mode chat', async (t) => {
+    const { cfg, runner, append } = fixture(t);
+    cfg.identityPilot = {
+      enabled: true,
+      friendProposal: {
+        enabled: true,
+        mode: 'triggered',
+        ownerUin: '900001'
+      }
+    };
+    runner.getIdentityPilot = () => ({ active: true });
+    let calls = 0;
+    globalThis.fetch = async (_url, options) => {
+      calls += 1;
+      const body = JSON.parse(options.body);
+      assert.ok(!body.tools.some((tool) =>
+        tool.function.name === 'friend_request_propose'));
+      assert.doesNotMatch(body.messages[0].content, /好友候选|自行判断是否主动交朋友/);
+      return Response.json({
+        choices: [{ message: { content: '无需回复' } }],
+        usage: { prompt_tokens: 100, total_tokens: 105 }
+      });
+    };
+
+    append(1, '普通聊天不应携带交友任务', '42');
+    await runner.wake('group:1');
+    assert.equal(calls, 1);
+  });
+
+  it('injects only confirmed slang visible to the current chat when enabled', async (t) => {
+    const { cfg, runner, append } = fixture(t);
+    cfg.slangPilot = {
+      ...structuredClone(DEFAULT_CONFIG.slangPilot),
+      enabled: true,
+      ownerUin: '900001'
+    };
+    setRuntimeConfig(cfg);
+    const slangFile = path.join(root, 'slang.json');
+    t.after(() => fs.rmSync(slangFile, { force: true }));
+    fs.writeFileSync(slangFile, JSON.stringify([
+      {
+        id: 'global',
+        content: '全局梗',
+        meaning: '所有会话可见',
+        status: 'confirmed',
+        scope: 'global-safe',
+        count: 2
+      },
+      {
+        id: 'local',
+        content: '本群梗',
+        meaning: '只在当前群可见',
+        status: 'confirmed',
+        scope: 'chat-private',
+        scopeChatKey: 'group:1',
+        count: 3
+      },
+      {
+        id: 'other',
+        content: '隔壁群梗',
+        meaning: '不应泄露',
+        status: 'confirmed',
+        scope: 'chat-private',
+        scopeChatKey: 'group:2',
+        count: 10
+      },
+      {
+        id: 'candidate',
+        content: '待确认梗',
+        meaning: '不能注入',
+        status: 'candidate',
+        count: 20
+      }
+    ]));
+    let request;
+    globalThis.fetch = async (_url, options) => {
+      request = JSON.parse(options.body);
+      return Response.json({
+        choices: [{ message: { content: 'done' } }],
+        usage: { prompt_tokens: 100, total_tokens: 110 }
+      });
+    };
+
+    append(1, '这是什么说法', '42');
+    await runner.wake('group:1');
+
+    const prompt = String(request.messages.find((message) =>
+      message.role === 'user')?.content || '');
+    assert.match(prompt, /【已确认黑话】/);
+    assert.match(prompt, /全局梗/);
+    assert.match(prompt, /本群梗/);
+    assert.doesNotMatch(prompt, /隔壁群梗/);
+    assert.doesNotMatch(prompt, /待确认梗/);
   });
 
   it('deterministically wakes the same participant inside the threaded continuation window', async (t) => {

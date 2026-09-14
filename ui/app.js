@@ -29,11 +29,17 @@ const state = {
   settingsSection: 'api',
   memoryView: 'events',
   currentMemoryChatKey: null,
+  identityFeatureQuery: '',
+  incidentState: 'open',
+  incidentSeverity: '',
+  incidentChatKey: '',
   assetKind: 'stickers',
   assetQuery: '',
   assetSlangStatus: '',
+  assetSlangResearchState: '',
   assetOverview: null,
   assetDetail: null,
+  assetLoadSeq: 0,
   groupMembers: [],
   groupMembersLoaded: false,
   // 记忆整理状态：按 chatKey 存，不依赖 DOM。
@@ -42,6 +48,23 @@ const state = {
   consolidating: {},      // chatKey -> { startedAt }
   consolidateResult: {}   // chatKey -> { note, at, failed? }
 };
+
+function graduatedFeatureState(c = state.config || {}) {
+  return {
+    identity: c.identityPilot?.graduated === true,
+    'auto-friend': c.identityPilot?.friendProposal?.graduated === true,
+    slang: c.slangPilot?.graduated === true,
+    incidents: c.incidentPilot?.graduated === true
+  };
+}
+
+function syncGraduatedFeatureNavigation(c = state.config || {}) {
+  const features = graduatedFeatureState(c);
+  for (const [feature, visible] of Object.entries(features)) {
+    const tab = $(`[data-feature-nav="${feature}"]`);
+    if (tab) tab.classList.toggle('hidden', !visible);
+  }
+}
 
 // ── 工具函数 ──
 // 控制台标识头：证明请求来自本控制台页面，而非外部网页冒用浏览器。
@@ -184,6 +207,32 @@ async function api(path, options = {}) {
   }
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   return data;
+}
+
+function askForConfirmation(message) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const overlay = modelModalShell({
+      head: '确认操作',
+      body: `<div style="white-space:pre-wrap">${esc(message)}</div>`,
+      foot: '<button type="button" class="btn" data-confirm-cancel>取消</button>'
+        + '<button type="button" class="btn btn-danger" data-confirm-accept>确认</button>',
+      danger: true
+    });
+    const finish = (confirmed) => {
+      if (settled) return;
+      settled = true;
+      closeModelModal(overlay);
+      resolve(confirmed);
+    };
+    overlay.querySelector('[data-confirm-cancel]').addEventListener('click', () => finish(false));
+    overlay.querySelector('[data-confirm-accept]').addEventListener('click', () => finish(true));
+    overlay.querySelector('.model-modal-close').addEventListener('click', () => finish(false));
+    overlay.addEventListener('click', (event) => {
+      if (event.target === overlay) finish(false);
+    });
+    overlay.querySelector('[data-confirm-cancel]').focus();
+  });
 }
 
 function fmtTime(ts) {
@@ -413,6 +462,10 @@ function switchTab(name) {
   if (name === 'sessions') loadSessions();
   if (name === 'chats') loadChats();
   if (name === 'memory') loadMemoryView();
+  if (name === 'identity') loadIdentityFeaturePage();
+  if (name === 'friends') loadFriendFeaturePage();
+  if (name === 'slang') loadSlangFeaturePage();
+  if (name === 'incidents') loadIncidentFeaturePage();
   if (name === 'assets') loadAssetObservatory();
   if (name === 'usage') loadUsageView({ force: true });
   if (name === 'settings') loadSettings();
@@ -533,7 +586,7 @@ async function changeSnowLumaPassword(event) {
     result.className = 'control-result error';
     return;
   }
-  if (!confirm('更新 SnowLuma 登录密钥并注销其现有 WebUI 会话？')) return;
+  if (!await askForConfirmation('更新 SnowLuma 登录密钥并注销其现有 WebUI 会话？')) return;
   const button = $('#snowluma-password-submit');
   button.disabled = true;
   result.textContent = '正在更新…';
@@ -587,8 +640,11 @@ async function refreshStatus() {
       loadQzoneInteractionStatus();
     }
     if (state.tab === 'settings' && state.settingsSection === 'experiments') {
-      loadIdentityPilotStatus();
+      loadExperimentalFeatureStatuses();
     }
+    if (state.tab === 'identity') loadIdentityFeaturePage();
+    if (state.tab === 'friends') loadFriendFeaturePage();
+    if (state.tab === 'incidents') loadIncidentFeaturePage();
     renderBanner();
   } catch (e) { /* 忽略瞬时错误 */ }
 }
@@ -619,7 +675,10 @@ $('#console-login-form')?.addEventListener('submit', async (event) => {
 
 $('#runtime-mode')?.addEventListener('change', async (event) => {
   const mode = event.target.value;
-  if (mode === 'active' && !confirm('确认旧实例已停用这些会话，或新实例使用不同 QQ 账号？启用时将跳过观察期间的积压消息。')) {
+  if (
+    mode === 'active'
+    && !await askForConfirmation('确认旧实例已停用这些会话，或新实例使用不同 QQ 账号？启用时将跳过观察期间的积压消息。')
+  ) {
     event.target.value = 'observe';
     return;
   }
@@ -790,6 +849,37 @@ function connectSSE() {
   });
   es.addEventListener('onebot-status', () => {
     refreshStatus();
+  });
+  es.addEventListener('asset-update', () => {
+    if (state.tab !== 'assets') return;
+    state.assetOverview = null;
+    state.assetDetail = null;
+    loadAssetObservatory();
+  });
+  es.addEventListener('identity-pilot-update', () => {
+    if (state.tab === 'settings' && state.settingsSection === 'experiments') {
+      loadExperimentalFeatureStatuses();
+    }
+    if (state.tab === 'identity') loadIdentityFeaturePage();
+    if (state.tab === 'friends') loadFriendFeaturePage();
+  });
+  es.addEventListener('slang-pilot-update', () => {
+    if (state.tab === 'assets' && state.assetKind === 'slang-research') {
+      state.assetOverview = null;
+      state.assetDetail = null;
+      loadAssetObservatory();
+    }
+    if (state.tab === 'settings' && state.settingsSection === 'experiments') {
+      loadExperimentalFeatureStatuses();
+    }
+    if (state.tab === 'slang') loadSlangFeaturePage();
+  });
+  es.addEventListener('incident-pilot-update', () => {
+    if (state.tab === 'settings' && state.settingsSection === 'experiments') {
+      loadExperimentalFeatureStatuses();
+    }
+    if (state.tab === 'incidents') loadIncidentFeaturePage();
+    if (state.tab === 'chats') loadChats({ quiet: true });
   });
   es.addEventListener('status', () => refreshStatus());
   es.addEventListener('feedback', (ev) => {
@@ -1468,6 +1558,108 @@ async function loadChats({ quiet = false } = {}) {
   } catch (e) { if (!quiet) console.error(e); }
 }
 
+function chatControlIcon(chat) {
+  const mode = chat.incidentControl?.mode || 'auto';
+  if (mode === 'blocked') return { icon: '■', label: '会话已阻塞' };
+  if (mode === 'continue') return { icon: '▶', label: '会话强制继续' };
+  if (chat.incidentDecision?.effectiveState === 'degraded') {
+    return { icon: '!', label: '会话降级运行' };
+  }
+  return { icon: '◉', label: '会话自动处理' };
+}
+
+async function openChatRuntimeControl(chatKey) {
+  const data = await api(`/api/chats/${chatKey.replace(':', '_')}/runtime-control`);
+  const control = data.control || { mode: 'auto', reason: '', version: 0 };
+  const overlay = modelModalShell({
+    head: `会话运行控制 · ${formatChatTitle(chatKey, chatNameOf(chatKey))}`,
+    body: `
+      <div class="field"><label>运行模式</label>
+        <select id="chat-runtime-mode">
+          <option value="auto" ${control.mode === 'auto' ? 'selected' : ''}>自动处理（推荐）</option>
+          <option value="blocked" ${control.mode === 'blocked' ? 'selected' : ''}>阻塞会话</option>
+          <option value="continue" ${control.mode === 'continue' ? 'selected' : ''}>继续处理新消息</option>
+        </select></div>
+      <div class="field"><label>原因</label><input type="text" id="chat-runtime-reason" value="${esc(control.reason || '')}" placeholder="可选，记录人工操作原因" /></div>
+      <div class="field"><label>积压消息</label>
+        <select id="chat-runtime-backlog">
+          <option value="keep">保留未读，暂不唤醒</option>
+          <option value="recent">仅处理最近一批</option>
+          <option value="discard">从下一条新消息开始</option>
+        </select></div>
+      <div class="hint">当前未读 ${fmtTok(data.unread)} 条，待核对写入 ${fmtTok(data.held)} 条。继续模式不会重试未知旧写入，也不能绕过全局观察、白名单或时间控制。</div>`,
+    foot: '<button type="button" class="btn" data-control-cancel>取消</button>'
+      + '<button type="button" class="btn btn-primary" data-control-save>保存</button>'
+  });
+  overlay.querySelector('[data-control-cancel]').addEventListener('click', () =>
+    closeModelModal(overlay));
+  overlay.querySelector('[data-control-save]').addEventListener('click', async () => {
+    const mode = overlay.querySelector('#chat-runtime-mode').value;
+    const button = overlay.querySelector('[data-control-save]');
+    button.disabled = true;
+    try {
+      await api(`/api/chats/${chatKey.replace(':', '_')}/runtime-control`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          mode,
+          reason: overlay.querySelector('#chat-runtime-reason').value.trim(),
+          backlogAction: overlay.querySelector('#chat-runtime-backlog').value,
+          expectedVersion: control.version,
+          confirm: mode === 'continue'
+        })
+      });
+      closeModelModal(overlay);
+      await loadChats();
+    } catch (error) {
+      button.disabled = false;
+      alert(error.message);
+    }
+  });
+}
+
+async function openUnknownOperations(chatKey) {
+  const data = await api(`/api/chats/${chatKey.replace(':', '_')}/unknown-operations`);
+  const operations = data.operations || [];
+  const overlay = modelModalShell({
+    head: `核对未知写入 · ${formatChatTitle(chatKey, chatNameOf(chatKey))}`,
+    body: operations.length
+      ? `<div class="control-key-list">${operations.map((operation) => `
+          <div class="control-key-row">
+            <span><strong>${esc(operation.payload?.type || '外部操作')}</strong>
+              <small>${esc(JSON.stringify(operation.payload || {}).slice(0, 180))}</small>
+              <small>${esc(operation.error || '结果未知')}</small></span>
+            <span class="settings-actions" style="margin:0">
+              <button type="button" class="btn btn-small" data-unknown-result="sent" data-operation-id="${esc(operation.id)}">确认已发送</button>
+              <button type="button" class="btn btn-small" data-unknown-result="failed" data-operation-id="${esc(operation.id)}">确认未发送</button>
+            </span>
+          </div>`).join('')}</div>`
+      : '<div class="empty-hint">没有待核对的外部写入</div>',
+    foot: '<button type="button" class="btn" data-unknown-close>关闭</button>'
+  });
+  overlay.querySelector('[data-unknown-close]').addEventListener('click', () =>
+    closeModelModal(overlay));
+  overlay.querySelectorAll('[data-unknown-result]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const sent = button.dataset.unknownResult === 'sent';
+      if (!await askForConfirmation(sent
+        ? '确认已在 QQ 中看到这次操作成功？不会再次发送。'
+        : '确认这次操作未成功？系统也不会自动重试。')) return;
+      await api(
+        `/api/chats/${chatKey.replace(':', '_')}/unknown-operations/${encodeURIComponent(button.dataset.operationId)}/reconcile`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            result: button.dataset.unknownResult,
+            confirm: true
+          })
+        }
+      );
+      closeModelModal(overlay);
+      await loadChats();
+    });
+  });
+}
+
 function renderChatList() {
   const box = $('#chat-items');
   state.seenChatKeys = state.seenChatKeys || new Set();
@@ -1485,6 +1677,9 @@ function renderChatList() {
     } else if (mode === 'lifecycle' && c.thread?.state === 'rollover_armed') {
       threadLabel = '等待续接';
     }
+    const incidentControl = chatControlIcon(c);
+    const showIncidentControl = c.key.startsWith('group:')
+      && state.config?.incidentPilot?.enabled === true;
     return `
       <div class="chat-item ${c.key === state.currentChatKey ? 'selected' : ''} ${c.unread ? 'unread-row' : ''} ${isNew ? 'new-item' : ''}" data-key="${c.key}">
         <div class="chat-item-title">
@@ -1492,6 +1687,7 @@ function renderChatList() {
           ${c.timeControl?.enabled ? `<span class="thread-pill">${c.timeControl.active ? '活跃时段' : '仅记录'}</span>` : ''}
           ${threadLabel ? `<span class="thread-pill mode-${mode}">${threadLabel}</span>` : ''}
           ${c.unread ? `<span class="unread-pill">${c.unread}</span>` : ''}
+          ${showIncidentControl ? `<button type="button" class="icon-btn chat-runtime-control" data-chat-runtime="${esc(c.key)}" title="${esc(incidentControl.label)}" aria-label="${esc(incidentControl.label)}">${incidentControl.icon}</button>` : ''}
         </div>
         <div class="chat-item-sub">${esc(c.lastText || '（空）')}</div>
         <div class="session-meta"><span>${c.total} 条 · 失败 ${c.failed || 0} · 待确认 ${c.held || 0}${c.thread ? ` · 线程 v${c.thread.version}` : ''}</span><span>${fmtTime(c.lastTs)}</span></div>
@@ -1500,6 +1696,12 @@ function renderChatList() {
   for (const c of state.chats) state.seenChatKeys.add(c.key);
   $$('.chat-item', box).forEach((el) => {
     el.addEventListener('click', () => selectChat(el.dataset.key));
+  });
+  $$('[data-chat-runtime]', box).forEach((button) => {
+    button.addEventListener('click', (event) => {
+      event.stopPropagation();
+      openChatRuntimeControl(button.dataset.chatRuntime).catch((error) => alert(error.message));
+    });
   });
 }
 
@@ -1577,10 +1779,13 @@ function renderChatMessages() {
     </div>
     <div class="chat-toolbar">
       <button class="btn btn-small" id="chat-wake-btn">主动唤醒</button>
+      ${key.startsWith('group:') && state.config?.incidentPilot?.enabled === true
+        ? `<button type="button" class="icon-btn" id="chat-runtime-control" title="更改会话运行模式" aria-label="更改会话运行模式">${chatControlIcon(meta).icon}</button>`
+        : ''}
       <span class="muted chat-action-result" id="chat-wake-result" role="status"></span>
       <button class="btn btn-small" id="chat-read-btn">全部标为已读</button>
       <button class="btn btn-small" id="chat-retry-btn">重试失败批次</button>
-      <button class="btn btn-small" id="chat-resolve-btn">确认发送结果</button>
+      <button class="btn btn-small" id="chat-resolve-btn">核对未知写入</button>
       <button class="btn btn-small" id="chat-thread-close-btn" ${meta.thread ? '' : 'disabled'}>结束对话线程</button>
       <input type="text" id="test-send-text" placeholder="手动发一条测试消息" style="flex:1" />
       <button class="btn btn-small" id="chat-testsend-btn">发送</button>
@@ -1609,6 +1814,8 @@ function renderChatMessages() {
       button.disabled = false;
     }
   });
+  $('#chat-runtime-control')?.addEventListener('click', () =>
+    openChatRuntimeControl(key).catch((error) => alert(error.message)));
   $('#chat-read-btn').addEventListener('click', async () => {
     await api(`/api/chats/${key.replace(':', '_')}/mark-read`, { method: 'POST', body: '{}' });
     loadChats();
@@ -1616,17 +1823,23 @@ function renderChatMessages() {
     loadChatMessages(key, { keepView: true });
   });
   $('#chat-retry-btn')?.addEventListener('click', async () => {
-    if (!confirm('重新处理确定未发送成功的失败批次？')) return;
+    if (!await askForConfirmation('重新处理确定未发送成功的失败批次？')) return;
     await api(`/api/chats/${key.replace(':', '_')}/retry-failed`, { method: 'POST', body: '{"confirm":true}' });
     loadChats();
   });
   $('#chat-resolve-btn')?.addEventListener('click', async () => {
-    if (!confirm('已核对 QQ 中的实际发送结果？确认后将结束待确认批次，不会重发。')) return;
-    await api(`/api/chats/${key.replace(':', '_')}/resolve-held`, { method: 'POST', body: '{"confirm":true}' });
+    if (state.config?.incidentPilot?.enabled === true) {
+      await openUnknownOperations(key);
+      return;
+    }
+    if (!await askForConfirmation('已核对 QQ 中的实际发送结果？确认后将结束待确认批次，不会重发。')) return;
+    await api(`/api/chats/${key.replace(':', '_')}/resolve-held`, {
+      method: 'POST', body: '{"confirm":true}'
+    });
     loadChats();
   });
   $('#chat-thread-close-btn')?.addEventListener('click', async () => {
-    if (!confirm('结束当前对话线程？后续普通消息将重新遵循响应档位。')) return;
+    if (!await askForConfirmation('结束当前对话线程？后续普通消息将重新遵循响应档位。')) return;
     await api(`/api/chats/${key.replace(':', '_')}/thread`, { method: 'DELETE', body: '{}' });
     await loadChats();
   });
@@ -2172,8 +2385,7 @@ function openUsageBreakdown(dim, key) {
 const ASSET_KINDS = [
   ['stickers', '表情包'],
   ['slang', '黑话'],
-  ['identities', '人物'],
-  ['memory', '记忆']
+  ['slang-research', '黑话研究']
 ];
 
 function assetStateText(active, exists, activeText = '运行中') {
@@ -2185,8 +2397,7 @@ function assetStateText(active, exists, activeText = '运行中') {
 function renderAssetSummary(overview) {
   const stickers = overview.stickers || {};
   const slang = overview.slang || {};
-  const identity = overview.identity || {};
-  const memory = overview.memory || {};
+  const slangPilot = overview.slangPilot || {};
   return `
     <div class="asset-summary">
       <button type="button" class="asset-summary-item" data-asset-kind="stickers">
@@ -2197,13 +2408,11 @@ function renderAssetSummary(overview) {
         <span>黑话</span><strong>${fmtTok(slang.total)}</strong>
         <small>${assetStateText(slang.active, slang.exists)}</small>
       </button>
-      <button type="button" class="asset-summary-item" data-asset-kind="identities">
-        <span>统一人物</span><strong>${fmtTok(identity.people)}</strong>
-        <small>${identity.active ? '身份库运行中' : identity.databaseExists ? '索引休眠' : '实验开关关闭'}</small>
-      </button>
-      <button type="button" class="asset-summary-item" data-asset-kind="memory">
-        <span>会话印象</span><strong>${fmtTok(memory.impressions)}</strong>
-        <small>${fmtTok(memory.people)} 人 · ${fmtTok(memory.chats)} 个会话</small>
+      <button type="button" class="asset-summary-item" data-asset-kind="slang-research">
+        <span>黑话研究</span><strong>${fmtTok(
+          (slangPilot.pendingResearch || 0) + (slangPilot.pendingAdmission || 0)
+        )}</strong>
+        <small>${slangPilot.active ? '等待审批' : '实验开关关闭'}</small>
       </button>
     </div>`;
 }
@@ -2227,6 +2436,10 @@ function renderStickerAssets(data) {
         ${entry.desc && entry.localNote ? `<span>${esc(entry.desc)}</span>` : ''}
         ${tags ? `<div class="asset-tags">${tags}</div>` : ''}
         <small>${entry.source === 'qq' ? 'QQ 收藏' : entry.source === 'ai' ? 'AI 收藏' : '手动'} · 使用 ${fmtTok(entry.useCount)} 次</small>
+        <div class="asset-actions">
+          <button type="button" class="btn btn-small asset-edit" data-asset-id="${esc(entry.id)}">编辑</button>
+          <button type="button" class="btn btn-small btn-danger asset-delete" data-asset-id="${esc(entry.id)}">删除</button>
+        </div>
       </div>
     </article>`;
   }).join('')}</div>`;
@@ -2240,15 +2453,181 @@ function renderSlangAssets(data) {
   if (!entries.length) return '<div class="empty-hint">黑话库为空</div>';
   const statusText = { candidate: '候选', confirmed: '已确认', rejected: '已拒绝' };
   return `<div class="asset-table-wrap"><table class="asset-table">
-    <thead><tr><th>词条</th><th>含义</th><th>状态</th><th>出现</th><th>证据</th></tr></thead>
+    <thead><tr><th>词条</th><th>含义</th><th>状态</th><th>出现</th><th>证据</th><th>操作</th></tr></thead>
     <tbody>${entries.map((entry) => `<tr>
       <td><strong>${esc(entry.content)}</strong>${entry.risk ? `<small>${esc(entry.risk)}</small>` : ''}</td>
-      <td>${esc(entry.meaning || '-')}</td>
-      <td>${esc(statusText[entry.status] || entry.status)}</td>
+      <td>${esc(entry.meaning || '-')}${entry.usage ? `<small>${esc(entry.usage)}</small>` : ''}</td>
+      <td>${esc(statusText[entry.status] || entry.status)}<small>${entry.scope === 'chat-private' ? '仅来源群' : '全局'}</small></td>
       <td class="r">${fmtTok(entry.count)}</td>
       <td class="r">${fmtTok(entry.evidenceCount)}</td>
+      <td><div class="asset-actions">
+        <button type="button" class="btn btn-small asset-edit" data-asset-id="${esc(entry.id)}">编辑</button>
+        <button type="button" class="btn btn-small btn-danger asset-delete" data-asset-id="${esc(entry.id)}">删除</button>
+      </div></td>
     </tr>`).join('')}</tbody>
   </table></div>`;
+}
+
+const SLANG_RESEARCH_STATUS = {
+  pending_research: '待研究审批',
+  research_queued: '等待研究',
+  researching: '研究中',
+  research_interrupted: '研究中断',
+  research_failed: '研究失败',
+  pending_admission: '待入库审批',
+  admitted_candidate: '已加入候选',
+  research_rejected: '已拒绝研究',
+  admission_rejected: '已拒绝收录'
+};
+
+function renderSlangResearch(data) {
+  if (data?.disabled) {
+    return '<div class="empty-hint">黑话研究实验功能当前关闭</div>';
+  }
+  const entries = data?.discoveries || [];
+  if (!entries.length) return '<div class="empty-hint">当前没有黑话研究记录</div>';
+  return `<div class="asset-table-wrap"><table class="asset-table">
+    <thead><tr><th>词条</th><th>来源</th><th>证据</th><th>研究结论</th><th>状态</th><th>操作</th></tr></thead>
+    <tbody>${entries.map((entry) => {
+      const evidence = (entry.evidence || []).slice(-2)
+        .map((item) => item.text).filter(Boolean).join('；');
+      let commands = '';
+      if (entry.state === 'pending_research') {
+        commands = `
+          <button type="button" class="btn btn-small slang-research-action" data-id="${esc(entry.id)}" data-action="research-approve">研究</button>
+          <button type="button" class="btn btn-small btn-danger slang-research-action" data-id="${esc(entry.id)}" data-action="research-reject">拒绝</button>`;
+      } else if (entry.state === 'pending_admission') {
+        commands = `
+          <button type="button" class="btn btn-small slang-research-action" data-id="${esc(entry.id)}" data-action="admission-review">查看并收录</button>
+          <button type="button" class="btn btn-small btn-danger slang-research-action" data-id="${esc(entry.id)}" data-action="admission-reject">拒绝</button>`;
+      } else if (['research_failed', 'research_interrupted'].includes(entry.state)) {
+        commands = `<button type="button" class="btn btn-small slang-research-action" data-id="${esc(entry.id)}" data-action="research-retry">重试</button>`;
+      }
+      const actions = `<div class="asset-actions">
+        <button type="button" class="btn btn-small slang-research-action" data-id="${esc(entry.id)}" data-action="detail">详情</button>
+        ${commands}
+      </div>`;
+      return `<tr>
+        <td><strong>${esc(entry.displayTerm)}</strong><small><code>${esc(entry.id)}</code></small></td>
+        <td>${esc(formatChatTitle(entry.scopeChatKey, chatNameOf(entry.scopeChatKey)))}<small>${fmtTok(entry.occurrenceCount)} 次 · ${fmtTok(entry.speakerCount)} 人</small></td>
+        <td title="${esc(evidence)}">${esc(evidence || '-')}</td>
+        <td>${esc(entry.research?.meaning || '-')}${entry.researchError ? `<small>${esc(entry.researchError)}</small>` : ''}</td>
+        <td>${esc(SLANG_RESEARCH_STATUS[entry.state] || entry.state)}</td>
+        <td>${actions}</td>
+      </tr>`;
+    }).join('')}</tbody>
+  </table></div>`;
+}
+
+async function decideSlangResearch(entry, action) {
+  if (action === 'detail') return openSlangResearchDetail(entry.id);
+  if (action === 'admission-review') return openSlangAdmissionEditor(entry);
+  const reject = action.endsWith('reject');
+  const retry = action === 'research-retry';
+  if (
+    !retry
+    && !await askForConfirmation(reject ? '拒绝这条黑话记录？' : '批准消耗模型 Token 研究这个词条？')
+  ) {
+    return;
+  }
+  const path = retry
+    ? `/api/slang-pilot/discoveries/${encodeURIComponent(entry.id)}/retry`
+    : action.startsWith('research-')
+      ? `/api/slang-pilot/discoveries/${encodeURIComponent(entry.id)}/research-decision`
+      : `/api/slang-pilot/discoveries/${encodeURIComponent(entry.id)}/admission-decision`;
+  await api(path, {
+    method: 'POST',
+    body: JSON.stringify(retry ? {} : {
+      decision: reject ? 'reject' : 'approve'
+    })
+  });
+  state.assetOverview = null;
+  state.assetDetail = null;
+  await loadAssetObservatory();
+}
+
+async function openSlangResearchDetail(id) {
+  const data = await api(`/api/slang-pilot/discoveries/${encodeURIComponent(id)}`);
+  const entry = data.discovery;
+  const research = entry.research || {};
+  const evidence = (entry.evidence || []).map((item) => `
+    <tr><td>${esc(fmtTime(item.at))}</td><td>${esc(item.senderName || item.senderId || '-')}</td><td>${esc(item.text || '-')}</td></tr>
+  `).join('');
+  const events = (entry.events || []).map((item) => `
+    <tr><td>${esc(fmtTime(item.createdAt))}</td><td>${esc(item.stage)}</td><td>${esc(item.decision)}</td><td>${esc(item.decidedBy || '-')}</td></tr>
+  `).join('');
+  const overlay = modelModalShell({
+    head: `黑话研究 · ${entry.displayTerm}`,
+    body: `
+      <div class="field-row">
+        <div class="field"><label>状态</label><div>${esc(SLANG_RESEARCH_STATUS[entry.state] || entry.state)}</div></div>
+        <div class="field"><label>来源</label><div>${esc(formatChatTitle(entry.scopeChatKey, chatNameOf(entry.scopeChatKey)))}</div></div>
+        <div class="field"><label>统计</label><div>${fmtTok(entry.occurrenceCount)} 次 · ${fmtTok(entry.speakerCount)} 人</div></div>
+      </div>
+      ${research.meaning ? `<div class="field"><label>研究结论</label><div>${esc(research.meaning)}</div></div>` : ''}
+      ${research.usage ? `<div class="field"><label>使用方式</label><div>${esc(research.usage)}</div></div>` : ''}
+      ${research.risk ? `<div class="field"><label>误用风险</label><div>${esc(research.risk)}</div></div>` : ''}
+      <div class="field"><label>证据</label><div class="asset-table-wrap"><table class="asset-table">
+        <thead><tr><th>时间</th><th>发言人</th><th>原文</th></tr></thead>
+        <tbody>${evidence || '<tr><td colspan="3">无</td></tr>'}</tbody>
+      </table></div></div>
+      <div class="field"><label>来源链接</label><div>${(entry.researchSources || []).map((url) => `<div><code>${esc(url)}</code></div>`).join('') || '-'}</div></div>
+      <div class="field"><label>Token</label><div>${fmtTok(entry.researchUsage?.totalTokens || 0)}</div></div>
+      <div class="field"><label>审批记录</label><div class="asset-table-wrap"><table class="asset-table">
+        <thead><tr><th>时间</th><th>阶段</th><th>决定</th><th>操作者</th></tr></thead>
+        <tbody>${events || '<tr><td colspan="4">无</td></tr>'}</tbody>
+      </table></div></div>`,
+    foot: '<button class="btn btn-primary" id="slang-detail-close">关闭</button>'
+  });
+  overlay.querySelector('#slang-detail-close').addEventListener('click', () =>
+    closeModelModal(overlay));
+}
+
+function openSlangAdmissionEditor(entry) {
+  const research = entry.research || {};
+  const overlay = modelModalShell({
+    head: '审核黑话研究结果',
+    body: `
+      <div class="field"><label>词条</label><input type="text" id="slang-admit-content" maxlength="80" value="${esc(research.canonical || entry.displayTerm)}" /></div>
+      <div class="field"><label>含义</label><textarea id="slang-admit-meaning">${esc(research.meaning || '')}</textarea></div>
+      <div class="field"><label>使用方式</label><textarea id="slang-admit-usage">${esc(research.usage || '')}</textarea></div>
+      <div class="field"><label>例句</label><textarea id="slang-admit-example">${esc(research.example || '')}</textarea></div>
+      <div class="field"><label>误用风险</label><textarea id="slang-admit-risk">${esc(research.risk || '')}</textarea></div>
+      <div class="field"><label>使用范围</label><select id="slang-admit-scope">
+        <option value="chat-private" ${research.recommendedScope === 'global-safe' ? '' : 'selected'}>仅来源群</option>
+        <option value="global-safe" ${research.recommendedScope === 'global-safe' ? 'selected' : ''}>全局可用</option>
+      </select></div>`,
+    foot: '<button class="btn" id="slang-admit-cancel">取消</button><button class="btn btn-primary" id="slang-admit-save">加入候选库</button>'
+  });
+  overlay.querySelector('#slang-admit-cancel').addEventListener('click', () =>
+    closeModelModal(overlay));
+  overlay.querySelector('#slang-admit-save').addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      await api(
+        `/api/slang-pilot/discoveries/${encodeURIComponent(entry.id)}/admission-decision`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            decision: 'approve',
+            edits: {
+              content: overlay.querySelector('#slang-admit-content').value,
+              meaning: overlay.querySelector('#slang-admit-meaning').value,
+              usage: overlay.querySelector('#slang-admit-usage').value,
+              example: overlay.querySelector('#slang-admit-example').value,
+              risk: overlay.querySelector('#slang-admit-risk').value,
+              scope: overlay.querySelector('#slang-admit-scope').value
+            }
+          })
+        }
+      );
+      await finishAssetMutation(overlay);
+    } catch (error) {
+      alert(`收录失败：${error.message}`);
+      button.disabled = false;
+    }
+  });
 }
 
 function renderIdentityAssets(data) {
@@ -2258,7 +2637,7 @@ function renderIdentityAssets(data) {
   const people = data?.entries || [];
   if (!people.length) return '<div class="empty-hint">统一身份库为空</div>';
   return `<div class="asset-table-wrap"><table class="asset-table">
-    <thead><tr><th>QQ</th><th>首选名称</th><th>别名</th><th>会话</th><th>消息</th><th>好友</th><th>旧印象</th></tr></thead>
+    <thead><tr><th>QQ</th><th>首选名称</th><th>别名</th><th>会话</th><th>消息</th><th>好友</th><th>画像备注</th><th>操作</th></tr></thead>
     <tbody>${people.map((person) => {
       const aliases = [...new Set((person.aliases || []).map((item) =>
         typeof item === 'string' ? item : item?.alias).filter(Boolean))];
@@ -2269,25 +2648,282 @@ function renderIdentityAssets(data) {
         <td class="r">${fmtTok(person.chatCount)}</td>
         <td class="r">${fmtTok(person.messageCount)}</td>
         <td>${person.isFriend ? '是' : '否'}</td>
-        <td class="r">${fmtTok(person.legacyMemoryCount)}</td>
+        <td>${esc(person.profileNote || '-')}${person.manuallyManaged ? '<small>人工维护</small>' : ''}</td>
+        <td><div class="asset-actions">
+          <button type="button" class="btn btn-small asset-edit" data-asset-id="${esc(person.userId)}">编辑</button>
+          <button type="button" class="btn btn-small btn-danger asset-delete" data-asset-id="${esc(person.userId)}">删除</button>
+        </div></td>
       </tr>`;
     }).join('')}</tbody>
   </table></div>`;
 }
 
 function renderMemoryAssets(data) {
-  const items = data?.items || [];
-  if (!items.length) return '<div class="empty-hint">当前没有会话记忆</div>';
+  const entries = data?.entries || [];
+  if (!entries.length) return '<div class="empty-hint">当前没有会话记忆</div>';
   return `<div class="asset-table-wrap"><table class="asset-table">
-    <thead><tr><th>会话</th><th>人物</th><th>印象</th><th>交接</th><th>最近更新</th></tr></thead>
-    <tbody>${items.map((item) => `<tr>
-      <td>${esc(formatChatTitle(item.chatKey, chatNameOf(item.chatKey)))}</td>
-      <td class="r">${fmtTok(item.people)}</td>
-      <td class="r">${fmtTok(item.impressions)}</td>
-      <td>${item.hasHandoff ? '有' : '无'}</td>
-      <td>${item.updatedAt ? esc(fmtTime(item.updatedAt)) : '-'}</td>
+    <thead><tr><th>会话</th><th>人物</th><th>印象</th><th>最近更新</th><th>操作</th></tr></thead>
+    <tbody>${entries.map((entry, index) => `<tr>
+      <td>${esc(formatChatTitle(entry.chatKey, chatNameOf(entry.chatKey)))}</td>
+      <td><strong>${esc(entry.name || entry.userId)}</strong><small><code>${esc(entry.userId)}</code></small></td>
+      <td>${esc((entry.impressions || []).map((item) => item.content).join('；') || '-')}</td>
+      <td>${entry.updatedAt ? esc(fmtTime(entry.updatedAt)) : '-'}</td>
+      <td><div class="asset-actions">
+        <button type="button" class="btn btn-small asset-edit" data-asset-index="${index}">编辑</button>
+        <button type="button" class="btn btn-small btn-danger asset-delete" data-asset-index="${index}">删除</button>
+      </div></td>
     </tr>`).join('')}</tbody>
   </table></div>`;
+}
+
+function assetChatOptions(selected = '') {
+  const keys = new Set([
+    ...(state.chats || []).map((chat) => chat.key),
+    ...((state.assetOverview?.memory?.items || []).map((chat) => chat.chatKey)),
+    selected
+  ].filter(Boolean));
+  return [...keys].map((chatKey) =>
+    `<option value="${esc(chatKey)}">${esc(formatChatTitle(chatKey, chatNameOf(chatKey)))}</option>`
+  ).join('');
+}
+
+function readAssetImage(file) {
+  if (!file) return Promise.resolve('');
+  if (file.size > 8 * 1024 * 1024) return Promise.reject(new Error('表情图片不能超过 8 MiB'));
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('图片读取失败'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function finishAssetMutation(overlay) {
+  closeModelModal(overlay);
+  state.assetOverview = null;
+  state.assetDetail = null;
+  return state.tab === 'identity'
+    ? loadIdentityFeaturePage()
+    : loadAssetObservatory();
+}
+
+function openStickerAssetEditor(entry = null) {
+  const editing = Boolean(entry);
+  const overlay = modelModalShell({
+    head: editing ? '编辑表情包' : '新增表情包',
+    body: `
+      ${editing ? '' : `
+      <div class="field"><label>图片文件</label><input type="file" id="asset-sticker-file" accept="image/png,image/jpeg,image/gif,image/webp" /></div>
+      <div class="field"><label>图片 URL</label><input type="text" id="asset-sticker-url" placeholder="未选择文件时使用" /></div>`}
+      <div class="field"><label>名称</label><input type="text" id="asset-sticker-desc" maxlength="80" value="${esc(entry?.desc || '')}" /></div>
+      <div class="field"><label>AI 备注</label><textarea id="asset-sticker-note">${esc(entry?.localNote || '')}</textarea></div>
+      <div class="field"><label>标签</label><input type="text" id="asset-sticker-tags" value="${esc((entry?.tags || []).join(', '))}" /></div>
+      <div class="field"><label>使用场景</label><textarea id="asset-sticker-usage">${esc(entry?.usage || '')}</textarea></div>`,
+    foot: '<button class="btn" id="asset-editor-cancel">取消</button><button class="btn btn-primary" id="asset-editor-save">保存</button>'
+  });
+  overlay.querySelector('#asset-editor-cancel').addEventListener('click', () => closeModelModal(overlay));
+  overlay.querySelector('#asset-editor-save').addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      const body = {
+        desc: overlay.querySelector('#asset-sticker-desc').value,
+        localNote: overlay.querySelector('#asset-sticker-note').value,
+        tags: overlay.querySelector('#asset-sticker-tags').value
+          .split(/[,，\s]+/).map((tag) => tag.trim()).filter(Boolean),
+        usage: overlay.querySelector('#asset-sticker-usage').value
+      };
+      if (!editing) {
+        body.imageUrl = overlay.querySelector('#asset-sticker-url').value.trim();
+        body.imageDataUrl = await readAssetImage(
+          overlay.querySelector('#asset-sticker-file').files?.[0]
+        );
+      }
+      await api(
+        editing
+          ? `/api/assets/stickers/${encodeURIComponent(entry.id)}`
+          : '/api/assets/stickers',
+        { method: editing ? 'PUT' : 'POST', body: JSON.stringify(body) }
+      );
+      await finishAssetMutation(overlay);
+    } catch (error) {
+      alert(`保存失败：${error.message}`);
+      button.disabled = false;
+    }
+  });
+}
+
+function openSlangAssetEditor(entry = null) {
+  const editing = Boolean(entry);
+  const overlay = modelModalShell({
+    head: editing ? '编辑黑话' : '新增黑话',
+    body: `
+      <div class="field-row">
+        <div class="field"><label>词条</label><input type="text" id="asset-slang-content" maxlength="80" value="${esc(entry?.content || '')}" /></div>
+        <div class="field"><label>状态</label><select id="asset-slang-state">
+          <option value="candidate" ${entry?.status === 'candidate' || !entry ? 'selected' : ''}>候选</option>
+          <option value="confirmed" ${entry?.status === 'confirmed' ? 'selected' : ''}>已确认</option>
+          <option value="rejected" ${entry?.status === 'rejected' ? 'selected' : ''}>已拒绝</option>
+        </select></div>
+      </div>
+      <div class="field"><label>含义</label><textarea id="asset-slang-meaning">${esc(entry?.meaning || '')}</textarea></div>
+      <div class="field"><label>使用方式</label><textarea id="asset-slang-usage">${esc(entry?.usage || '')}</textarea></div>
+      <div class="field"><label>例句</label><textarea id="asset-slang-example">${esc(entry?.example || '')}</textarea></div>
+      <div class="field"><label>误用风险</label><textarea id="asset-slang-risk">${esc(entry?.risk || '')}</textarea></div>
+      <div class="field-row">
+        <div class="field"><label>使用范围</label><select id="asset-slang-scope">
+          <option value="global-safe" ${entry?.scope === 'chat-private' ? '' : 'selected'}>全局可用</option>
+          <option value="chat-private" ${entry?.scope === 'chat-private' ? 'selected' : ''}>仅来源会话</option>
+        </select></div>
+        <div class="field"><label>来源会话</label><input type="text" id="asset-slang-chat" list="asset-slang-chat-options" value="${esc(entry?.scopeChatKey || '')}" placeholder="group:群号" /><datalist id="asset-slang-chat-options">${assetChatOptions(entry?.scopeChatKey)}</datalist></div>
+      </div>`,
+    foot: '<button class="btn" id="asset-editor-cancel">取消</button><button class="btn btn-primary" id="asset-editor-save">保存</button>'
+  });
+  overlay.querySelector('#asset-editor-cancel').addEventListener('click', () => closeModelModal(overlay));
+  overlay.querySelector('#asset-editor-save').addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      const body = {
+        content: overlay.querySelector('#asset-slang-content').value,
+        status: overlay.querySelector('#asset-slang-state').value,
+        meaning: overlay.querySelector('#asset-slang-meaning').value,
+        usage: overlay.querySelector('#asset-slang-usage').value,
+        example: overlay.querySelector('#asset-slang-example').value,
+        risk: overlay.querySelector('#asset-slang-risk').value,
+        scope: overlay.querySelector('#asset-slang-scope').value,
+        scopeChatKey: overlay.querySelector('#asset-slang-chat').value.trim()
+      };
+      await api(
+        editing
+          ? `/api/assets/slang/${encodeURIComponent(entry.id)}`
+          : '/api/assets/slang',
+        { method: editing ? 'PUT' : 'POST', body: JSON.stringify(body) }
+      );
+      await finishAssetMutation(overlay);
+    } catch (error) {
+      alert(`保存失败：${error.message}`);
+      button.disabled = false;
+    }
+  });
+}
+
+function openIdentityAssetEditor(entry = null) {
+  const editing = Boolean(entry);
+  const overlay = modelModalShell({
+    head: editing ? '编辑人物' : '新增人物',
+    body: `
+      <div class="field-row">
+        <div class="field"><label>QQ 号</label><input type="text" id="asset-person-uin" inputmode="numeric" value="${esc(entry?.userId || '')}" ${editing ? 'readonly' : ''} /></div>
+        <div class="field"><label>首选名称</label><input type="text" id="asset-person-name" maxlength="60" value="${esc(entry?.primaryName || '')}" /></div>
+      </div>
+      <div class="field"><label>来源会话</label><input type="text" id="asset-person-chat" list="asset-chat-options" value="${esc(entry?.sourceChatKey || '')}" placeholder="group:群号 或 private:QQ号" /><datalist id="asset-chat-options">${assetChatOptions(entry?.sourceChatKey)}</datalist></div>
+      <div class="field"><label>画像备注</label><textarea id="asset-person-note">${esc(entry?.profileNote || '')}</textarea></div>
+      <div class="checkbox-row"><input type="checkbox" id="asset-person-friend" ${entry?.isFriend ? 'checked' : ''} /><label for="asset-person-friend">标记为好友</label></div>`,
+    foot: '<button class="btn" id="asset-editor-cancel">取消</button><button class="btn btn-primary" id="asset-editor-save">保存</button>'
+  });
+  overlay.querySelector('#asset-editor-cancel').addEventListener('click', () => closeModelModal(overlay));
+  overlay.querySelector('#asset-editor-save').addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      const userId = overlay.querySelector('#asset-person-uin').value.trim();
+      const body = {
+        userId,
+        primaryName: overlay.querySelector('#asset-person-name').value,
+        chatKey: overlay.querySelector('#asset-person-chat').value.trim(),
+        profileNote: overlay.querySelector('#asset-person-note').value,
+        isFriend: overlay.querySelector('#asset-person-friend').checked
+      };
+      await api(
+        editing
+          ? `/api/assets/identities/${encodeURIComponent(entry.userId)}`
+          : '/api/assets/identities',
+        { method: editing ? 'PUT' : 'POST', body: JSON.stringify(body) }
+      );
+      await finishAssetMutation(overlay);
+    } catch (error) {
+      alert(`保存失败：${error.message}`);
+      button.disabled = false;
+    }
+  });
+}
+
+function openMemoryAssetEditor(entry = null) {
+  const editing = Boolean(entry);
+  const overlay = modelModalShell({
+    head: editing ? '编辑人物记忆' : '新增人物记忆',
+    body: `
+      <div class="field"><label>会话</label><input type="text" id="asset-memory-chat" list="asset-memory-chat-options" value="${esc(entry?.chatKey || '')}" ${editing ? 'readonly' : ''} placeholder="group:群号 或 private:QQ号" /><datalist id="asset-memory-chat-options">${assetChatOptions(entry?.chatKey)}</datalist></div>
+      <div class="field-row">
+        <div class="field"><label>QQ 号</label><input type="text" id="asset-memory-uin" inputmode="numeric" value="${esc(entry?.userId || '')}" ${editing ? 'readonly' : ''} /></div>
+        <div class="field"><label>名称</label><input type="text" id="asset-memory-name" maxlength="60" value="${esc(entry?.name || '')}" /></div>
+      </div>
+      <div class="field"><label>${editing ? '印象内容（一行一条）' : '记忆内容'}</label><textarea id="asset-memory-content" style="min-height:160px">${esc(editing ? (entry?.impressions || []).map((item) => item.content).join('\n') : '')}</textarea></div>`,
+    foot: '<button class="btn" id="asset-editor-cancel">取消</button><button class="btn btn-primary" id="asset-editor-save">保存</button>'
+  });
+  overlay.querySelector('#asset-editor-cancel').addEventListener('click', () => closeModelModal(overlay));
+  overlay.querySelector('#asset-editor-save').addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      const content = overlay.querySelector('#asset-memory-content').value;
+      const body = {
+        chatKey: overlay.querySelector('#asset-memory-chat').value.trim(),
+        userId: overlay.querySelector('#asset-memory-uin').value.trim(),
+        name: overlay.querySelector('#asset-memory-name').value
+      };
+      if (editing) body.impressions = content.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+      else body.content = content;
+      await api('/api/assets/memory', {
+        method: editing ? 'PUT' : 'POST',
+        body: JSON.stringify(body)
+      });
+      await finishAssetMutation(overlay);
+    } catch (error) {
+      alert(`保存失败：${error.message}`);
+      button.disabled = false;
+    }
+  });
+}
+
+function openAssetEditor(kind, entry = null) {
+  if (kind === 'stickers') return openStickerAssetEditor(entry);
+  if (kind === 'slang') return openSlangAssetEditor(entry);
+  if (kind === 'identities') return openIdentityAssetEditor(entry);
+  return openMemoryAssetEditor(entry);
+}
+
+async function deleteAsset(kind, entry) {
+  const label = kind === 'stickers'
+    ? (entry.localNote || entry.desc || entry.id)
+    : kind === 'slang'
+      ? entry.content
+      : kind === 'identities'
+        ? (entry.primaryName || entry.userId)
+        : (entry.name || entry.userId);
+  if (!await askForConfirmation(`确定从 AI 资产中删除“${label}”？`)) return;
+  let path;
+  let body = { confirm: true };
+  if (kind === 'stickers') path = `/api/assets/stickers/${encodeURIComponent(entry.id)}`;
+  else if (kind === 'slang') path = `/api/assets/slang/${encodeURIComponent(entry.id)}`;
+  else if (kind === 'identities') path = `/api/assets/identities/${encodeURIComponent(entry.userId)}`;
+  else {
+    path = '/api/assets/memory';
+    body = { ...body, chatKey: entry.chatKey, userId: entry.userId };
+  }
+  try {
+    const result = await api(path, { method: 'DELETE', body: JSON.stringify(body) });
+    state.assetOverview = null;
+    state.assetDetail = null;
+    if (state.tab === 'identity') await loadIdentityFeaturePage();
+    else await loadAssetObservatory();
+    if (result?.cleanupPending) {
+      alert(result.warning || '资产已删除，但图片文件仍待清理');
+    }
+  } catch (error) {
+    alert(`删除失败：${error.message}`);
+  }
 }
 
 function renderAssetObservatory() {
@@ -2295,14 +2931,13 @@ function renderAssetObservatory() {
   if (!box) return;
   const overview = state.assetOverview || {};
   const kind = state.assetKind || 'stickers';
-  const searchable = kind === 'stickers' || kind === 'slang';
   const slangStatus = state.assetSlangStatus || '';
+  const slangResearchState = state.assetSlangResearchState || '';
   let content = '<div class="empty-hint">加载中…</div>';
   if (state.assetDetail) {
     if (kind === 'stickers') content = renderStickerAssets(state.assetDetail);
     if (kind === 'slang') content = renderSlangAssets(state.assetDetail);
-    if (kind === 'identities') content = renderIdentityAssets(state.assetDetail);
-    if (kind === 'memory') content = renderMemoryAssets(state.assetDetail);
+    if (kind === 'slang-research') content = renderSlangResearch(state.assetDetail);
   }
   box.innerHTML = `
     <div class="asset-head">
@@ -2316,7 +2951,11 @@ function renderAssetObservatory() {
           `<button type="button" class="${kind === value ? 'active' : ''}" data-asset-kind="${value}">${label}</button>`
         ).join('')}
       </div>
-      ${searchable ? `<div class="asset-search">
+      <div class="asset-toolbar-actions">
+        ${kind === 'slang-research'
+          ? ''
+          : '<button type="button" class="btn btn-small btn-primary" id="asset-add">＋ 新增</button>'}
+        <div class="asset-search">
         <input type="search" id="asset-query" value="${esc(state.assetQuery)}" placeholder="搜索" />
         ${kind === 'slang' ? `<select id="asset-slang-status">
           <option value="" ${slangStatus ? '' : 'selected'}>全部状态</option>
@@ -2324,8 +2963,18 @@ function renderAssetObservatory() {
           <option value="candidate" ${slangStatus === 'candidate' ? 'selected' : ''}>候选</option>
           <option value="rejected" ${slangStatus === 'rejected' ? 'selected' : ''}>已拒绝</option>
         </select>` : ''}
+        ${kind === 'slang-research' ? `<select id="asset-slang-research-state">
+          <option value="" ${slangResearchState ? '' : 'selected'}>全部阶段</option>
+          <option value="pending_research" ${slangResearchState === 'pending_research' ? 'selected' : ''}>待研究审批</option>
+          <option value="research_queued,researching" ${slangResearchState === 'research_queued,researching' ? 'selected' : ''}>研究中</option>
+          <option value="pending_admission" ${slangResearchState === 'pending_admission' ? 'selected' : ''}>待入库审批</option>
+          <option value="admitted_candidate" ${slangResearchState === 'admitted_candidate' ? 'selected' : ''}>已加入候选</option>
+          <option value="research_failed,research_interrupted" ${slangResearchState === 'research_failed,research_interrupted' ? 'selected' : ''}>失败或中断</option>
+          <option value="research_rejected,admission_rejected" ${slangResearchState === 'research_rejected,admission_rejected' ? 'selected' : ''}>已拒绝</option>
+        </select>` : ''}
         <button type="button" class="btn btn-small" id="asset-search-btn">搜索</button>
-      </div>` : ''}
+        </div>
+      </div>
     </div>
     <div id="asset-content">${content}</div>`;
 
@@ -2334,15 +2983,18 @@ function renderAssetObservatory() {
       state.assetKind = button.dataset.assetKind;
       state.assetQuery = '';
       state.assetSlangStatus = '';
+      state.assetSlangResearchState = '';
       state.assetDetail = null;
       loadAssetObservatory();
     });
   });
   $('#asset-refresh')?.addEventListener('click', () =>
     loadAssetObservatory({ refreshStickers: kind === 'stickers' }));
+  $('#asset-add')?.addEventListener('click', () => openAssetEditor(kind));
   const search = () => {
     state.assetQuery = $('#asset-query')?.value || '';
     state.assetSlangStatus = $('#asset-slang-status')?.value || '';
+    state.assetSlangResearchState = $('#asset-slang-research-state')?.value || '';
     loadAssetObservatory();
   };
   $('#asset-search-btn')?.addEventListener('click', search);
@@ -2350,36 +3002,95 @@ function renderAssetObservatory() {
     if (event.key === 'Enter') search();
   });
   $('#asset-slang-status')?.addEventListener('change', search);
+  $('#asset-slang-research-state')?.addEventListener('change', search);
+  $$('#asset-content .slang-research-action').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const entry = state.assetDetail?.discoveries?.find((item) =>
+        item.id === button.dataset.id);
+      if (!entry) return;
+      button.disabled = true;
+      try {
+        await decideSlangResearch(entry, button.dataset.action);
+      } catch (error) {
+        alert(`操作失败：${error.message}`);
+        button.disabled = false;
+      }
+    });
+  });
+  $$('#asset-content .asset-edit').forEach((button) => {
+    button.addEventListener('click', () => {
+      const entry = button.dataset.assetIndex !== undefined
+        ? state.assetDetail?.entries?.[Number(button.dataset.assetIndex)]
+        : state.assetDetail?.entries?.find((item) =>
+            String(item.id ?? item.userId) === String(button.dataset.assetId));
+      if (entry) openAssetEditor(kind, entry);
+    });
+  });
+  $$('#asset-content .asset-delete').forEach((button) => {
+    button.addEventListener('click', () => {
+      const entry = button.dataset.assetIndex !== undefined
+        ? state.assetDetail?.entries?.[Number(button.dataset.assetIndex)]
+        : state.assetDetail?.entries?.find((item) =>
+            String(item.id ?? item.userId) === String(button.dataset.assetId));
+      if (entry) deleteAsset(kind, entry);
+    });
+  });
 }
 
 async function loadAssetObservatory({ refreshStickers = false } = {}) {
   const box = $('#asset-page');
   if (!box) return;
+  const requestId = ++state.assetLoadSeq;
+  const kind = state.assetKind;
+  const assetQuery = state.assetQuery;
+  const slangStatus = state.assetSlangStatus;
+  const slangResearchState = state.assetSlangResearchState;
   if (!state.assetOverview) box.innerHTML = '<div class="empty-hint">加载中…</div>';
   try {
     const [overview, chats] = await Promise.all([
       api('/api/assets/overview'),
       api('/api/chats').catch(() => ({ chats: [] }))
     ]);
-    if (state.tab !== 'assets') return;
-    state.assetOverview = overview;
-    if (chats.chats?.length) state.chats = chats.chats;
-    const query = encodeURIComponent(state.assetQuery || '');
-    if (state.assetKind === 'stickers') {
-      state.assetDetail = await api(
+    if (
+      state.tab !== 'assets'
+      || requestId !== state.assetLoadSeq
+      || kind !== state.assetKind
+    ) return;
+    const query = encodeURIComponent(assetQuery || '');
+    let detail;
+    if (kind === 'stickers') {
+      detail = await api(
         `/api/assets/stickers?limit=200&query=${query}${refreshStickers ? '&refresh=1' : ''}`
       );
-    } else if (state.assetKind === 'slang') {
-      state.assetDetail = await api(
-        `/api/assets/slang?limit=500&query=${query}&status=${encodeURIComponent(state.assetSlangStatus || '')}`
+    } else if (kind === 'slang') {
+      detail = await api(
+        `/api/assets/slang?limit=500&query=${query}&status=${encodeURIComponent(slangStatus || '')}`
       );
-    } else if (state.assetKind === 'identities') {
-      state.assetDetail = await api('/api/assets/identities?limit=500');
+    } else if (kind === 'slang-research') {
+      detail = await api(
+        `/api/slang-pilot/discoveries?limit=500&query=${query}&state=${encodeURIComponent(slangResearchState || '')}`
+      ).catch((error) => ({
+        disabled: true,
+        error: error.message,
+        discoveries: []
+      }));
     } else {
-      state.assetDetail = await api('/api/assets/memory');
+      detail = { entries: [] };
     }
-    if (state.tab === 'assets') renderAssetObservatory();
+    if (
+      state.tab !== 'assets'
+      || requestId !== state.assetLoadSeq
+      || kind !== state.assetKind
+      || assetQuery !== state.assetQuery
+      || slangStatus !== state.assetSlangStatus
+      || slangResearchState !== state.assetSlangResearchState
+    ) return;
+    state.assetOverview = overview;
+    if (chats.chats?.length) state.chats = chats.chats;
+    state.assetDetail = detail;
+    renderAssetObservatory();
   } catch (error) {
+    if (requestId !== state.assetLoadSeq || state.tab !== 'assets') return;
     box.innerHTML = `<div class="empty-hint">资产读取失败：${esc(error.message)}</div>`;
   }
 }
@@ -2604,7 +3315,7 @@ async function loadMemoryDetail(chatKey) {
       }
     });
     $('#mh-clear')?.addEventListener('click', async () => {
-      if (!confirm('确定清除这个会话的交接状态？')) return;
+      if (!await askForConfirmation('确定清除这个会话的交接状态？')) return;
       const btn = $('#mh-clear');
       btn.disabled = true;
       try {
@@ -2739,7 +3450,7 @@ function openMemberImpressModal(chatKey, member) {
   });
   const delBtn = overlay.querySelector('#mi-del');
   if (delBtn) delBtn.addEventListener('click', async () => {
-    if (!confirm(`确定删除 ${note || name || userId} 的全部印象？`)) return;
+    if (!await askForConfirmation(`确定删除 ${note || name || userId} 的全部印象？`)) return;
     try {
       await api(`/api/memory-files/${chatKey.replace(':', '_')}/members/${userId}`, { method: 'DELETE', body: '{}' });
       closeModelModal(overlay);
@@ -2836,6 +3547,7 @@ async function loadSettings() {
     api('/api/model-prices').catch(() => ({ prices: [], current: null }))
   ]);
   state.config = cfg;
+  syncGraduatedFeatureNavigation(cfg);
   state.providers = provData.providers || [];
   state.visionResults = visionData.results || {};
   state.visionScanning = !!visionData.scanning;
@@ -3626,44 +4338,75 @@ function renderMemorySettingsSection(c) {
 function renderExperimentalSettingsSection(c) {
   const enabled = c.identityPilot?.enabled === true;
   const friend = c.identityPilot?.friendProposal || {};
-  const ownerUin = friend.ownerUin || '';
+  const incoming = c.identityPilot?.incomingFriendRequest || {};
+  const slang = c.slangPilot || {};
+  const incident = c.incidentPilot || {};
+  const autoFriendEnabled = enabled
+    && friend.enabled === true
+    && incoming.enabled === true;
   return `
     <section class="experimental-settings">
       <h3 id="settings-experiments">实验功能</h3>
-      <div class="checkbox-row">
-        <input type="checkbox" id="cfg-identity-pilot-enabled" ${enabled ? 'checked' : ''} />
-        <label for="cfg-identity-pilot-enabled">跨会话人物画像与好友关系</label>
-        <span class="muted" id="identity-pilot-state">${enabled ? '正在读取统一身份库…' : '已关闭 · 当前系统行为不变'}</span>
-      </div>
-      <div class="field-row" id="identity-pilot-stats" ${enabled ? '' : 'hidden'}>
-        <div class="field"><label>统一身份</label><div data-identity-stat="people">-</div></div>
-        <div class="field"><label>会话来源</label><div data-identity-stat="sources">-</div></div>
-        <div class="field"><label>身份别名</label><div data-identity-stat="aliases">-</div></div>
-        <div class="field"><label>旧印象引用</label><div data-identity-stat="memories">-</div></div>
-      </div>
-      <div class="identity-pilot-people" id="identity-pilot-people" ${enabled ? '' : 'hidden'}></div>
-      <div id="identity-friend-proposal-box" ${enabled ? '' : 'hidden'}>
-        <h4>主动好友候选</h4>
-        <div class="checkbox-row">
-          <input type="checkbox" id="cfg-identity-friend-enabled" ${friend.enabled === true ? 'checked' : ''} />
-          <label for="cfg-identity-friend-enabled">允许 Agent 向管理员提交好友候选</label>
+      <div class="hint">这里只控制实验功能是否运行，以及是否固化为正式入口。固化后，详细设置和业务数据在独立页面维护。</div>
+      <div class="control-key-list" style="margin-top:14px">
+        <div class="control-key-row">
+          <span><strong>人物统一印象</strong><small id="experiment-identity-state">${enabled ? '已启用' : '已停用'} · ${c.identityPilot?.graduated === true ? '已固化' : '实验中'}</small></span>
+          <span class="settings-actions" style="margin:0">
+            <label class="checkbox-row" style="margin:0"><input type="checkbox" id="cfg-identity-pilot-enabled" ${enabled ? 'checked' : ''} /><span>启用</span></label>
+            <button type="button" class="btn btn-small ${c.identityPilot?.graduated === true ? '' : 'btn-primary'}"
+              id="launch-identity-feature" ${c.identityPilot?.graduated === true ? 'disabled' : ''}>
+              ${c.identityPilot?.graduated === true ? '已固化' : '固化上线'}
+            </button>
+          </span>
         </div>
-        <div class="field-row">
-          <div class="field"><label>审批管理员 QQ</label><input type="text" id="cfg-identity-friend-owner" inputmode="numeric" value="${esc(ownerUin)}" /></div>
-          <div class="field"><label>最低互动消息数</label><input type="number" id="cfg-identity-friend-min-messages" min="1" max="10000" value="${esc(friend.minMessageCount ?? 50)}" /></div>
-          <div class="field"><label>同一用户冷却天数</label><input type="number" id="cfg-identity-friend-cooldown" min="1" max="365" value="${esc(friend.cooldownDays ?? 30)}" /></div>
-          <div class="field"><label>待审批上限</label><input type="number" id="cfg-identity-friend-max-pending" min="1" max="100" value="${esc(friend.maxPending ?? 10)}" /></div>
+        <div class="control-key-row">
+          <span><strong>自动好友添加</strong><small id="experiment-auto-friend-state">${autoFriendEnabled ? '已启用' : '已停用'} · ${friend.graduated === true ? '已固化' : '实验中'}</small></span>
+          <span class="settings-actions" style="margin:0">
+            <label class="checkbox-row" style="margin:0"><input type="checkbox" id="cfg-auto-friend-enabled" ${autoFriendEnabled ? 'checked' : ''} /><span>启用</span></label>
+            <button type="button" class="btn btn-small ${friend.graduated === true ? '' : 'btn-primary'}"
+              id="launch-auto-friend-feature" ${friend.graduated === true ? 'disabled' : ''}>
+              ${friend.graduated === true ? '已固化' : '固化上线'}
+            </button>
+          </span>
         </div>
-        <div class="hint" id="identity-friend-protocol">读取协议能力中…</div>
-        <div class="identity-pilot-people" id="identity-friend-proposals"></div>
+        <div class="control-key-row">
+          <span><strong>黑话语料库</strong><small id="slang-pilot-state">${slang.enabled === true ? '已启用' : '已停用'} · ${slang.graduated === true ? '已固化' : '实验中'}</small></span>
+          <span class="settings-actions" style="margin:0">
+            <label class="checkbox-row" style="margin:0"><input type="checkbox" id="cfg-slang-pilot-enabled" ${slang.enabled === true ? 'checked' : ''} /><span>启用</span></label>
+            <button type="button" class="btn btn-small ${slang.graduated === true ? '' : 'btn-primary'}"
+              id="launch-slang-feature" ${slang.graduated === true ? 'disabled' : ''}>
+              ${slang.graduated === true ? '已固化' : '固化上线'}
+            </button>
+          </span>
+        </div>
+        <div class="control-key-row">
+          <span><strong>异常处理基础设施</strong><small id="incident-pilot-state">${incident.enabled === true ? '已启用' : '已停用'} · ${incident.graduated === true ? '已固化' : '实验中'}</small></span>
+          <span class="settings-actions" style="margin:0">
+            <label class="checkbox-row" style="margin:0"><input type="checkbox" id="cfg-incident-pilot-enabled" ${incident.enabled === true ? 'checked' : ''} /><span>启用</span></label>
+            <button type="button" class="btn btn-small ${incident.graduated === true ? '' : 'btn-primary'}"
+              id="launch-incident-feature" ${incident.graduated === true ? 'disabled' : ''}>
+              ${incident.graduated === true ? '已固化' : '固化上线'}
+            </button>
+          </span>
+        </div>
       </div>
+      <div class="hint" id="experiment-launch-result"></div>
     </section>`;
 }
 
-function identityPilotSettingsPatch(c, enabled, friendProposal = null) {
+function identityPilotSettingsPatch(
+  c,
+  enabled,
+  friendProposal = null,
+  incomingFriendRequest = null
+) {
   return {
     ...(c.identityPilot || {}),
     enabled: enabled === true,
+    incomingFriendRequest: {
+      ...(c.identityPilot?.incomingFriendRequest || {}),
+      ...(incomingFriendRequest || {})
+    },
     friendProposal: {
       ...(c.identityPilot?.friendProposal || {}),
       ...(friendProposal || {})
@@ -3671,9 +4414,226 @@ function identityPilotSettingsPatch(c, enabled, friendProposal = null) {
   };
 }
 
+function experimentalFeatureLaunchPatch(c, feature, ownerUin = '') {
+  const current = c.identityPilot || {};
+  if (feature === 'identity') {
+    return {
+      identityPilot: {
+        ...current,
+        enabled: true,
+        graduated: true
+      }
+    };
+  }
+  if (feature === 'auto-friend') {
+    return {
+      identityPilot: {
+        ...current,
+        enabled: true,
+        incomingFriendRequest: {
+          ...(current.incomingFriendRequest || {}),
+          enabled: true,
+          autoWhitelist: true
+        },
+        friendProposal: {
+          ...(current.friendProposal || {}),
+          enabled: true,
+          graduated: true,
+          activeDispatchEnabled: true,
+          ownerUin: String(ownerUin || current.friendProposal?.ownerUin || '').trim()
+        }
+      }
+    };
+  }
+  if (feature === 'slang') {
+    return {
+      slangPilot: {
+        ...(c.slangPilot || {}),
+        enabled: true,
+        graduated: true,
+        ownerUin: String(
+          ownerUin
+          || c.slangPilot?.ownerUin
+          || c.identityPilot?.friendProposal?.ownerUin
+          || ''
+        ).trim()
+      }
+    };
+  }
+  if (feature === 'incidents') {
+    return {
+      incidentPilot: {
+        ...(c.incidentPilot || {}),
+        enabled: true,
+        graduated: true,
+        ownerUin: String(
+          ownerUin
+          || c.incidentPilot?.ownerUin
+          || c.identityPilot?.friendProposal?.ownerUin
+          || c.slangPilot?.ownerUin
+          || ''
+        ).trim()
+      }
+    };
+  }
+  throw new Error(`未知实验功能：${feature}`);
+}
+
+function requestExperimentOwnerUin(feature, current = '') {
+  return new Promise((resolve) => {
+    const allow = (state.config?.allow?.private || []).map(String);
+    const overlay = modelModalShell({
+      head: feature === 'auto-friend'
+        ? '配置好友审批管理员'
+        : feature === 'incidents'
+          ? '配置异常告警管理员'
+          : '配置黑话审批管理员',
+      body: `
+        <div class="field">
+          <label>管理员 QQ</label>
+          <input type="text" id="experiment-owner-uin" inputmode="numeric"
+            list="experiment-owner-options" value="${esc(current)}" />
+          <datalist id="experiment-owner-options">
+            ${allow.map((uin) => `<option value="${esc(uin)}"></option>`).join('')}
+          </datalist>
+        </div>
+        <div class="hint" id="experiment-owner-error">管理员必须在私聊白名单中。</div>`,
+      foot: '<button type="button" class="btn" data-owner-cancel>取消</button>'
+        + '<button type="button" class="btn btn-primary" data-owner-confirm>继续上线</button>'
+    });
+    const finish = (value) => {
+      closeModelModal(overlay);
+      resolve(value);
+    };
+    overlay.querySelector('[data-owner-cancel]').addEventListener('click', () => finish(''));
+    overlay.querySelector('.model-modal-close').addEventListener('click', () => finish(''));
+    overlay.querySelector('[data-owner-confirm]').addEventListener('click', () => {
+      const value = overlay.querySelector('#experiment-owner-uin').value.trim();
+      const allowed = state.config?.allowAllWhenEmpty === true || allow.includes(value);
+      if (!/^\d{5,15}$/.test(value) || !allowed) {
+        overlay.querySelector('#experiment-owner-error').textContent =
+          '请输入私聊白名单中的有效 QQ 号。';
+        return;
+      }
+      finish(value);
+    });
+  });
+}
+
+async function launchExperimentalFeature(feature) {
+  const button = feature === 'identity'
+    ? $('#launch-identity-feature')
+    : feature === 'auto-friend'
+      ? $('#launch-auto-friend-feature')
+      : feature === 'incidents'
+        ? $('#launch-incident-feature')
+        : $('#launch-slang-feature');
+  const result = $('#experiment-launch-result');
+  let ownerUin = feature === 'slang'
+    ? state.config?.slangPilot?.ownerUin
+      || state.config?.identityPilot?.friendProposal?.ownerUin
+      || ''
+    : feature === 'incidents'
+      ? state.config?.incidentPilot?.ownerUin
+        || state.config?.identityPilot?.friendProposal?.ownerUin
+        || state.config?.slangPilot?.ownerUin
+        || ''
+      : state.config?.identityPilot?.friendProposal?.ownerUin || '';
+  const ownerAllowed = state.config?.allowAllWhenEmpty === true
+    || (state.config?.allow?.private || []).map(String).includes(String(ownerUin));
+  if (
+    ['auto-friend', 'slang', 'incidents'].includes(feature)
+    && (!/^\d{5,15}$/.test(ownerUin) || !ownerAllowed)
+  ) {
+    ownerUin = await requestExperimentOwnerUin(feature, ownerUin);
+    if (!ownerUin) return;
+  }
+  const message = feature === 'identity'
+    ? '固化上线人物统一印象？上线后会按 QQ 号聚合白名单会话中的身份和既有印象，并显示独立页面。'
+    : feature === 'auto-friend'
+      ? '固化上线自动好友添加？Agent 可提交好友候选，管理员批准后会立即发送申请；收到的好友申请仍需管理员审批。发送结果未知时不会自动重试。'
+      : feature === 'incidents'
+        ? '固化上线异常处理基础设施？上线后会记录异常、向管理员告警，并允许逐群控制自动、阻塞或继续。结果未知的旧写入不会自动重试。'
+        : '固化上线黑话语料库？上线后会启用本地发现和审批流程，并显示独立页面。';
+  if (!await askForConfirmation(message)) return;
+  if (button) button.disabled = true;
+  if (result) result.textContent = '正在上线…';
+  try {
+    const response = await api('/api/config', {
+      method: 'POST',
+      body: JSON.stringify(experimentalFeatureLaunchPatch(state.config, feature, ownerUin))
+    });
+    state.config = response.config;
+    syncGraduatedFeatureNavigation(state.config);
+    renderSettings();
+    const currentResult = $('#experiment-launch-result');
+    if (currentResult) {
+      currentResult.textContent = feature === 'identity'
+        ? '人物统一印象已固化上线'
+        : feature === 'auto-friend'
+          ? '自动好友添加已固化上线'
+          : feature === 'incidents'
+            ? '异常处理基础设施已固化上线'
+            : '黑话语料库已固化上线';
+    }
+    refreshStatus();
+  } catch (error) {
+    if (button) button.disabled = false;
+    if (result) result.textContent = `上线失败：${error.message}`;
+    throw error;
+  }
+}
+
+async function loadExperimentalFeatureStatuses() {
+  const identityNode = $('#experiment-identity-state');
+  const friendNode = $('#experiment-auto-friend-state');
+  const slangNode = $('#slang-pilot-state');
+  const incidentNode = $('#incident-pilot-state');
+  const [identityResult, slangResult, incidentResult] = await Promise.allSettled([
+      api('/api/identity-pilot/status'),
+      api('/api/slang-pilot/status'),
+      api('/api/incident-pilot/status')
+  ]);
+  if (identityResult.status === 'fulfilled') {
+    const identity = identityResult.value;
+    if (identityNode) {
+      identityNode.textContent = `${identity.active ? '运行中' : identity.enabled ? '启动失败' : '已停用'} · ${state.config?.identityPilot?.graduated === true ? '已固化' : '实验中'}`;
+    }
+    if (friendNode) {
+      const active = identity.active
+        && identity.friendProposal?.enabled === true
+        && identity.incomingFriendRequest?.enabled === true;
+      friendNode.textContent = `${active ? '运行中' : '已停用'} · ${state.config?.identityPilot?.friendProposal?.graduated === true ? '已固化' : '实验中'}`;
+    }
+  } else {
+    for (const node of [identityNode, friendNode]) {
+      if (node) node.textContent = `状态读取失败：${identityResult.reason?.message || identityResult.reason}`;
+    }
+  }
+  if (slangNode && slangResult.status === 'fulfilled') {
+    const slang = slangResult.value;
+    slangNode.textContent = `${slang.active ? '运行中' : slang.enabled ? '启动失败' : '已停用'} · ${state.config?.slangPilot?.graduated === true ? '已固化' : '实验中'}`;
+  } else if (slangNode) {
+    slangNode.textContent = `状态读取失败：${slangResult.reason?.message || slangResult.reason}`;
+  }
+  if (incidentNode && incidentResult.status === 'fulfilled') {
+    const incident = incidentResult.value;
+    incidentNode.textContent =
+      `${incident.active ? '运行中' : incident.enabled ? '启动失败' : '已停用'} · `
+      + `${state.config?.incidentPilot?.graduated === true ? '已固化' : '实验中'}`;
+  } else if (incidentNode) {
+    incidentNode.textContent =
+      `状态读取失败：${incidentResult.reason?.message || incidentResult.reason}`;
+  }
+}
+
 const FRIEND_PROPOSAL_STATUS = {
   pending: '待审批',
   approved_manual: '已批准 · 待手动执行',
+  dispatching: '发送中',
+  sent: '已提交申请',
+  held_unknown: '发送结果未知',
+  failed: '发送失败',
   accepted: '已成为好友',
   rejected: '已拒绝'
 };
@@ -3684,16 +4644,100 @@ const FRIEND_PROPOSAL_REASON = {
   banter: '想继续互怼'
 };
 
+const FRIEND_OPPORTUNITY_STATUS = {
+  lottery_miss: '抽签未命中',
+  review_budget: '评估预算已满',
+  queued: '等待评估',
+  reviewing: '评估中',
+  skipped: '模型跳过',
+  proposed: '已生成候选',
+  review_failed: '评估失败',
+  cancelled: '已取消',
+  expired: '队列过期',
+  interrupted: '重启中断'
+};
+
+const INCOMING_FRIEND_STATUS = {
+  pending: '待审批',
+  deciding: '处理中',
+  approved: '已同意 · 等待好友事件',
+  held_unknown: '处理结果未知',
+  failed: '处理失败',
+  accepted: '已成为好友',
+  rejected: '已拒绝'
+};
+
+async function decideIncomingFriendRequest(id, decision) {
+  const action = decision === 'approve' ? '同意' : '拒绝';
+  if (!await askForConfirmation(`${action}这条好友请求？结果未知时系统不会自动重试。`)) return;
+  const result = await api(
+    `/api/identity-pilot/incoming-friend-requests/${encodeURIComponent(id)}/decision`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ decision })
+    }
+  );
+  await loadFriendFeaturePage();
+  const status = $('#friend-feature-state');
+  if (status) status.textContent = result.note;
+}
+
+async function loadIncomingFriendRequests(status) {
+  const box = $('#identity-incoming-friend-requests');
+  if (!box) return;
+  const feature = status?.incomingFriendRequest || {};
+  if (!feature.enabled) {
+    box.innerHTML = '<div class="empty-hint">入站好友请求审批当前关闭</div>';
+    return;
+  }
+  const data = await api('/api/identity-pilot/incoming-friend-requests?limit=100');
+  const requests = data.requests || [];
+  if (!requests.length) {
+    box.innerHTML = '<div class="empty-hint">当前没有收到好友请求</div>';
+    return;
+  }
+  box.innerHTML = `<table class="identity-pilot-table">
+    <thead><tr><th>申请人</th><th>验证消息</th><th>状态</th><th>白名单</th><th>时间</th><th>操作</th></tr></thead>
+    <tbody>${requests.map((request) => `<tr>
+      <td><strong>${esc(request.primaryName || request.userId)}</strong><small><code>${esc(request.userId)}</code></small></td>
+      <td>${esc(request.comment || '（无）')}</td>
+      <td>${esc(INCOMING_FRIEND_STATUS[request.status] || request.status)}${request.actionError ? `<small>${esc(request.actionError)}</small>` : ''}</td>
+      <td>${request.whitelistApplied ? '已加入' : request.whitelistError ? `<span title="${esc(request.whitelistError)}">失败</span>` : '-'}</td>
+      <td>${esc(fmtTime(request.createdAt))}</td>
+      <td>${request.status === 'pending'
+        ? `<button type="button" class="btn btn-small incoming-friend-decision" data-id="${esc(request.id)}" data-decision="approve">同意</button>
+           <button type="button" class="btn btn-small btn-danger incoming-friend-decision" data-id="${esc(request.id)}" data-decision="reject">拒绝</button>`
+        : '-'}</td>
+    </tr>`).join('')}</tbody>
+  </table>`;
+  box.querySelectorAll('.incoming-friend-decision').forEach((button) => {
+    button.addEventListener('click', async () => {
+      button.disabled = true;
+      try {
+        await decideIncomingFriendRequest(button.dataset.id, button.dataset.decision);
+      } catch (error) {
+        const node = $('#friend-feature-state');
+        if (node) node.textContent = `审批失败：${error.message}`;
+        button.disabled = false;
+      }
+    });
+  });
+}
+
 async function decideFriendProposal(id, decision) {
-  if (decision === 'approve' && !confirm('批准这个好友候选？当前 OneBot 适配器不支持主动发送，批准后仍需在 QQ 客户端手动添加。')) {
+  const activeDispatch = state.config?.identityPilot?.friendProposal?.activeDispatchEnabled === true;
+  const confirmText = activeDispatch
+    ? '批准这个好友候选并立即调用 SnowLuma 发送申请？发送结果未知时系统不会自动重试。'
+    : '批准这个好友候选？主动发送实验开关未开启，批准后仍需在 QQ 客户端手动添加。';
+  if (decision === 'approve' && !await askForConfirmation(confirmText)) {
     return;
   }
   const result = await api(`/api/identity-pilot/friend-proposals/${encodeURIComponent(id)}/decision`, {
     method: 'POST',
     body: JSON.stringify({ decision })
   });
-  await loadIdentityPilotStatus();
-  const status = $('#identity-pilot-state');
+  await loadFriendFeaturePage();
+  const status = $('#friend-feature-state');
   if (status) status.textContent = result.note;
 }
 
@@ -3703,9 +4747,9 @@ async function loadFriendProposals(status) {
   if (!box) return;
   const feature = status?.friendProposal || {};
   if (protocol) {
-    protocol.textContent = feature.protocolDispatchSupported
-      ? '当前 OneBot 支持主动发送好友申请。'
-      : `${feature.protocolNote || '当前 OneBot 不支持主动发送好友申请。'} 管理员批准后会保留为待手动执行，绝不伪报发送成功。`;
+    protocol.textContent = feature.activeDispatchEnabled
+      ? `${feature.protocolNote || '主动发送实验协议已开启。'} 仅明确成功才标记已提交；结果未知时禁止自动重试。`
+      : '主动发送实验开关已关闭；管理员批准后保留为待手动执行。';
   }
   if (!feature.enabled) {
     box.innerHTML = '<div class="empty-hint">主动好友候选当前关闭</div>';
@@ -3723,7 +4767,7 @@ async function loadFriendProposals(status) {
       <td><strong>${esc(proposal.primaryName || proposal.userId)}</strong><small><code>${esc(proposal.userId)}</code></small></td>
       <td><strong>${esc(FRIEND_PROPOSAL_REASON[proposal.reasonCode] || proposal.reasonCode)}</strong><small>${esc(proposal.reason)}</small>${proposal.verificationMessage ? `<small>验证：${esc(proposal.verificationMessage)}</small>` : ''}</td>
       <td><code>${esc(proposal.sourceChatKey)}</code></td>
-      <td>${esc(FRIEND_PROPOSAL_STATUS[proposal.status] || proposal.status)}</td>
+      <td>${esc(FRIEND_PROPOSAL_STATUS[proposal.status] || proposal.status)}${proposal.dispatchError ? `<small>${esc(proposal.dispatchError)}</small>` : ''}</td>
       <td>${esc(fmtTime(proposal.createdAt))}</td>
       <td>${proposal.status === 'pending'
         ? `<button type="button" class="btn btn-small proposal-decision" data-id="${esc(proposal.id)}" data-decision="approve">批准</button>
@@ -3737,7 +4781,7 @@ async function loadFriendProposals(status) {
       try {
         await decideFriendProposal(button.dataset.id, button.dataset.decision);
       } catch (error) {
-        const node = $('#identity-pilot-state');
+        const node = $('#friend-feature-state');
         if (node) node.textContent = `审批失败：${error.message}`;
         button.disabled = false;
       }
@@ -3745,68 +4789,577 @@ async function loadFriendProposals(status) {
   });
 }
 
-async function loadIdentityPilotStatus() {
-  const statusNode = $('#identity-pilot-state');
-  if (!statusNode) return;
+async function loadFriendOpportunities(status) {
+  const box = $('#identity-friend-opportunities');
+  if (!box) return;
+  const feature = status?.friendProposal || {};
+  if (!feature.enabled || feature.mode !== 'triggered') {
+    box.innerHTML = '<div class="empty-hint">当前使用提示词提名模式，没有消息触发记录</div>';
+    return;
+  }
+  const data = await api('/api/identity-pilot/friend-opportunities?limit=100');
+  const opportunities = data.opportunities || [];
+  if (!opportunities.length) {
+    box.innerHTML = '<div class="empty-hint">尚无抽签或评估记录</div>';
+    return;
+  }
+  box.innerHTML = `<table class="identity-pilot-table">
+    <thead><tr><th>对象</th><th>结果</th><th>门槛快照</th><th>抽签</th><th>评分</th><th>时间</th></tr></thead>
+    <tbody>${opportunities.map((item) => {
+      const eligibility = item.eligibility || {};
+      const review = item.review || {};
+      return `<tr>
+        <td><strong>${esc(item.primaryName || item.userId)}</strong><small><code>${esc(item.userId)}</code> · <code>${esc(item.sourceChatKey)}</code></small></td>
+        <td>${esc(FRIEND_OPPORTUNITY_STATUS[item.status] || item.status)}${item.reason ? `<small>${esc(item.reason)}</small>` : ''}</td>
+        <td>${fmtTok(eligibility.messageCount || 0)} 条 · ${fmtTok(eligibility.activeDays || 0)} 天 · ${fmtTok(eligibility.directExchanges || 0)} 次双向</td>
+        <td>${(Number(item.probability || 0) * 100).toFixed(2)}%<small>随机值 ${Number(item.randomValue || 0).toFixed(4)}</small></td>
+        <td>${Number.isFinite(Number(review.score)) ? `${Number(review.score).toFixed(1)} / 100` : '-'}</td>
+        <td>${esc(fmtTime(item.createdAt))}</td>
+      </tr>`;
+    }).join('')}</tbody>
+  </table>`;
+}
+
+function bindFeatureAssetActions(rootSelector, kind, entries) {
+  const root = $(rootSelector);
+  if (!root) return;
+  $$('.asset-edit', root).forEach((button) => {
+    button.addEventListener('click', () => {
+      const entry = button.dataset.assetIndex !== undefined
+        ? entries[Number(button.dataset.assetIndex)]
+        : entries.find((item) =>
+            String(item.id ?? item.userId) === String(button.dataset.assetId));
+      if (entry) openAssetEditor(kind, entry);
+    });
+  });
+  $$('.asset-delete', root).forEach((button) => {
+    button.addEventListener('click', () => {
+      const entry = button.dataset.assetIndex !== undefined
+        ? entries[Number(button.dataset.assetIndex)]
+        : entries.find((item) =>
+            String(item.id ?? item.userId) === String(button.dataset.assetId));
+      if (entry) deleteAsset(kind, entry);
+    });
+  });
+}
+
+function renderIdentityFeaturePage(status, identities, memories) {
+  const box = $('#identity-page');
+  if (!box) return;
+  const query = state.identityFeatureQuery || '';
+  box.innerHTML = `
+    <div class="asset-head">
+      <div><h2>人物统一印象</h2><span class="muted" id="identity-feature-state">${status.active ? `运行中 · 最近索引 ${status.lastIndexedAt ? esc(fmtTime(status.lastIndexedAt)) : '-'}` : status.enabled ? `启动失败${status.error ? `：${esc(status.error)}` : ''}` : '当前已停用'}</span></div>
+      <button type="button" class="icon-btn" id="identity-feature-refresh" title="刷新人物与旧印象" aria-label="刷新人物与旧印象">↻</button>
+    </div>
+    <div class="asset-summary">
+      <div class="asset-summary-item"><span>统一人物</span><strong>${fmtTok(status.people)}</strong><small>按 QQ 号跨会话聚合</small></div>
+      <div class="asset-summary-item"><span>身份别名</span><strong>${fmtTok(status.aliases)}</strong><small>${fmtTok(status.sources)} 个会话来源</small></div>
+      <div class="asset-summary-item"><span>旧印象</span><strong>${fmtTok(status.legacyMemories)}</strong><small>来自现有记忆文件</small></div>
+      <div class="asset-summary-item"><span>好友</span><strong>${fmtTok(status.friends)}</strong><small>当前好友关系快照</small></div>
+    </div>
+    <div class="asset-toolbar">
+      <div>
+        <strong>统一人物与旧印象</strong>
+        <div class="hint">统一人物记录和原始旧印象分别维护，模型只按当前会话权限读取。</div>
+      </div>
+      <div class="asset-toolbar-actions">
+        <button type="button" class="btn btn-small" id="identity-add-person">＋ 人物</button>
+        <button type="button" class="btn btn-small" id="identity-add-memory">＋ 旧印象</button>
+        <div class="asset-search">
+          <input type="search" id="identity-feature-query" value="${esc(query)}" placeholder="搜索人物或印象" />
+          <button type="button" class="btn btn-small" id="identity-feature-search">搜索</button>
+        </div>
+      </div>
+    </div>
+    <section class="control-section">
+      <h3>统一人物</h3>
+      <div id="identity-feature-people">${renderIdentityAssets(identities)}</div>
+    </section>
+    <section class="control-section">
+      <h3>旧印象</h3>
+      <div id="identity-feature-memories">${renderMemoryAssets(memories)}</div>
+    </section>`;
+
+  $('#identity-feature-refresh')?.addEventListener('click', () => loadIdentityFeaturePage());
+  const search = () => {
+    state.identityFeatureQuery = $('#identity-feature-query')?.value || '';
+    loadIdentityFeaturePage();
+  };
+  $('#identity-feature-search')?.addEventListener('click', search);
+  $('#identity-feature-query')?.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') search();
+  });
+  $('#identity-add-person')?.addEventListener('click', () => openAssetEditor('identities'));
+  $('#identity-add-memory')?.addEventListener('click', () => openAssetEditor('memory'));
+  bindFeatureAssetActions(
+    '#identity-feature-people',
+    'identities',
+    identities.entries || []
+  );
+  bindFeatureAssetActions(
+    '#identity-feature-memories',
+    'memory',
+    memories.entries || []
+  );
+}
+
+async function loadIdentityFeaturePage() {
+  const box = $('#identity-page');
+  if (!box) return;
+  box.innerHTML = '<div class="empty-hint">正在读取人物与旧印象…</div>';
   try {
-    const status = await api('/api/identity-pilot/status');
-    const stats = $('#identity-pilot-stats');
-    if (!status.enabled) {
-      statusNode.textContent = '已关闭 · 当前系统行为不变';
-      if (stats) stats.hidden = true;
-      const people = $('#identity-pilot-people');
-      if (people) {
-        people.hidden = true;
-        people.innerHTML = '';
-      }
-      const friendBox = $('#identity-friend-proposal-box');
-      if (friendBox) friendBox.hidden = true;
-      return;
-    }
-    statusNode.textContent = status.active
-      ? `已启用 · 最近索引 ${status.lastIndexedAt ? fmtTime(status.lastIndexedAt) : '-'}`
-      : `未运行${status.error ? `：${status.error}` : ''}`;
-    if (stats) {
-      stats.hidden = !status.active;
-      const values = {
-        people: status.people,
-        sources: status.sources,
-        aliases: status.aliases,
-        memories: status.legacyMemories
-      };
-      for (const [key, value] of Object.entries(values)) {
-        const node = stats.querySelector(`[data-identity-stat="${key}"]`);
-        if (node) node.textContent = fmtTok(value);
-      }
-    }
-    const peopleBox = $('#identity-pilot-people');
-    if (peopleBox && status.active) {
-      const data = await api('/api/identity-pilot/people?limit=100');
-      const rows = (data.people || []).map((person) => {
-        const aliases = [...new Set((person.aliases || []).map((item) => item.alias).filter(Boolean))];
-        return `<tr>
-          <td><code>${esc(person.userId)}</code></td>
-          <td>${esc(person.primaryName || '-')}</td>
-          <td title="${esc(aliases.join(' / '))}">${esc(aliases.slice(0, 3).join(' / ') || '-')}</td>
-          <td>${fmtTok(person.chatCount)}</td>
-          <td>${fmtTok(person.messageCount)}</td>
-          <td>${person.isFriend ? '是' : '否'}</td>
-          <td>${fmtTok(person.legacyMemoryCount)}</td>
-        </tr>`;
-      }).join('');
-      peopleBox.hidden = false;
-      peopleBox.innerHTML = rows
-        ? `<table class="identity-pilot-table">
-            <thead><tr><th>QQ</th><th>首选名称</th><th>别名</th><th>会话</th><th>消息</th><th>好友</th><th>旧印象</th></tr></thead>
-            <tbody>${rows}</tbody>
-          </table>`
-        : '<div class="empty-hint">当前没有可索引的身份</div>';
-    }
-    const friendBox = $('#identity-friend-proposal-box');
-    if (friendBox) friendBox.hidden = !status.active;
-    if (status.active) await loadFriendProposals(status);
+    const query = encodeURIComponent(state.identityFeatureQuery || '');
+    const [cfg, status, identities, memories, chats] = await Promise.all([
+      api('/api/config'),
+      api('/api/identity-pilot/status'),
+      api(`/api/assets/identities?limit=500&query=${query}`),
+      api(`/api/assets/memory?query=${query}`),
+      api('/api/chats').catch(() => ({ chats: [] }))
+    ]);
+    if (state.tab !== 'identity') return;
+    state.config = cfg;
+    state.chats = chats.chats || state.chats;
+    syncGraduatedFeatureNavigation(cfg);
+    renderIdentityFeaturePage(status, identities, memories);
   } catch (error) {
-    statusNode.textContent = `状态读取失败：${error.message}`;
+    box.innerHTML = `<div class="empty-hint">人物统一印象读取失败：${esc(error.message)}</div>`;
+  }
+}
+
+function renderFriendFeaturePage(c, status) {
+  const box = $('#friend-page');
+  if (!box) return;
+  const friend = c.identityPilot?.friendProposal || {};
+  const incoming = c.identityPilot?.incomingFriendRequest || {};
+  const triggered = friend.triggered || {};
+  const proposalCounts = status.friendProposal?.counts || {};
+  const opportunityCounts = status.friendProposal?.opportunityCounts || {};
+  const incomingCounts = status.incomingFriendRequest?.counts || {};
+  box.innerHTML = `
+    <div class="asset-head">
+      <div><h2>好友管理</h2><span class="muted" id="friend-feature-state">${status.active ? '统一身份库运行中' : status.enabled ? '统一身份库启动失败' : '人物统一印象已停用'}</span></div>
+      <button type="button" class="icon-btn" id="friend-feature-refresh" title="刷新好友工作流" aria-label="刷新好友工作流">↻</button>
+    </div>
+    <div class="asset-summary">
+      <div class="asset-summary-item"><span>主动候选待审批</span><strong>${fmtTok(proposalCounts.pending)}</strong><small>管理员批准后发送</small></div>
+      <div class="asset-summary-item"><span>消息触发评估</span><strong>${fmtTok(opportunityCounts.total)}</strong><small>${fmtTok(opportunityCounts.proposed)} 次提名</small></div>
+      <div class="asset-summary-item"><span>评估中</span><strong>${fmtTok(opportunityCounts.active)}</strong><small>${fmtTok(opportunityCounts.reviewFailed)} 次失败</small></div>
+      <div class="asset-summary-item"><span>好友关系快照</span><strong>${status.friendProposal?.friendStatusTrusted ? '可信' : '不可用'}</strong><small>${status.friendProposal?.friendSnapshotAt ? esc(fmtTime(status.friendProposal.friendSnapshotAt)) : '未知时不触发'}</small></div>
+    </div>
+    <section class="control-section">
+      <div class="control-section-title">
+        <div><h3>运行设置</h3><span class="muted">启停由“设置 → 实验功能”统一控制</span></div>
+        <button type="button" class="btn btn-primary btn-small" id="friend-feature-save">保存好友设置</button>
+      </div>
+      <div class="field-row">
+        <div class="field"><label>好友审批管理员 QQ</label><input type="text" id="cfg-identity-friend-owner" inputmode="numeric" value="${esc(friend.ownerUin || '')}" /></div>
+        <div class="field"><label>候选生成模式</label><select id="cfg-identity-friend-mode"><option value="triggered" ${friend.mode === 'triggered' ? 'selected' : ''}>消息触发评估</option><option value="prompt" ${friend.mode !== 'triggered' ? 'selected' : ''}>旧版提示词提名</option></select></div>
+        <div class="field"><label>旧模式最低累计消息</label><input type="number" id="cfg-identity-friend-min-messages" min="1" max="10000" value="${esc(friend.minMessageCount ?? 50)}" /></div>
+        <div class="field"><label>同一用户冷却天数</label><input type="number" id="cfg-identity-friend-cooldown" min="1" max="365" value="${esc(friend.cooldownDays ?? 30)}" /></div>
+        <div class="field"><label>主动候选待审批上限</label><input type="number" id="cfg-identity-friend-max-pending" min="1" max="100" value="${esc(friend.maxPending ?? 10)}" /></div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label>抽签概率（%）</label><input type="number" id="cfg-friend-trigger-probability" min="0" max="100" step="0.1" value="${esc((Number(triggered.probability ?? 0.05) * 100).toFixed(1))}" /></div>
+        <div class="field"><label>统计窗口（天）</label><input type="number" id="cfg-friend-trigger-history-days" min="1" max="365" value="${esc(triggered.historyDays ?? 30)}" /></div>
+        <div class="field"><label>最低有效发言</label><input type="number" id="cfg-friend-trigger-min-messages" min="0" max="10000" value="${esc(triggered.minMessages ?? 50)}" /></div>
+        <div class="field"><label>最低活跃日</label><input type="number" id="cfg-friend-trigger-min-days" min="0" max="365" value="${esc(triggered.minActiveDays ?? 3)}" /></div>
+        <div class="field"><label>最低双向交流</label><input type="number" id="cfg-friend-trigger-min-exchanges" min="0" max="1000" value="${esc(triggered.minDirectExchanges ?? 3)}" /></div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label>触发消息最长延迟（分钟）</label><input type="number" id="cfg-friend-trigger-max-age" min="1" max="1440" value="${esc(triggered.maxTriggerAgeMinutes ?? 10)}" /></div>
+        <div class="field"><label>好友快照最长缓存（分钟）</label><input type="number" id="cfg-friend-trigger-friend-age" min="1" max="1440" value="${esc(triggered.friendStatusMaxAgeMinutes ?? 15)}" /></div>
+        <div class="field"><label>抽签冷却（分钟）</label><input type="number" id="cfg-friend-trigger-draw-cooldown" min="1" max="10080" value="${esc(triggered.drawCooldownMinutes ?? 30)}" /></div>
+        <div class="field"><label>每人每日抽签上限</label><input type="number" id="cfg-friend-trigger-max-draws" min="1" max="1000" value="${esc(triggered.maxDrawsPerUserPerDay ?? 6)}" /></div>
+        <div class="field"><label>每日模型评估上限</label><input type="number" id="cfg-friend-trigger-max-reviews" min="0" max="1000" value="${esc(triggered.maxReviewsPerDay ?? 10)}" /></div>
+        <div class="field"><label>提名分数线</label><input type="number" id="cfg-friend-trigger-threshold" min="0" max="100" value="${esc(triggered.scoreThreshold ?? 70)}" /></div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label>模型跳过冷却（天）</label><input type="number" id="cfg-friend-trigger-skip-cooldown" min="0" max="365" value="${esc(triggered.skipCooldownDays ?? 7)}" /></div>
+        <div class="field"><label>评估失败冷却（分钟）</label><input type="number" id="cfg-friend-trigger-error-cooldown" min="1" max="10080" value="${esc(triggered.errorCooldownMinutes ?? 60)}" /></div>
+        <div class="field"><label>评估排队期限（秒）</label><input type="number" id="cfg-friend-trigger-queue-age" min="5" max="3600" value="${esc(triggered.maxQueueAgeSeconds ?? 120)}" /></div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label>互动质量权重</label><input type="number" id="cfg-friend-weight-quality" min="0" max="100" value="${esc(triggered.weights?.quality ?? 40)}" /></div>
+        <div class="field"><label>交流意愿权重</label><input type="number" id="cfg-friend-weight-interest" min="0" max="100" value="${esc(triggered.weights?.interest ?? 30)}" /></div>
+        <div class="field"><label>双向投入权重</label><input type="number" id="cfg-friend-weight-reciprocity" min="0" max="100" value="${esc(triggered.weights?.reciprocity ?? 20)}" /></div>
+        <div class="field"><label>关系稳定权重</label><input type="number" id="cfg-friend-weight-stability" min="0" max="100" value="${esc(triggered.weights?.stability ?? 10)}" /></div>
+      </div>
+      <div class="hint">已经是好友的用户不会进入抽签或模型评估；好友状态无法确认时同样不会触发。四项权重合计必须为 100。</div>
+      <div class="checkbox-row">
+        <input type="checkbox" id="cfg-identity-friend-dispatch" ${friend.activeDispatchEnabled === true ? 'checked' : ''} />
+        <label for="cfg-identity-friend-dispatch">管理员批准后主动发送好友申请</label>
+      </div>
+      <div class="field-row">
+        <div class="field"><label>入站请求待审批上限</label><input type="number" id="cfg-identity-incoming-max-pending" min="1" max="500" value="${esc(incoming.maxPending ?? 50)}" /></div>
+      </div>
+      <div class="checkbox-row">
+        <input type="checkbox" id="cfg-identity-incoming-auto-whitelist" ${incoming.autoWhitelist !== false ? 'checked' : ''} />
+        <label for="cfg-identity-incoming-auto-whitelist">同意或确认成为好友后自动加入私聊白名单</label>
+      </div>
+      <div class="hint" id="identity-friend-protocol">${esc(status.friendProposal?.protocolNote || '')}</div>
+      <div class="hint" id="friend-feature-save-result"></div>
+    </section>
+    <section class="control-section" id="identity-incoming-friend-box">
+      <h3>收到的好友请求</h3>
+      <div class="identity-pilot-people" id="identity-incoming-friend-requests"></div>
+    </section>
+    <section class="control-section" id="identity-friend-proposal-box">
+      <h3>Agent 主动好友候选</h3>
+      <div class="identity-pilot-people" id="identity-friend-proposals"></div>
+    </section>
+    <section class="control-section" id="identity-friend-opportunity-box">
+      <h3>消息触发与评估记录</h3>
+      <div class="identity-pilot-people" id="identity-friend-opportunities"></div>
+    </section>`;
+  $('#friend-feature-refresh')?.addEventListener('click', () => loadFriendFeaturePage());
+  $('#friend-feature-save')?.addEventListener('click', saveFriendFeatureConfig);
+}
+
+async function saveFriendFeatureConfig() {
+  const c = state.config || await api('/api/config');
+  const result = $('#friend-feature-save-result');
+  const patch = {
+    identityPilot: identityPilotSettingsPatch(
+      c,
+      c.identityPilot?.enabled === true,
+      {
+        ownerUin: $('#cfg-identity-friend-owner')?.value?.trim() || '',
+        mode: $('#cfg-identity-friend-mode')?.value === 'prompt' ? 'prompt' : 'triggered',
+        activeDispatchEnabled: $('#cfg-identity-friend-dispatch')?.checked === true,
+        minMessageCount: clampInt($('#cfg-identity-friend-min-messages')?.value, 1, 10000, 50),
+        cooldownDays: clampInt($('#cfg-identity-friend-cooldown')?.value, 1, 365, 30),
+        maxPending: clampInt($('#cfg-identity-friend-max-pending')?.value, 1, 100, 10),
+        triggered: {
+          ...(c.identityPilot?.friendProposal?.triggered || {}),
+          probability: Math.min(1, Math.max(0, Number($('#cfg-friend-trigger-probability')?.value) / 100 || 0)),
+          historyDays: clampInt($('#cfg-friend-trigger-history-days')?.value, 1, 365, 30),
+          minMessages: clampInt($('#cfg-friend-trigger-min-messages')?.value, 0, 10000, 50),
+          minActiveDays: clampInt($('#cfg-friend-trigger-min-days')?.value, 0, 365, 3),
+          minDirectExchanges: clampInt($('#cfg-friend-trigger-min-exchanges')?.value, 0, 1000, 3),
+          maxTriggerAgeMinutes: clampInt($('#cfg-friend-trigger-max-age')?.value, 1, 1440, 10),
+          friendStatusMaxAgeMinutes: clampInt($('#cfg-friend-trigger-friend-age')?.value, 1, 1440, 15),
+          drawCooldownMinutes: clampInt($('#cfg-friend-trigger-draw-cooldown')?.value, 1, 10080, 30),
+          maxDrawsPerUserPerDay: clampInt($('#cfg-friend-trigger-max-draws')?.value, 1, 1000, 6),
+          maxReviewsPerDay: clampInt($('#cfg-friend-trigger-max-reviews')?.value, 0, 1000, 10),
+          skipCooldownDays: clampInt($('#cfg-friend-trigger-skip-cooldown')?.value, 0, 365, 7),
+          errorCooldownMinutes: clampInt($('#cfg-friend-trigger-error-cooldown')?.value, 1, 10080, 60),
+          maxQueueAgeSeconds: clampInt($('#cfg-friend-trigger-queue-age')?.value, 5, 3600, 120),
+          scoreThreshold: clampInt($('#cfg-friend-trigger-threshold')?.value, 0, 100, 70),
+          weights: {
+            quality: clampInt($('#cfg-friend-weight-quality')?.value, 0, 100, 40),
+            interest: clampInt($('#cfg-friend-weight-interest')?.value, 0, 100, 30),
+            reciprocity: clampInt($('#cfg-friend-weight-reciprocity')?.value, 0, 100, 20),
+            stability: clampInt($('#cfg-friend-weight-stability')?.value, 0, 100, 10)
+          }
+        }
+      },
+      {
+        autoWhitelist: $('#cfg-identity-incoming-auto-whitelist')?.checked !== false,
+        maxPending: clampInt($('#cfg-identity-incoming-max-pending')?.value, 1, 500, 50)
+      }
+    )
+  };
+  if (result) result.textContent = '保存中…';
+  try {
+    const response = await api('/api/config', {
+      method: 'POST',
+      body: JSON.stringify(patch)
+    });
+    state.config = response.config;
+    syncGraduatedFeatureNavigation(state.config);
+    await loadFriendFeaturePage();
+  } catch (error) {
+    if (result) result.textContent = `保存失败：${error.message}`;
+  }
+}
+
+async function loadFriendFeaturePage() {
+  const box = $('#friend-page');
+  if (!box) return;
+  box.innerHTML = '<div class="empty-hint">正在读取好友工作流…</div>';
+  try {
+    const [cfg, status] = await Promise.all([
+      api('/api/config'),
+      api('/api/identity-pilot/status')
+    ]);
+    if (state.tab !== 'friends') return;
+    state.config = cfg;
+    syncGraduatedFeatureNavigation(cfg);
+    renderFriendFeaturePage(cfg, status);
+    await Promise.all([
+      loadIncomingFriendRequests(status),
+      loadFriendProposals(status),
+      loadFriendOpportunities(status)
+    ]);
+  } catch (error) {
+    box.innerHTML = `<div class="empty-hint">好友管理读取失败：${esc(error.message)}</div>`;
+  }
+}
+
+function renderSlangFeaturePage(c, status) {
+  const box = $('#slang-page');
+  if (!box) return;
+  const slang = c.slangPilot || {};
+  box.innerHTML = `
+    <div class="asset-head">
+      <div><h2>黑话研究</h2><span class="muted">${status.active ? `运行中 · 待研究 ${fmtTok(status.pendingResearch)} · 待入库 ${fmtTok(status.pendingAdmission)}` : status.enabled ? `启动失败${status.error ? `：${esc(status.error)}` : ''}` : '当前已停用'}</span></div>
+      <button type="button" class="icon-btn" id="slang-feature-refresh" title="刷新黑话状态" aria-label="刷新黑话状态">↻</button>
+    </div>
+    <section class="control-section">
+      <div class="control-section-title">
+        <div><h3>研究设置</h3><span class="muted">启停由“设置 → 实验功能”统一控制</span></div>
+        <button type="button" class="btn btn-primary btn-small" id="slang-feature-save">保存研究设置</button>
+      </div>
+      <div class="field-row">
+        <div class="field"><label>审批管理员 QQ</label><input type="text" id="cfg-slang-owner" inputmode="numeric" value="${esc(slang.ownerUin || c.identityPilot?.friendProposal?.ownerUin || '')}" /></div>
+        <div class="field"><label>最少出现次数</label><input type="number" id="cfg-slang-min-occurrences" min="2" max="20" value="${esc(slang.minOccurrences ?? 3)}" /></div>
+        <div class="field"><label>最少发言人数</label><input type="number" id="cfg-slang-min-speakers" min="1" max="20" value="${esc(slang.minSpeakers ?? 2)}" /></div>
+        <div class="field"><label>统计窗口（小时）</label><input type="number" id="cfg-slang-window-hours" min="1" max="720" value="${esc(slang.windowHours ?? 72)}" /></div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label>待处理总上限</label><input type="number" id="cfg-slang-max-pending" min="1" max="500" value="${esc(slang.maxPending ?? 100)}" /></div>
+        <div class="field"><label>每群每日新增上限</label><input type="number" id="cfg-slang-daily-limit" min="1" max="50" value="${esc(slang.perChatDailyLimit ?? 5)}" /></div>
+        <div class="field"><label>拒绝冷却天数</label><input type="number" id="cfg-slang-reject-cooldown" min="1" max="365" value="${esc(slang.rejectCooldownDays ?? 14)}" /></div>
+        <div class="field"><label>每词证据上限</label><input type="number" id="cfg-slang-max-evidence" min="3" max="30" value="${esc(slang.maxEvidence ?? 12)}" /></div>
+      </div>
+      <div class="checkbox-row">
+        <input type="checkbox" id="cfg-slang-web-research" ${slang.webResearch !== false ? 'checked' : ''} />
+        <label for="cfg-slang-web-research">管理员批准后联网研究</label>
+      </div>
+      <div class="field-row">
+        <div class="field"><label>搜索结果上限</label><input type="number" id="cfg-slang-search-results" min="1" max="10" value="${esc(slang.maxSearchResults ?? 5)}" /></div>
+        <div class="field"><label>正文抓取页数</label><input type="number" id="cfg-slang-fetch-pages" min="0" max="3" value="${esc(slang.maxFetchPages ?? 2)}" /></div>
+        <div class="field"><label>格式纠正轮数</label><input type="number" id="cfg-slang-research-rounds" min="1" max="3" value="${esc(slang.maxResearchRounds ?? 2)}" /></div>
+      </div>
+      <div class="settings-actions">
+        <button type="button" class="btn btn-small" data-open-slang-assets="slang-research">查看研究队列</button>
+        <button type="button" class="btn btn-small" data-open-slang-assets="slang">查看黑话资产</button>
+        <span class="hint" id="slang-feature-save-result"></span>
+      </div>
+    </section>`;
+  $('#slang-feature-refresh')?.addEventListener('click', () => loadSlangFeaturePage());
+  $('#slang-feature-save')?.addEventListener('click', saveSlangFeatureConfig);
+  $$('[data-open-slang-assets]', box).forEach((button) => {
+    button.addEventListener('click', () => {
+      state.assetKind = button.dataset.openSlangAssets;
+      state.assetDetail = null;
+      switchTab('assets');
+    });
+  });
+}
+
+async function saveSlangFeatureConfig() {
+  const c = state.config || await api('/api/config');
+  const value = (selector, fallback = '') => $(selector)?.value ?? fallback;
+  const patch = {
+    slangPilot: {
+      ...(c.slangPilot || {}),
+      ownerUin: value('#cfg-slang-owner').trim(),
+      minOccurrences: clampInt(value('#cfg-slang-min-occurrences'), 2, 20, 3),
+      minSpeakers: clampInt(value('#cfg-slang-min-speakers'), 1, 20, 2),
+      windowHours: clampInt(value('#cfg-slang-window-hours'), 1, 720, 72),
+      maxPending: clampInt(value('#cfg-slang-max-pending'), 1, 500, 100),
+      perChatDailyLimit: clampInt(value('#cfg-slang-daily-limit'), 1, 50, 5),
+      rejectCooldownDays: clampInt(value('#cfg-slang-reject-cooldown'), 1, 365, 14),
+      maxEvidence: clampInt(value('#cfg-slang-max-evidence'), 3, 30, 12),
+      webResearch: $('#cfg-slang-web-research')?.checked !== false,
+      maxSearchResults: clampInt(value('#cfg-slang-search-results'), 1, 10, 5),
+      maxFetchPages: clampInt(value('#cfg-slang-fetch-pages'), 0, 3, 2),
+      maxResearchRounds: clampInt(value('#cfg-slang-research-rounds'), 1, 3, 2)
+    }
+  };
+  const result = $('#slang-feature-save-result');
+  if (result) result.textContent = '保存中…';
+  try {
+    const response = await api('/api/config', {
+      method: 'POST',
+      body: JSON.stringify(patch)
+    });
+    state.config = response.config;
+    syncGraduatedFeatureNavigation(state.config);
+    await loadSlangFeaturePage();
+  } catch (error) {
+    if (result) result.textContent = `保存失败：${error.message}`;
+  }
+}
+
+async function loadSlangFeaturePage() {
+  const box = $('#slang-page');
+  if (!box) return;
+  box.innerHTML = '<div class="empty-hint">正在读取黑话研究配置…</div>';
+  try {
+    const [cfg, status] = await Promise.all([
+      api('/api/config'),
+      api('/api/slang-pilot/status')
+    ]);
+    if (state.tab !== 'slang') return;
+    state.config = cfg;
+    syncGraduatedFeatureNavigation(cfg);
+    renderSlangFeaturePage(cfg, status);
+  } catch (error) {
+    box.innerHTML = `<div class="empty-hint">黑话研究读取失败：${esc(error.message)}</div>`;
+  }
+}
+
+const INCIDENT_SEVERITY_LABELS = {
+  info: '信息', warning: '警告', error: '错误', critical: '严重'
+};
+const INCIDENT_STATE_LABELS = {
+  open: '待处理', acknowledged: '已确认', resolved: '已解决'
+};
+
+function renderIncidentFeaturePage(c, status, incidents = []) {
+  const box = $('#incident-page');
+  if (!box) return;
+  const settings = c.incidentPilot || {};
+  const counts = status.counts || {};
+  box.innerHTML = `
+    <div class="asset-head">
+      <div><h2>异常</h2><span class="muted">${status.active ? '异常处理试点运行中' : status.exists ? '试点已停用，保留只读日志' : '异常处理试点尚未启用'}</span></div>
+      <button type="button" class="icon-btn" id="incident-feature-refresh" title="刷新异常" aria-label="刷新异常">↻</button>
+    </div>
+    <div class="asset-summary">
+      <div class="asset-summary-item"><span>待处理</span><strong>${fmtTok(counts.open)}</strong><small>尚未确认或解决</small></div>
+      <div class="asset-summary-item"><span>严重</span><strong>${fmtTok(counts.critical)}</strong><small>未解决严重异常</small></div>
+      <div class="asset-summary-item"><span>已确认</span><strong>${fmtTok(counts.acknowledged)}</strong><small>已看到，尚未解决</small></div>
+      <div class="asset-summary-item"><span>告警待发送</span><strong>${fmtTok(status.pendingNotifications)}</strong><small>OneBot 恢复后发送</small></div>
+    </div>
+    <section class="control-section">
+      <div class="control-section-title">
+        <div><h3>告警与策略</h3><span class="muted">启停由“设置 → 实验功能”统一控制</span></div>
+        <button type="button" class="btn btn-primary btn-small" id="incident-feature-save">保存异常设置</button>
+      </div>
+      <div class="field-row">
+        <div class="field"><label>告警管理员 QQ</label><input type="text" id="cfg-incident-owner" inputmode="numeric" value="${esc(settings.ownerUin || '')}" /></div>
+        <div class="field"><label>同类异常合并窗口（分钟）</label><input type="number" id="cfg-incident-window" min="1" max="1440" value="${esc(settings.duplicateWindowMinutes ?? 10)}" /></div>
+        <div class="field"><label>已解决日志保留天数</label><input type="number" id="cfg-incident-retention" min="1" max="3650" value="${esc(settings.retentionDays ?? 90)}" /></div>
+      </div>
+      <div class="checkbox-row"><input type="checkbox" id="cfg-incident-warnings" ${settings.notifyWarnings !== false ? 'checked' : ''} />
+        <label for="cfg-incident-warnings">警告级异常也通知管理员</label></div>
+      <div class="checkbox-row"><input type="checkbox" id="cfg-incident-unknown-block" ${settings.unknownWritesBlockChat === true ? 'checked' : ''} />
+        <label for="cfg-incident-unknown-block">未知写入阻塞整个会话（兼容旧策略）</label></div>
+      <div class="hint">关闭兼容策略后，未知旧写入仍不重试，但新消息可以继续处理。</div>
+      <div class="hint" id="incident-feature-save-result"></div>
+    </section>
+    <section class="control-section">
+      <div class="control-section-title">
+        <div><h3>异常日志</h3><span class="muted">删除日志不会解除未知写入或改变会话状态</span></div>
+        <div class="settings-actions" style="margin:0">
+          <select id="incident-state-filter" aria-label="异常状态">
+            <option value="">全部状态</option>
+            ${Object.entries(INCIDENT_STATE_LABELS).map(([value, label]) =>
+              `<option value="${value}" ${state.incidentState === value ? 'selected' : ''}>${label}</option>`).join('')}
+          </select>
+          <select id="incident-severity-filter" aria-label="异常等级">
+            <option value="">全部等级</option>
+            ${Object.entries(INCIDENT_SEVERITY_LABELS).map(([value, label]) =>
+              `<option value="${value}" ${state.incidentSeverity === value ? 'selected' : ''}>${label}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div class="table-wrap"><table class="usage-table incident-table">
+        <thead><tr><th>时间</th><th>等级</th><th>来源</th><th>会话</th><th>异常</th><th>次数</th><th>状态</th><th></th></tr></thead>
+        <tbody>${incidents.map((incident) => `<tr>
+          <td>${esc(fmtTime(incident.lastAt))}</td>
+          <td><span class="incident-severity severity-${esc(incident.severity)}">${esc(INCIDENT_SEVERITY_LABELS[incident.severity] || incident.severity)}</span></td>
+          <td>${esc(incident.source || '-')}</td>
+          <td>${esc(incident.chatKey || '-')}</td>
+          <td><details><summary>${esc(incident.message || incident.code)}</summary>
+            <div class="incident-detail"><code>${esc(incident.code)}</code>
+              ${incident.sessionId ? `<div>Session：${esc(incident.sessionId)}</div>` : ''}
+              ${incident.operationId ? `<div>Operation：${esc(incident.operationId)}</div>` : ''}
+              ${incident.notifyError ? `<div>告警：${esc(incident.notifyError)}</div>` : ''}
+              ${incident.resolution ? `<div>处理：${esc(incident.resolution)}</div>` : ''}
+            </div></details></td>
+          <td>${fmtTok(incident.count)}</td>
+          <td>${esc(INCIDENT_STATE_LABELS[incident.state] || incident.state)}</td>
+          <td><div class="settings-actions incident-actions">
+            ${incident.state === 'open' ? `<button type="button" class="btn btn-small" data-incident-ack="${esc(incident.id)}">确认</button>` : ''}
+            ${incident.state !== 'resolved' ? `<button type="button" class="btn btn-small" data-incident-resolve="${esc(incident.id)}">解决</button>` : ''}
+            ${incident.state === 'resolved' ? `<button type="button" class="icon-btn" data-incident-delete="${esc(incident.id)}" title="删除日志" aria-label="删除日志">×</button>` : ''}
+          </div></td>
+        </tr>`).join('')}</tbody>
+      </table></div>
+      ${incidents.length ? '' : '<div class="empty-hint">当前筛选条件下没有异常日志</div>'}
+    </section>`;
+
+  $('#incident-feature-refresh')?.addEventListener('click', () => loadIncidentFeaturePage());
+  $('#incident-feature-save')?.addEventListener('click', saveIncidentFeatureConfig);
+  $('#incident-state-filter')?.addEventListener('change', (event) => {
+    state.incidentState = event.target.value;
+    loadIncidentFeaturePage();
+  });
+  $('#incident-severity-filter')?.addEventListener('change', (event) => {
+    state.incidentSeverity = event.target.value;
+    loadIncidentFeaturePage();
+  });
+  $$('[data-incident-ack]', box).forEach((button) => button.addEventListener('click', async () => {
+    await api(`/api/incidents/${encodeURIComponent(button.dataset.incidentAck)}/acknowledge`, {
+      method: 'POST', body: '{}'
+    });
+    loadIncidentFeaturePage();
+  }));
+  $$('[data-incident-resolve]', box).forEach((button) => button.addEventListener('click', async () => {
+    const resolution = prompt('填写处理结果');
+    if (!resolution?.trim()) return;
+    await api(`/api/incidents/${encodeURIComponent(button.dataset.incidentResolve)}/resolve`, {
+      method: 'POST', body: JSON.stringify({ resolution: resolution.trim() })
+    });
+    loadIncidentFeaturePage();
+  }));
+  $$('[data-incident-delete]', box).forEach((button) => button.addEventListener('click', async () => {
+    if (!await askForConfirmation('删除这条已解决的异常日志？业务状态和 Session 不会被删除。')) return;
+    await api(`/api/incidents/${encodeURIComponent(button.dataset.incidentDelete)}`, {
+      method: 'DELETE', body: JSON.stringify({ confirm: true })
+    });
+    loadIncidentFeaturePage();
+  }));
+}
+
+async function saveIncidentFeatureConfig() {
+  const c = state.config || await api('/api/config');
+  const result = $('#incident-feature-save-result');
+  if (result) result.textContent = '保存中…';
+  try {
+    const response = await api('/api/config', {
+      method: 'POST',
+      body: JSON.stringify({
+        incidentPilot: {
+          ...(c.incidentPilot || {}),
+          ownerUin: $('#cfg-incident-owner')?.value?.trim() || '',
+          notifyWarnings: $('#cfg-incident-warnings')?.checked !== false,
+          unknownWritesBlockChat: $('#cfg-incident-unknown-block')?.checked === true,
+          duplicateWindowMinutes: clampInt($('#cfg-incident-window')?.value, 1, 1440, 10),
+          retentionDays: clampInt($('#cfg-incident-retention')?.value, 1, 3650, 90)
+        }
+      })
+    });
+    state.config = response.config;
+    await loadIncidentFeaturePage();
+  } catch (error) {
+    if (result) result.textContent = `保存失败：${error.message}`;
+  }
+}
+
+async function loadIncidentFeaturePage() {
+  const box = $('#incident-page');
+  if (!box) return;
+  box.innerHTML = '<div class="empty-hint">正在读取异常日志…</div>';
+  try {
+    const params = new URLSearchParams({ limit: '200' });
+    if (state.incidentState) params.set('state', state.incidentState);
+    if (state.incidentSeverity) params.set('severity', state.incidentSeverity);
+    const [cfg, data] = await Promise.all([
+      api('/api/config'),
+      api(`/api/incidents?${params}`)
+    ]);
+    if (state.tab !== 'incidents') return;
+    state.config = cfg;
+    syncGraduatedFeatureNavigation(cfg);
+    renderIncidentFeaturePage(cfg, data.status || {}, data.incidents || []);
+  } catch (error) {
+    box.innerHTML = `<div class="empty-hint">异常日志读取失败：${esc(error.message)}</div>`;
   }
 }
 
@@ -3843,7 +5396,7 @@ function renderTimeControlSection(c) {
 }
 
 function timeControlTargetOptions() {
-  const c = state.config || state.timeControlConfig || {};
+  const c = state.timeControlConfig || state.config || {};
   const keys = [...new Set([
     ...(state.chats || []).map((chat) => chat.key),
     ...(state.timeControlStatus?.chats || []).map((chat) => chat.chatKey),
@@ -3963,7 +5516,8 @@ function bindTimeControlEvents() {
 const MOMENT_STATUS_LABELS = {
   running: '生成中', preview: '草稿', skipped: '决定不发布',
   publishing: '发布中', published: '已发布', 'publish-unknown': '发布结果待核对',
-  failed: '生成失败', interrupted: '生成已中断', deferred: '等待活跃时间'
+  failed: '生成失败', interrupted: '生成已中断', deferred: '等待活跃时间',
+  missed: '已错过窗口', cancelled: '已取消', pending: '待执行'
 };
 const momentStatusLabel = (record) => record?.status === 'preview' && record.decision === 'skip'
   ? '预览：决定不发布' : (MOMENT_STATUS_LABELS[record?.status] || record?.status || '-');
@@ -3971,15 +5525,34 @@ const momentStatusLabel = (record) => record?.status === 'preview' && record.dec
 function renderDailyMomentsSection(c) {
   const moments = c.dailyMoments || {};
   const visibility = Number(moments.visibility) || 4;
+  const randomMode = Array.isArray(moments.scheduleWindows);
+  const hour = Number(moments.hour ?? 23);
+  const minute = String(moments.minute ?? 30).padStart(2, '0');
+  const windows = moments.scheduleWindows || [{
+    start: `${String(hour).padStart(2, '0')}:${minute}`,
+    end: `${String((hour + 1) % 24).padStart(2, '0')}:${minute}`, count: 1
+  }];
   return `
     <h3 id="settings-moments">每日动态</h3>
     <div class="checkbox-row"><input type="checkbox" id="cfg-moments-enabled" ${moments.enabled === true ? 'checked' : ''} />
       <label for="cfg-moments-enabled">启用每日群聊总结与说说决策</label></div>
     <div class="checkbox-row"><input type="checkbox" id="cfg-moments-catchup" ${moments.startupCatchup !== false ? 'checked' : ''} />
-      <label for="cfg-moments-catchup">服务错过定时点后补跑</label></div>
-    <div class="field-row">
+      <label for="cfg-moments-catchup" id="cfg-moments-catchup-label">${randomMode ? '重启后在未结束的范围内补跑' : '服务错过固定时刻后补跑'}</label></div>
+    <div class="field"><label for="cfg-moments-schedule-mode">定时方式（上海时间）</label>
+      <select id="cfg-moments-schedule-mode">
+        <option value="windows" ${randomMode ? 'selected' : ''}>时间范围内随机发布</option>
+        <option value="fixed" ${randomMode ? '' : 'selected'}>固定时刻</option>
+      </select>
+    </div>
+    <div id="moment-fixed-time" ${randomMode ? 'hidden' : ''}><div class="field-row">
       <div class="field"><label>执行小时（上海时间）</label><input type="number" id="cfg-moments-hour" min="0" max="23" value="${esc(moments.hour ?? 23)}" /></div>
       <div class="field"><label>执行分钟</label><input type="number" id="cfg-moments-minute" min="0" max="59" value="${esc(moments.minute ?? 30)}" /></div>
+    </div></div>
+    <div id="moment-random-windows" ${randomMode ? '' : 'hidden'}>
+      <div id="moment-window-rows">${windows.map(renderMomentWindowRow).join('')}</div>
+      <button type="button" class="btn btn-small" id="moment-window-add" title="添加时间范围" aria-label="添加时间范围">+</button>
+    </div>
+    <div class="field-row">
       <div class="field"><label>说说可见范围</label>
         <select id="cfg-moments-visibility">
           <option value="1" ${visibility === 1 ? 'selected' : ''}>所有人可见</option>
@@ -4007,6 +5580,30 @@ function renderDailyMomentsSection(c) {
     <div id="daily-moments-status" class="daily-moments-status"><span class="muted">正在读取状态…</span></div>`;
 }
 
+function renderMomentWindowRow(window) {
+  return `<div class="moment-window-row">
+    <div class="field"><label>开始</label><input type="time" class="moment-window-start" aria-label="范围开始时间" value="${esc(window.start)}" required /></div>
+    <div class="field"><label>结束</label><input type="time" class="moment-window-end" aria-label="范围结束时间" value="${esc(window.end)}" required /></div>
+    <div class="field"><label>计划条数</label><input type="number" class="moment-window-count" aria-label="计划条数" min="1" max="10" value="${esc(window.count)}" required /></div>
+    <button type="button" class="btn btn-small moment-window-remove" title="删除时间范围" aria-label="删除时间范围">&times;</button>
+  </div>`;
+}
+
+function renderMomentSchedule(status) {
+  const slots = status.scheduleSlots || [];
+  const check = status.lastScheduleCheck;
+  return `${check?.reason ? `<div class="field"><label>最近调度结果</label><div>${esc(check.reason)}</div></div>` : ''}
+    ${slots.length ? `<details class="moment-schedule" open><summary>随机发布计划（上海时间）</summary>
+      <div class="table-wrap"><table class="usage-table"><thead><tr>
+        <th>日期</th><th>时间范围</th><th>随机时间</th><th>状态</th><th>原因</th>
+      </tr></thead><tbody>${slots.map((slot) => `<tr>
+        <td>${esc(slot.dayKey)}</td><td>${esc(slot.windowKey)}</td>
+        <td>${esc(fmtTime(slot.at))}</td><td>${esc(MOMENT_STATUS_LABELS[slot.status] || slot.status)}</td>
+        <td>${esc(slot.reason || '-')}</td>
+      </tr>`).join('')}</tbody></table></div>
+    </details>` : ''}`;
+}
+
 async function loadDailyMomentsStatus() {
   const box = $('#daily-moments-status');
   if (!box) return;
@@ -4014,6 +5611,12 @@ async function loadDailyMomentsStatus() {
     const status = await api('/api/daily-moments/status');
     const records = Array.isArray(status.records) ? status.records : [];
     const latest = records.find((record) => record.id === state.currentMomentId) || status.latest;
+    const alreadyPublishedThatDay = records.some((record) =>
+      record.id !== latest?.id
+      && record.dayKey === latest?.dayKey
+      && (record.publicationSource === 'manual' || !['scheduled', 'startup-catchup'].includes(record.source)
+        || ['publishing', 'publish-unknown'].includes(record.status))
+      && ['publishing', 'published', 'publish-unknown'].includes(record.status));
     for (const button of $$('#daily-moments-preview-btn,#daily-moments-run-btn')) button.disabled = status.running;
     const publishable = latest?.status === 'preview' && latest.decision === 'publish' && latest.content;
     box.innerHTML = `
@@ -4022,6 +5625,7 @@ async function loadDailyMomentsStatus() {
         <div class="field"><label>下次执行</label><div>${status.nextRunAt ? esc(fmtTime(status.nextRunAt)) : '-'}</div></div>
         <div class="field"><label>当前记录</label><div>${latest ? esc(`${latest.dayKey} · ${momentStatusLabel(latest)}`) : '-'}</div></div>
       </div>
+      ${renderMomentSchedule(status)}
       ${latest?.content ? `<div class="field"><label>正文</label><div class="daily-moments-content">${esc(latest.content)}</div></div>` : ''}
       ${latest?.reason ? `<div class="field"><label>决定理由</label><div>${esc(latest.reason)}</div></div>` : ''}
       ${latest?.error ? `<div class="moment-error" role="alert">${esc(latest.error)}</div>` : ''}
@@ -4035,9 +5639,10 @@ async function loadDailyMomentsStatus() {
         ${latest.groupSummaries.map((group) => `<div class="field"><label>${esc(group.groupName || group.chatKey)}</label><div>${esc(group.summary)}</div></div>`).join('')}
       </details>` : ''}
       ${records.length ? `<div class="table-wrap"><table class="usage-table">
-        <thead><tr><th>日期</th><th>状态</th><th>群数</th><th>配图</th><th>时间</th><th></th></tr></thead>
+        <thead><tr><th>日期</th><th>来源</th><th>状态</th><th>群数</th><th>配图</th><th>时间</th><th></th></tr></thead>
         <tbody>${records.slice(0, 7).map((record) => `<tr>
           <td>${esc(record.dayKey || '-')}</td>
+          <td>${record.publicationSource !== 'manual' && ['scheduled', 'startup-catchup'].includes(record.source) ? '定时' : '手动'}</td>
           <td>${esc(momentStatusLabel(record))}</td>
           <td>${Number(record.groupCount) || 0}</td>
           <td>${Number(record.imageCount) || 0}</td>
@@ -4052,7 +5657,10 @@ async function loadDailyMomentsStatus() {
     const recordAction = async (action) => {
       if (action === 'publish') {
         const visibility = $('#cfg-moments-visibility')?.selectedOptions?.[0]?.textContent || '当前可见范围';
-        if (!confirm(`确认发布这份草稿？（${visibility}）\n\n${String(latest.content).slice(0, 180)}`)) return;
+        const duplicateWarning = alreadyPublishedThatDay
+          ? '\n\n今天已有发布记录；继续会再发布一条动态。'
+          : '';
+        if (!await askForConfirmation(`确认发布这份草稿？（${visibility}）${duplicateWarning}\n\n${String(latest.content).slice(0, 180)}`)) return;
       }
       const hint = $('#daily-moments-action-result');
       const buttons = $$('#daily-moments-preview-btn,#daily-moments-run-btn,#moment-publish-draft,#moment-reconcile');
@@ -4061,7 +5669,12 @@ async function loadDailyMomentsStatus() {
       try {
         if (action === 'publish') await saveConfig({ quiet: true });
         const result = await api(`/api/daily-moments/records/${latest.id}/${action}`, {
-          method: 'POST', body: JSON.stringify({ confirm: action === 'publish' })
+          method: 'POST',
+          body: JSON.stringify({
+            confirm: action === 'publish',
+            force: action === 'publish',
+            confirmDuplicateRisk: action === 'publish'
+          })
         });
         state.currentMomentId = result.record?.id || latest.id;
         if (hint) hint.textContent = result.matched === false
@@ -4091,6 +5704,32 @@ const QZONE_RUN_LABELS = {
   interrupted: '执行中断',
   deferred: '等待活跃时间'
 };
+
+const QZONE_ACTION_LABELS = {
+  like: '点赞',
+  comment: '评论',
+  reply: '回复'
+};
+
+function renderQzoneRunDetails(record) {
+  const details = Array.isArray(record.details) ? record.details : [];
+  if (!details.length) return '';
+  return `<tr class="qzone-run-detail-row"><td colspan="7">
+    <div class="qzone-run-details">${details.map((detail) => {
+      const post = detail.post || {};
+      const operations = (detail.operations || [])
+        .map((operation) => QZONE_ACTION_LABELS[operation.type] || operation.type)
+        .join('、');
+      return `<div class="qzone-run-detail">
+        <strong>对应动态 · ${esc(post.author || '好友')}</strong>
+        <div>${esc(post.content || '（无正文）')}</div>
+        ${detail.comment ? `<small>收到 ${esc(detail.comment.author || '好友')}：${esc(detail.comment.content || '')}</small>` : ''}
+        ${detail.response ? `<small>${detail.kind === 'reply' ? '回复' : '评论'}：${esc(detail.response)}</small>` : ''}
+        <small>操作：${esc(operations || detail.decision || '-')} · ${esc(detail.reason || '未记录理由')}</small>
+      </div>`;
+    }).join('')}</div>
+  </td></tr>`;
+}
 
 function renderQzoneInteractionSection(c) {
   const q = c.qzoneInteractions || {};
@@ -4163,15 +5802,17 @@ async function loadQzoneInteractionStatus() {
       ${latest?.error ? `<div class="moment-error" role="alert">${esc(latest.error)}</div>` : ''}
       ${records.length ? `<div class="table-wrap"><table class="usage-table">
         <thead><tr><th>时间</th><th>类型</th><th>状态</th><th>动态</th><th>回复</th><th>写操作</th><th>延后</th></tr></thead>
-        <tbody>${records.slice(0, 10).map((record) => `<tr>
-          <td>${record.startedAt ? esc(fmtTime(record.startedAt)) : '-'}</td>
-          <td>${esc(record.kind || '-')}</td>
-          <td>${esc(QZONE_RUN_LABELS[record.status] || record.status || '-')}</td>
-          <td>${Number(record.selectedFeeds) || 0}</td>
-          <td>${Number(record.selectedReplies) || 0}</td>
-          <td>${Array.isArray(record.actions) ? record.actions.length : 0}</td>
-          <td>${(Number(record.deferredFeeds) || 0) + (Number(record.deferredReplies) || 0)}</td>
-        </tr>`).join('')}</tbody>
+        <tbody>${records.slice(0, 10).map((record) => `
+          <tr>
+            <td>${record.startedAt ? esc(fmtTime(record.startedAt)) : '-'}</td>
+            <td>${esc(record.kind || '-')}</td>
+            <td>${esc(QZONE_RUN_LABELS[record.status] || record.status || '-')}</td>
+            <td>${Number(record.selectedFeeds) || 0}</td>
+            <td>${Number(record.selectedReplies) || 0}</td>
+            <td>${Array.isArray(record.actions) ? record.actions.length : 0}</td>
+            <td>${(Number(record.deferredFeeds) || 0) + (Number(record.deferredReplies) || 0)}</td>
+          </tr>
+          ${renderQzoneRunDetails(record)}`).join('')}</tbody>
       </table></div>` : ''}`;
   } catch (error) {
     box.innerHTML = `<span class="muted">状态读取失败：${esc(error.message)}</span>`;
@@ -4636,40 +6277,95 @@ function bindSettingsEvents(c) {
   });
 
   if ((state.settingsSection || 'api') === 'experiments') {
-    const toggle = $('#cfg-identity-pilot-enabled');
-    const status = $('#identity-pilot-state');
-    loadIdentityPilotStatus();
-    const friendToggle = $('#cfg-identity-friend-enabled');
-    friendToggle?.addEventListener('change', () => {
-      const protocol = $('#identity-friend-protocol');
-      if (protocol) {
-        protocol.textContent = friendToggle.checked
-          ? '保存后 Agent 才能提交候选；管理员仍拥有最终决定权。'
-          : '主动好友候选当前关闭。';
-      }
+    loadExperimentalFeatureStatuses();
+    [
+      ['#launch-identity-feature', 'identity'],
+      ['#launch-auto-friend-feature', 'auto-friend'],
+      ['#launch-slang-feature', 'slang'],
+      ['#launch-incident-feature', 'incidents']
+    ].forEach(([selector, feature]) => {
+      $(selector)?.addEventListener('click', () =>
+        launchExperimentalFeature(feature).catch(() => {}));
     });
-    toggle?.addEventListener('change', async () => {
-      const requested = toggle.checked;
-      toggle.disabled = true;
-      status.textContent = '保存中…';
-      try {
-        await saveConfig({ quiet: true });
-        await loadIdentityPilotStatus();
-      } catch (error) {
-        toggle.checked = !requested;
-        status.textContent = `保存失败：${error.message}`;
-      } finally {
-        toggle.disabled = false;
-      }
+    [
+      '#cfg-identity-pilot-enabled',
+      '#cfg-auto-friend-enabled',
+      '#cfg-slang-pilot-enabled',
+      '#cfg-incident-pilot-enabled'
+    ].forEach((selector) => {
+      const toggle = $(selector);
+      toggle?.addEventListener('change', async () => {
+        if (selector === '#cfg-auto-friend-enabled' && toggle.checked) {
+          const identityToggle = $('#cfg-identity-pilot-enabled');
+          if (identityToggle) identityToggle.checked = true;
+        }
+        if (selector === '#cfg-identity-pilot-enabled' && !toggle.checked) {
+          const friendToggle = $('#cfg-auto-friend-enabled');
+          if (friendToggle) friendToggle.checked = false;
+        }
+        if (selector === '#cfg-incident-pilot-enabled' && toggle.checked) {
+          let ownerUin = String(state.config?.incidentPilot?.ownerUin || '').trim();
+          const ownerAllowed = state.config?.allowAllWhenEmpty === true
+            || (state.config?.allow?.private || []).map(String).includes(ownerUin);
+          if (!/^\d{5,15}$/.test(ownerUin) || !ownerAllowed) {
+            ownerUin = await requestExperimentOwnerUin('incidents', ownerUin);
+            if (!ownerUin) {
+              toggle.checked = false;
+              return;
+            }
+            state.config.incidentPilot = {
+              ...(state.config.incidentPilot || {}),
+              ownerUin
+            };
+          }
+        }
+        toggle.disabled = true;
+        const result = $('#experiment-launch-result');
+        if (result) result.textContent = '保存中…';
+        try {
+          await saveConfig({ quiet: true });
+          renderSettings();
+        } catch (error) {
+          toggle.checked = !toggle.checked;
+          toggle.disabled = false;
+          if (result) result.textContent = `保存失败：${error.message}`;
+        }
+      });
     });
   }
 
   if ((state.settingsSection || 'api') === 'moments') {
     loadDailyMomentsStatus();
+    $('#cfg-moments-schedule-mode')?.addEventListener('change', (event) => {
+      const randomMode = event.target.value === 'windows';
+      $('#moment-fixed-time').hidden = randomMode;
+      $('#moment-random-windows').hidden = !randomMode;
+      $('#cfg-moments-catchup-label').textContent = randomMode
+        ? '重启后在未结束的范围内补跑' : '服务错过固定时刻后补跑';
+    });
+    const refreshWindowButtons = () => {
+      const rows = $$('#moment-window-rows .moment-window-row');
+      $('#moment-window-add').disabled = rows.length >= 8;
+      rows.forEach((row) => { row.querySelector('.moment-window-remove').disabled = rows.length <= 1; });
+    };
+    $('#moment-window-add')?.addEventListener('click', () => {
+      $('#moment-window-rows').insertAdjacentHTML('beforeend', renderMomentWindowRow({
+        start: '18:00', end: '19:00', count: 1
+      }));
+      refreshWindowButtons();
+    });
+    $('#moment-window-rows')?.addEventListener('click', (event) => {
+      const button = event.target.closest('.moment-window-remove');
+      if (button) {
+        button.closest('.moment-window-row').remove();
+        refreshWindowButtons();
+      }
+    });
+    refreshWindowButtons();
     const runMoments = async (publish) => {
       const buttons = $$('#daily-moments-run-btn,#daily-moments-preview-btn,#moment-publish-draft,#moment-reconcile');
       const result = $('#daily-moments-action-result');
-      if (publish && !confirm('立即汇总今天的群聊，并允许模型按决定发布一条说说？')) return;
+      if (publish && !await askForConfirmation('立即重新汇总今天的群聊，并允许模型按决定发布一条说说？如果今天已有发布记录，本次仍会生成并可能再发布一条。')) return;
       state.currentMomentId = null;
       buttons.forEach((button) => { button.disabled = true; });
       result.textContent = publish ? '正在总结并执行…' : '正在生成预览…';
@@ -4677,7 +6373,12 @@ function bindSettingsEvents(c) {
         await saveConfig({ quiet: true });
         const response = await api('/api/daily-moments/run', {
           method: 'POST',
-          body: JSON.stringify({ publish, confirm: publish })
+          body: JSON.stringify({
+            publish,
+            confirm: publish,
+            force: publish,
+            confirmDuplicateRisk: publish
+          })
         });
         const record = response.record || {};
         state.currentMomentId = record.id || null;
@@ -4700,7 +6401,7 @@ function bindSettingsEvents(c) {
     loadQzoneInteractionStatus();
     const runInteractions = async (kind) => {
       const label = kind === 'feed' ? '阅览好友动态并允许模型点赞或评论' : '检查新评论并允许模型回复';
-      if (!confirm(`确认立即${label}？`)) return;
+      if (!await askForConfirmation(`确认立即${label}？`)) return;
       const buttons = $$('#qzi-run-feed-btn,#qzi-run-reply-btn');
       const result = $('#qzi-action-result');
       buttons.forEach((button) => { button.disabled = true; });
@@ -4839,7 +6540,7 @@ function bindSettingsEvents(c) {
     const id = v.slice('custom:'.length);
     const opt = sel.querySelector(`option[value="${v}"]`);
     const name = opt ? opt.textContent : id;
-    if (!confirm(`确定删除搜索服务「${name}」？`)) return;
+    if (!await askForConfirmation(`确定删除搜索服务「${name}」？`)) return;
     try {
       await api('/api/search-providers', { method: 'DELETE', body: JSON.stringify({ id }) });
       await loadSettings();
@@ -5381,7 +7082,7 @@ function bindSettingsEvents(c) {
     if (!id.startsWith('custom_')) return;
     const tpl = state.personaTemplates[id];
     if (!tpl) return;
-    if (!confirm(`确定删除自定义人设「${tpl.name}」？`)) return;
+    if (!await askForConfirmation(`确定删除自定义人设「${tpl.name}」？`)) return;
     try {
       await api(`/api/persona-templates/${id}`, { method: 'DELETE', body: '{}' });
       $('#cfg-roletext').value = state.personaTemplates.xiaojingyu?.text || '';
@@ -5911,7 +7612,7 @@ function openModelDeleteModal() {
       el.querySelector('.mm-del').addEventListener('click', async (e) => {
         e.stopPropagation();
         const model = el.dataset.model;
-        if (!confirm(`确定从「${p.displayName || p.id}」删除模型 ${model}？`)) return;
+        if (!await askForConfirmation(`确定从「${p.displayName || p.id}」删除模型 ${model}？`)) return;
         try {
           await api('/api/providers/models', {
             method: 'DELETE',
@@ -6017,47 +7718,32 @@ async function saveConfig({ quiet = false } = {}) {
   }
 
   if (sec === 'experiments') {
+    const autoFriendEnabled = chk(
+      '#cfg-auto-friend-enabled',
+      c.identityPilot?.friendProposal?.enabled === true
+        && c.identityPilot?.incomingFriendRequest?.enabled === true
+    );
     patch.identityPilot = identityPilotSettingsPatch(
       c,
-      chk('#cfg-identity-pilot-enabled', c.identityPilot?.enabled === true),
+      chk('#cfg-identity-pilot-enabled', c.identityPilot?.enabled === true)
+        || autoFriendEnabled,
       {
-        enabled: chk(
-          '#cfg-identity-friend-enabled',
-          c.identityPilot?.friendProposal?.enabled === true
-        ),
-        ownerUin: val(
-          '#cfg-identity-friend-owner',
-          c.identityPilot?.friendProposal?.ownerUin || ''
-        ).trim(),
-        minMessageCount: clampInt(
-          val(
-            '#cfg-identity-friend-min-messages',
-            c.identityPilot?.friendProposal?.minMessageCount
-          ),
-          1,
-          10000,
-          50
-        ),
-        cooldownDays: clampInt(
-          val(
-            '#cfg-identity-friend-cooldown',
-            c.identityPilot?.friendProposal?.cooldownDays
-          ),
-          1,
-          365,
-          30
-        ),
-        maxPending: clampInt(
-          val(
-            '#cfg-identity-friend-max-pending',
-            c.identityPilot?.friendProposal?.maxPending
-          ),
-          1,
-          100,
-          10
-        )
+        enabled: autoFriendEnabled,
+        activeDispatchEnabled: autoFriendEnabled
+      },
+      {
+        enabled: autoFriendEnabled,
+        autoWhitelist: true
       }
     );
+    patch.slangPilot = {
+      ...(c.slangPilot || {}),
+      enabled: chk('#cfg-slang-pilot-enabled', c.slangPilot?.enabled === true)
+    };
+    patch.incidentPilot = {
+      ...(c.incidentPilot || {}),
+      enabled: chk('#cfg-incident-pilot-enabled', c.incidentPilot?.enabled === true)
+    };
   }
 
   if (sec === 'moments') {
@@ -6067,6 +7753,13 @@ async function saveConfig({ quiet = false } = {}) {
       startupCatchup: chk('#cfg-moments-catchup', c.dailyMoments?.startupCatchup !== false),
       hour: clampInt(val('#cfg-moments-hour', c.dailyMoments?.hour), 0, 23, 23),
       minute: clampInt(val('#cfg-moments-minute', c.dailyMoments?.minute), 0, 59, 30),
+      scheduleWindows: val('#cfg-moments-schedule-mode', 'fixed') === 'windows'
+        ? $$('#moment-window-rows .moment-window-row').map((row) => ({
+          start: row.querySelector('.moment-window-start').value,
+          end: row.querySelector('.moment-window-end').value,
+          count: Number(row.querySelector('.moment-window-count').value)
+        }))
+        : null,
       minMessagesPerGroup: clampInt(
         val('#cfg-moments-min-messages', c.dailyMoments?.minMessagesPerGroup),
         0, 100, 3
@@ -6433,6 +8126,7 @@ async function saveConfig({ quiet = false } = {}) {
 
   const data = await api('/api/config', { method: 'POST', body: JSON.stringify(patch) });
   state.config = data.config;
+  syncGraduatedFeatureNavigation(state.config);
   if (!quiet) $('#model-label').textContent = `模型：${state.config.api.model || '未设置'}`;
   return data;
 }
@@ -6582,6 +8276,8 @@ $$('.tab').forEach((tab) => {
   // 主题：以后端配置为准（跨设备同步），仅当后端确实存过才覆盖本地
   try {
     const cfg0 = await api('/api/config');
+    state.config = cfg0;
+    syncGraduatedFeatureNavigation(cfg0);
     const t = cfg0?.ui?.theme;
     if (THEME_VALUES.includes(t)) applyTheme(t);
     else if (cfg0 && !('ui' in cfg0)) { /* 后端还没这个字段，保持本地值 */ }

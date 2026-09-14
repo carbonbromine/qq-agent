@@ -1,8 +1,9 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { DATA_DIR } from './config.js';
-import { identityDatabasePath } from './identity-store.js';
+import { IdentityStore, identityDatabasePath } from './identity-store.js';
 import { normalizeStickerEntry } from './stickers.js';
 
 function readJson(file, fallback) {
@@ -19,27 +20,84 @@ function cleanText(value, max = 300) {
   return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
 }
 
+function writeJson(file, value) {
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, {
+    encoding: 'utf8',
+    mode: 0o600
+  });
+  fs.renameSync(tmp, file);
+  try { fs.chmodSync(file, 0o600); } catch { /* best effort */ }
+}
+
+function slangFile(dataDir) {
+  return path.join(dataDir, 'slang.json');
+}
+
+function slangRecord(entry, index = 0, { strictStatus = false } = {}) {
+  const rawStatus = entry?.status;
+  if (
+    strictStatus
+    && rawStatus !== undefined
+    && !['candidate', 'confirmed', 'rejected'].includes(rawStatus)
+  ) {
+    throw new Error('黑话状态必须是 candidate、confirmed 或 rejected');
+  }
+  const status = ['candidate', 'confirmed', 'rejected'].includes(rawStatus)
+    ? rawStatus
+    : 'candidate';
+  return {
+    ...(entry && typeof entry === 'object' ? entry : {}),
+    id: cleanText(entry?.id || `slang-${index + 1}`, 100),
+    content: cleanText(entry?.content, 80),
+    meaning: cleanText(entry?.meaning, 500),
+    usage: cleanText(entry?.usage, 300),
+    example: cleanText(entry?.example, 300),
+    risk: cleanText(entry?.risk, 300),
+    status,
+    source: entry?.source === 'manual' ? 'manual' : 'ai',
+    scope: entry?.scope === 'chat-private' ? 'chat-private' : 'global-safe',
+    scopeChatKey: /^(group|private):\d+$/.test(String(entry?.scopeChatKey || ''))
+      ? String(entry.scopeChatKey)
+      : '',
+    sources: Array.isArray(entry?.sources)
+      ? entry.sources.map((item) => cleanText(item, 500)).filter(Boolean).slice(0, 10)
+      : [],
+    researchId: cleanText(entry?.researchId, 100),
+    count: Math.max(0, Math.round(Number(entry?.count) || 0)),
+    evidence: Array.isArray(entry?.evidence) ? entry.evidence.slice(0, 100) : [],
+    updatedAt: String(entry?.updatedAt || new Date().toISOString())
+  };
+}
+
+function readSlangRecords(dataDir, { strict = false } = {}) {
+  const file = slangFile(dataDir);
+  let raw;
+  try {
+    let text = fs.readFileSync(file, 'utf8');
+    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+    raw = JSON.parse(text);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return [];
+    if (strict) throw new Error(`黑话库读取失败，已停止写入：${String(error?.message ?? error)}`);
+    return [];
+  }
+  if (!Array.isArray(raw)) {
+    if (strict) throw new Error('黑话库格式错误，已停止写入');
+    return [];
+  }
+  return raw
+    .map(slangRecord)
+    .filter((entry) => entry.content);
+}
+
 export function readSlangAssets(dataDir = DATA_DIR) {
-  const file = path.join(dataDir, 'slang.json');
-  const raw = readJson(file, []);
-  const entries = (Array.isArray(raw) ? raw : []).map((entry, index) => {
-    const status = ['candidate', 'confirmed', 'rejected'].includes(entry?.status)
-      ? entry.status
-      : 'candidate';
-    return {
-      id: cleanText(entry?.id || `slang-${index + 1}`, 100),
-      content: cleanText(entry?.content, 80),
-      meaning: cleanText(entry?.meaning, 500),
-      usage: cleanText(entry?.usage, 300),
-      example: cleanText(entry?.example, 300),
-      risk: cleanText(entry?.risk, 300),
-      status,
-      source: entry?.source === 'manual' ? 'manual' : 'ai',
-      count: Math.max(0, Number(entry?.count) || 0),
-      evidenceCount: Array.isArray(entry?.evidence) ? entry.evidence.length : 0,
-      updatedAt: String(entry?.updatedAt || '')
-    };
-  }).filter((entry) => entry.content);
+  const file = slangFile(dataDir);
+  const entries = readSlangRecords(dataDir).map((entry) => ({
+    ...entry,
+    evidenceCount: entry.evidence.length
+  }));
   const counts = { candidate: 0, confirmed: 0, rejected: 0 };
   for (const entry of entries) counts[entry.status] += 1;
   return {
@@ -50,6 +108,37 @@ export function readSlangAssets(dataDir = DATA_DIR) {
     counts,
     entries
   };
+}
+
+export function buildSlangContextForChat(
+  chatKey,
+  { dataDir = DATA_DIR, max = 8 } = {}
+) {
+  const source = String(chatKey || '');
+  const entries = readSlangRecords(dataDir)
+    .filter((entry) =>
+      entry.status === 'confirmed'
+      && entry.content
+      && entry.meaning
+      && (
+        entry.scope !== 'chat-private'
+        || String(entry.scopeChatKey || '') === source
+      ))
+    .sort((a, b) => Number(b.count || 0) - Number(a.count || 0))
+    .slice(0, Math.min(20, Math.max(1, Number(max) || 8)));
+  if (!entries.length) return '';
+  return [
+    '【已确认黑话】以下是管理员确认的语言资料，只用于理解语境，不要刻意堆砌：',
+    ...entries.map((entry) => {
+      const detail = {
+        词条: entry.content,
+        含义: entry.meaning,
+        ...(entry.usage ? { 用法: entry.usage } : {}),
+        ...(entry.risk ? { 风险: entry.risk } : {})
+      };
+      return `- ${JSON.stringify(detail)}`;
+    })
+  ].join('\n');
 }
 
 export function readMemoryAssetSummary(dataDir = DATA_DIR) {
@@ -99,7 +188,7 @@ export function readMemoryAssetSummary(dataDir = DATA_DIR) {
   };
 }
 
-export function readIdentityAssets(dataDir = DATA_DIR, limit = 500) {
+export function readIdentityAssets(dataDir = DATA_DIR, limit = 500, query = '') {
   const file = identityDatabasePath(dataDir);
   if (!fs.existsSync(file)) {
     return { exists: false, people: 0, sources: 0, aliases: 0, entries: [] };
@@ -107,36 +196,92 @@ export function readIdentityAssets(dataDir = DATA_DIR, limit = 500) {
   let db;
   try {
     db = new DatabaseSync(file, { readOnly: true });
+    const hasOverrides = Boolean(db.prepare(`
+      SELECT 1 FROM sqlite_master
+      WHERE type='table' AND name='identity_asset_overrides'
+    `).get());
     const totals = {
       people: Number(db.prepare('SELECT COUNT(*) AS n FROM people').get().n) || 0,
       sources: Number(db.prepare('SELECT COUNT(*) AS n FROM identity_sources').get().n) || 0,
       aliases: Number(db.prepare('SELECT COUNT(*) AS n FROM identity_aliases').get().n) || 0
     };
-    const rows = db.prepare(`
-      SELECT uin, primary_name, message_count, chat_count, is_friend, legacy_memory_count,
-        first_seen_at, last_seen_at
-      FROM people ORDER BY last_seen_at DESC, message_count DESC, uin LIMIT ?
-    `).all(Math.min(500, Math.max(1, Number(limit) || 500)));
+    const q = cleanText(query, 100).toLowerCase();
+    const pattern = `%${q}%`;
+    const rows = db.prepare(hasOverrides ? `
+      SELECT p.uin, p.primary_name, p.message_count, p.chat_count, p.is_friend,
+        p.legacy_memory_count, p.first_seen_at, p.last_seen_at, p.profile_json,
+        CASE WHEN o.uin IS NULL THEN 0 ELSE 1 END AS manually_managed,
+        COALESCE(
+          NULLIF(o.source_chat_key, ''),
+          (SELECT s.chat_key FROM identity_sources s
+            WHERE s.uin=p.uin ORDER BY s.last_seen_at DESC LIMIT 1),
+          ''
+        ) AS manual_source_chat_key
+      FROM people p
+      LEFT JOIN identity_asset_overrides o ON o.uin=p.uin AND o.deleted=0
+      WHERE ?='' OR lower(p.uin) LIKE ? OR lower(p.primary_name) LIKE ?
+        OR lower(p.profile_json) LIKE ?
+        OR EXISTS (
+          SELECT 1 FROM identity_aliases a
+          WHERE a.uin=p.uin AND lower(a.alias) LIKE ?
+        )
+      ORDER BY p.last_seen_at DESC, p.message_count DESC, p.uin LIMIT ?
+    ` : `
+      SELECT uin, primary_name, message_count, chat_count, is_friend,
+        legacy_memory_count, first_seen_at, last_seen_at, profile_json,
+        0 AS manually_managed,
+        COALESCE(
+          (SELECT s.chat_key FROM identity_sources s
+            WHERE s.uin=people.uin ORDER BY s.last_seen_at DESC LIMIT 1),
+          ''
+        ) AS manual_source_chat_key
+      FROM people
+      WHERE ?='' OR lower(uin) LIKE ? OR lower(primary_name) LIKE ?
+        OR lower(profile_json) LIKE ?
+        OR EXISTS (
+          SELECT 1 FROM identity_aliases a
+          WHERE a.uin=people.uin AND lower(a.alias) LIKE ?
+        )
+      ORDER BY last_seen_at DESC, message_count DESC, uin LIMIT ?
+    `).all(
+      q,
+      pattern,
+      pattern,
+      pattern,
+      pattern,
+      Math.min(500, Math.max(1, Number(limit) || 500))
+    );
     const aliasStmt = db.prepare(`
       SELECT alias FROM identity_aliases WHERE uin=?
       ORDER BY last_seen_at DESC, seen_count DESC LIMIT 8
     `);
-    return {
-      exists: true,
-      ...totals,
-      entries: rows.map((row) => ({
+    const entries = rows.map((row) => ({
         userId: String(row.uin),
         primaryName: String(row.primary_name || ''),
         messageCount: Number(row.message_count) || 0,
         chatCount: Number(row.chat_count) || 0,
         isFriend: Boolean(row.is_friend),
+        manuallyManaged: Boolean(row.manually_managed),
+        sourceChatKey: String(row.manual_source_chat_key || ''),
         legacyMemoryCount: Number(row.legacy_memory_count) || 0,
+        profileNote: (() => {
+          try {
+            return cleanText(JSON.parse(row.profile_json || '{}')?.note, 300);
+          } catch {
+            return '';
+          }
+        })(),
         firstSeenAt: Number(row.first_seen_at) || 0,
         lastSeenAt: Number(row.last_seen_at) || 0,
         aliases: [...new Set(aliasStmt.all(row.uin)
           .map((entry) => cleanText(entry.alias, 60))
           .filter(Boolean))]
-      }))
+      }));
+    return {
+      exists: true,
+      ...totals,
+      matched: entries.length,
+      entries
     };
   } catch (error) {
     return {
@@ -154,7 +299,7 @@ export function readIdentityAssets(dataDir = DATA_DIR, limit = 500) {
 
 function stickerView(entry) {
   const normalized = normalizeStickerEntry(entry);
-  if (!normalized) return null;
+  if (!normalized || normalized.hidden) return null;
   return {
     id: normalized.id,
     desc: normalized.desc,
@@ -168,18 +313,35 @@ function stickerView(entry) {
     createdAt: normalized.createdAt,
     updatedAt: normalized.updatedAt,
     hasImage: Boolean(normalized.url)
+      || Boolean(normalized.localFile)
   };
 }
 
 export class AssetObserver {
   constructor({
     stickers,
+    memory,
+    getIdentityPilot = () => null,
     getIdentityStatus = () => null,
     dataDir = DATA_DIR
   }) {
     this.stickers = stickers;
+    this.memory = memory;
+    this.getIdentityPilot = getIdentityPilot;
     this.getIdentityStatus = getIdentityStatus;
     this.dataDir = dataDir;
+  }
+
+  addSticker(input) {
+    return stickerView(this.stickers.addManual(input));
+  }
+
+  updateSticker(id, patch) {
+    return stickerView(this.stickers.update(id, patch));
+  }
+
+  deleteSticker(id) {
+    return this.stickers.remove(id);
   }
 
   stickerSnapshot() {
@@ -253,6 +415,146 @@ export class AssetObserver {
     };
   }
 
+  addSlang(input = {}) {
+    const content = cleanText(input.content, 80);
+    if (!content) throw new Error('黑话词条不能为空');
+    const scope = input.scope === 'chat-private' ? 'chat-private' : 'global-safe';
+    const scopeChatKey = cleanText(input.scopeChatKey, 100);
+    if (scope === 'chat-private' && !/^(group|private):\d+$/.test(scopeChatKey)) {
+      throw new Error('群内黑话必须指定有效来源会话');
+    }
+    const entries = readSlangRecords(this.dataDir, { strict: true });
+    if (entries.some((entry) =>
+      entry.content.toLowerCase() === content.toLowerCase()
+      && entry.scope === scope
+      && (scope !== 'chat-private' || entry.scopeChatKey === scopeChatKey))) {
+      throw new Error('黑话词条已存在');
+    }
+    const entry = slangRecord({
+      id: `slang_${crypto.randomUUID().replaceAll('-', '').slice(0, 16)}`,
+      content,
+      meaning: input.meaning,
+      usage: input.usage,
+      example: input.example,
+      risk: input.risk,
+      status: input.status,
+      source: 'manual',
+      scope,
+      scopeChatKey: scope === 'chat-private' ? scopeChatKey : '',
+      count: input.count,
+      evidence: [],
+      updatedAt: new Date().toISOString()
+    }, entries.length, { strictStatus: true });
+    entries.push(entry);
+    writeJson(slangFile(this.dataDir), entries);
+    return { ...entry, evidenceCount: 0 };
+  }
+
+  admitSlangCandidate(input = {}) {
+    const content = cleanText(input.content, 80);
+    if (!content) throw new Error('黑话词条不能为空');
+    const entries = readSlangRecords(this.dataDir, { strict: true });
+    const normalized = content.normalize('NFKC').toLowerCase();
+    const scope = input.scope === 'global-safe' ? 'global-safe' : 'chat-private';
+    const scopeChatKey = cleanText(input.scopeChatKey, 100);
+    if (scope === 'chat-private' && !/^(group|private):\d+$/.test(scopeChatKey)) {
+      throw new Error('群内黑话必须指定有效来源会话');
+    }
+    const index = entries.findIndex((entry) =>
+      entry.content.normalize('NFKC').toLowerCase() === normalized
+      && entry.scope === scope
+      && (scope !== 'chat-private' || entry.scopeChatKey === scopeChatKey));
+    const existing = index >= 0 ? entries[index] : null;
+    const incomingEvidence = Array.isArray(input.evidence)
+      ? input.evidence.filter((item) => item && typeof item === 'object').slice(-30)
+      : [];
+    const evidence = [...(existing?.evidence || [])];
+    const seen = new Set(evidence.map((item) => String(item.key || JSON.stringify(item))));
+    for (const item of incomingEvidence) {
+      const key = String(item.key || JSON.stringify(item));
+      if (seen.has(key)) continue;
+      seen.add(key);
+      evidence.push(item);
+    }
+    const entry = slangRecord({
+      ...(existing || {}),
+      id: existing?.id || `slang_${crypto.randomUUID().replaceAll('-', '').slice(0, 16)}`,
+      content,
+      meaning: cleanText(input.meaning ?? existing?.meaning, 500),
+      usage: cleanText(input.usage ?? existing?.usage, 300),
+      example: cleanText(input.example ?? existing?.example, 300),
+      risk: cleanText(input.risk ?? existing?.risk, 300),
+      status: existing?.status === 'confirmed' ? 'confirmed' : 'candidate',
+      source: existing?.source === 'manual' ? 'manual' : 'ai',
+      count: Math.max(
+        Number(existing?.count) || 0,
+        Math.max(1, Number(input.count) || 1)
+      ),
+      evidence: evidence.slice(-30),
+      scope,
+      scopeChatKey: scope === 'chat-private' ? scopeChatKey : '',
+      sources: Array.isArray(input.sources)
+        ? input.sources.map((item) => cleanText(item, 500)).filter(Boolean).slice(0, 10)
+        : (existing?.sources || []),
+      researchId: cleanText(input.researchId, 100),
+      updatedAt: new Date().toISOString()
+    }, index >= 0 ? index : entries.length, { strictStatus: true });
+    if (index >= 0) entries[index] = entry;
+    else entries.push(entry);
+    writeJson(slangFile(this.dataDir), entries);
+    return { ...entry, evidenceCount: entry.evidence.length };
+  }
+
+  updateSlang(id, patch = {}) {
+    const entries = readSlangRecords(this.dataDir, { strict: true });
+    const index = entries.findIndex((entry) => entry.id === String(id || ''));
+    if (index < 0) return null;
+    const scope = patch.scope !== undefined
+      ? (patch.scope === 'chat-private' ? 'chat-private' : 'global-safe')
+      : entries[index].scope;
+    const scopeChatKey = patch.scopeChatKey !== undefined
+      ? cleanText(patch.scopeChatKey, 100)
+      : entries[index].scopeChatKey;
+    if (scope === 'chat-private' && !/^(group|private):\d+$/.test(scopeChatKey)) {
+      throw new Error('群内黑话必须指定有效来源会话');
+    }
+    const next = slangRecord({
+      ...entries[index],
+      ...(patch.content !== undefined ? { content: patch.content } : {}),
+      ...(patch.meaning !== undefined ? { meaning: patch.meaning } : {}),
+      ...(patch.usage !== undefined ? { usage: patch.usage } : {}),
+      ...(patch.example !== undefined ? { example: patch.example } : {}),
+      ...(patch.risk !== undefined ? { risk: patch.risk } : {}),
+      ...(patch.status !== undefined ? { status: patch.status } : {}),
+      ...(patch.count !== undefined ? { count: patch.count } : {}),
+      scope,
+      scopeChatKey: scope === 'chat-private' ? scopeChatKey : '',
+      updatedAt: new Date().toISOString()
+    }, index, { strictStatus: true });
+    if (!next.content) throw new Error('黑话词条不能为空');
+    if (entries.some((entry, entryIndex) =>
+      entryIndex !== index
+      && entry.content.toLowerCase() === next.content.toLowerCase()
+      && entry.scope === next.scope
+      && (
+        next.scope !== 'chat-private'
+        || entry.scopeChatKey === next.scopeChatKey
+      ))) {
+      throw new Error('黑话词条已存在');
+    }
+    entries[index] = next;
+    writeJson(slangFile(this.dataDir), entries);
+    return { ...next, evidenceCount: next.evidence.length };
+  }
+
+  deleteSlang(id) {
+    const entries = readSlangRecords(this.dataDir, { strict: true });
+    const next = entries.filter((entry) => entry.id !== String(id || ''));
+    if (next.length === entries.length) return false;
+    writeJson(slangFile(this.dataDir), next);
+    return true;
+  }
+
   overview() {
     const stickers = this.stickerSnapshot();
     const slang = readSlangAssets(this.dataDir);
@@ -291,17 +593,106 @@ export class AssetObserver {
         chats: memory.chats,
         people: memory.people,
         impressions: memory.impressions,
-        handoffs: memory.handoffs
+        handoffs: memory.handoffs,
+        items: memory.items
       },
       identity
     };
   }
 
-  memorySummary() {
-    return readMemoryAssetSummary(this.dataDir);
+  memorySummary({ query = '' } = {}) {
+    const summary = readMemoryAssetSummary(this.dataDir);
+    if (!this.memory) return summary;
+    const q = cleanText(query, 100).toLowerCase();
+    const members = [];
+    for (const chatKey of this.memory.listChats()) {
+      for (const member of this.memory.members(chatKey)) {
+        const entry = {
+          chatKey,
+          userId: String(member.userId || ''),
+          name: String(member.name || ''),
+          impressions: (member.impressions || []).map((item) => ({
+            content: cleanText(item.content, 300),
+            createdAt: Number(item.createdAt) || 0
+          })),
+          updatedAt: Number(member.updatedAt) || 0
+        };
+        if (
+          q
+          && ![
+            entry.chatKey,
+            entry.userId,
+            entry.name,
+            ...entry.impressions.map((item) => item.content)
+          ].join(' ').toLowerCase().includes(q)
+        ) continue;
+        members.push(entry);
+      }
+    }
+    members.sort((a, b) => b.updatedAt - a.updatedAt);
+    return { ...summary, entries: members };
   }
 
-  identitySnapshot(limit = 500) {
-    return readIdentityAssets(this.dataDir, limit);
+  addMemory({ chatKey, userId, name = '', content }) {
+    const source = String(chatKey || '');
+    if (!/^(group|private):\d+$/.test(source)) throw new Error('会话格式无效');
+    const uin = String(userId || '').trim();
+    const text = cleanText(content, 300);
+    if (!/^\d{1,15}$/.test(uin)) throw new Error('QQ 号必须为正整数');
+    if (!text) throw new Error('记忆内容不能为空');
+    const entry = this.memory?.append(source, 'memberImpression', text, {
+      userId: uin,
+      target: cleanText(name, 60)
+    });
+    if (!entry) throw new Error('记忆存储不可用');
+    return { chatKey: source, userId: uin, ...entry };
+  }
+
+  updateMemory({ chatKey, userId, name = '', impressions = [] }) {
+    const source = String(chatKey || '');
+    if (!/^(group|private):\d+$/.test(source)) throw new Error('会话格式无效');
+    if (!this.memory) throw new Error('记忆存储不可用');
+    const entries = (Array.isArray(impressions) ? impressions : [impressions])
+      .map((entry) => cleanText(entry, 300))
+      .filter(Boolean);
+    if (!entries.length) throw new Error('至少保留一条记忆；删除请使用删除按钮');
+    return this.memory.replaceMember(
+      source,
+      String(userId || '').trim(),
+      cleanText(name, 60),
+      entries
+    );
+  }
+
+  deleteMemory({ chatKey, userId }) {
+    const source = String(chatKey || '');
+    if (!/^(group|private):\d+$/.test(source)) throw new Error('会话格式无效');
+    return Boolean(this.memory?.removeMember(source, String(userId || '').trim()));
+  }
+
+  upsertIdentity(input) {
+    const activeStore = this.getIdentityPilot?.()?.identityStore;
+    if (activeStore) return activeStore.upsertIdentityAsset(input);
+    const store = new IdentityStore({ dataDir: this.dataDir });
+    try {
+      return store.upsertIdentityAsset(input);
+    } finally {
+      store.close();
+    }
+  }
+
+  deleteIdentity(userId) {
+    const activeStore = this.getIdentityPilot?.()?.identityStore;
+    if (activeStore) return activeStore.deleteIdentityAsset(userId);
+    const store = new IdentityStore({ dataDir: this.dataDir });
+    try {
+      return store.deleteIdentityAsset(userId);
+    } finally {
+      store.close();
+    }
+  }
+
+  identitySnapshot({ limit = 500, query = '' } = {}) {
+    return readIdentityAssets(this.dataDir, limit, query);
   }
 }

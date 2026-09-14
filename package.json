@@ -18,6 +18,7 @@
     "test:usage": "node test/usage-e2e.mjs"
   },
   "dependencies": {
+    "jce": "0.2.3",
     "node-html-parser": "^9.0.4",
     "undici": "^6.28.0",
     "ws": "^8.18.0"

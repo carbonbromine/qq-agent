@@ -15,6 +15,11 @@ import { assertTimeAllowed, isTimeActive, watchTimeWindow, withTimeScope } from 
 import { timeControlState } from './time-control.js';
 import { chatAllowed } from './access.js';
 import {
+  MOMENT_MIN_GAP_MS,
+  normalizeMomentWindows,
+  updateMomentPlan
+} from './moment-schedule.js';
+import {
   formatClockTime,
   formatFullTime,
   formatShortTime,
@@ -28,6 +33,19 @@ const BLOCKING_STATUSES = new Set([
   'running', 'skipped', 'publishing', 'published', 'publish-unknown', 'failed'
 ]);
 const PUBLICATION_STATUSES = new Set(['publishing', 'published', 'publish-unknown']);
+const automaticSource = (source) => source == null || ['scheduled', 'startup-catchup'].includes(source);
+const automaticRecord = (record) => record.publicationSource === 'manual'
+  ? false : automaticSource(record.source);
+
+function samePublicationScope(existing, target) {
+  if (target.scheduleSlotId && existing.scheduleSlotId === target.scheduleSlotId) return true;
+  if (existing.dayKey !== target.dayKey) return false;
+  // An unresolved external write remains a hold across both publication paths.
+  if (['publishing', 'publish-unknown'].includes(existing.status)) return true;
+  if (automaticRecord(existing) !== automaticRecord(target)) return false;
+  return !automaticRecord(target)
+    || (existing.scheduleSlotId || '') === (target.scheduleSlotId || '');
+}
 const STYLE_SEEDS = [
   '随手吐槽', '生活碎片', '抽象观察', '今日见闻', '认真想一想', '冷幽默',
   '自言自语', '轻量研究', '情绪片段', '意外联想'
@@ -57,6 +75,7 @@ function normalizedConfig(cfg = getConfig().dailyMoments || {}) {
     enabled: cfg.enabled === true,
     hour: Math.min(23, Math.max(0, Number(cfg.hour) || 0)),
     minute: Math.min(59, Math.max(0, Number(cfg.minute) || 0)),
+    scheduleWindows: normalizeMomentWindows(cfg.scheduleWindows),
     startupCatchup: cfg.startupCatchup !== false,
     minMessagesPerGroup: Math.min(100, Math.max(0, Number(cfg.minMessagesPerGroup) || 0)),
     maxGroups: Math.min(50, Math.max(1, Number(cfg.maxGroups) || 12)),
@@ -240,6 +259,7 @@ export class DailyMomentsManager {
     this.stateFile = stateFile;
     this.state = readJson(this.stateFile, { version: 1, records: [] });
     if (!Array.isArray(this.state.records)) this.state.records = [];
+    if (!Array.isArray(this.state.scheduleSlots)) this.state.scheduleSlots = [];
     this.timer = null;
     this.running = null;
     this.controller = null;
@@ -256,23 +276,35 @@ export class DailyMomentsManager {
       record.endedAt = this.now();
       recovered = true;
     }
+    for (const slot of this.state.scheduleSlots) {
+      if (slot.status !== 'running') continue;
+      const record = this.state.records.find((item) => item.scheduleSlotId === slot.id);
+      slot.status = record?.status || 'interrupted';
+      slot.reason = record?.error || '执行期间服务中断，未自动重试';
+      recovered = true;
+    }
     if (recovered) writeJson(this.stateFile, this.state);
   }
 
-  start() {
+  start({ startup = true } = {}) {
     this.stop();
-    if (!normalizedConfig().enabled) return;
+    const cfg = normalizedConfig();
+    if (!cfg.enabled) return;
+    const target = shanghaiDayStart(this.now()) + (cfg.hour * 60 + cfg.minute) * 60000;
+    this.fixedSkipDay = !cfg.startupCatchup && this.now() >= target ? todayKey(this.now()) : '';
+    this.#updatePlan(cfg, startup);
     this.stopped = false;
-    this.#schedule(15000, true);
+    this.#schedule(15000, startup);
   }
 
   reconfigure() {
-    if (normalizedConfig().enabled) this.start();
+    if (normalizedConfig().enabled) this.start({ startup: false });
     else this.stop();
   }
 
   stop() {
     this.stopped = true;
+    this.scheduleVersion = (this.scheduleVersion || 0) + 1;
     clearTimeout(this.timer);
     this.timer = null;
     this.nextRunAt = 0;
@@ -284,11 +316,20 @@ export class DailyMomentsManager {
 
   status() {
     const cfg = normalizedConfig();
+    const slots = this.state.scheduleSlots;
+    const nextSlot = slots.find((slot) => slot.status === 'pending');
     return {
       enabled: cfg.enabled,
       running: Boolean(this.running),
       task: this.task || null,
-      nextRunAt: cfg.enabled ? (this.nextRunAt || nextDailyMomentAt(this.now(), cfg)) : 0,
+      nextRunAt: !cfg.enabled ? 0 : cfg.scheduleWindows
+        ? (nextSlot ? Math.max(nextSlot.at, this.nextRunAt || 0) : 0)
+        : (this.nextRunAt || nextDailyMomentAt(this.now(), cfg)),
+      scheduleMode: cfg.scheduleWindows ? 'windows' : 'fixed',
+      scheduleSlots: cfg.scheduleWindows
+        ? slots.filter((slot) => slot.endAt >= shanghaiDayStart(this.now())).map((slot) => ({ ...slot }))
+        : [],
+      lastScheduleCheck: this.state.lastScheduleCheck || null,
       latest: this.state.records[0] || null,
       records: this.state.records.slice(0, 14)
     };
@@ -333,18 +374,22 @@ export class DailyMomentsManager {
     clearTimeout(this.timer);
     if (this.stopped) return;
     const wait = Math.max(1000, Number(delay) || 1000);
+    const version = this.scheduleVersion;
     this.nextRunAt = Number(targetAt) || (this.now() + wait);
     this.timer = setTimeout(() => {
-      this.#tick(startup).catch((error) => {
+      this.#tick(startup, version).catch((error) => {
         this.log('[daily-moments] scheduler error:', error?.message ?? error);
+        if (!this.stopped && version === this.scheduleVersion) this.#schedule(60000);
       });
     }, wait);
     this.timer.unref?.();
   }
 
-  async #tick(startup) {
-    if (this.stopped) return;
+  async #tick(startup, version) {
+    if (this.stopped || version !== this.scheduleVersion) return;
     const cfg = normalizedConfig();
+    if (!cfg.enabled) return;
+    if (cfg.scheduleWindows) return this.#tickWindows(cfg, startup, version);
     const timeState = timeControlState(getConfig().timeControl, '', this.now());
     if (!timeState.active) {
       this.deferredDay ||= scheduledDayAt(this.now(), cfg, startup);
@@ -354,7 +399,14 @@ export class DailyMomentsManager {
     if (cfg.enabled) {
       const dayKey = this.deferredDay || scheduledDayAt(this.now(), cfg, startup);
       this.deferredDay = '';
-      if (dayKey && !this.#hasBlockingRecord(dayKey)) {
+      const blocked = dayKey && this.#blockingRecord({ dayKey, source: 'scheduled' });
+      if (dayKey && (blocked || dayKey === this.fixedSkipDay)) {
+        this.#scheduleCheck({
+          dayKey, status: blocked ? 'blocked' : 'missed',
+          reason: blocked ? `定时任务已处理或发布结果待核对：${blocked.status}` : '启动时已错过固定时刻，未开启补跑',
+          recordId: blocked?.id || ''
+        });
+      } else if (dayKey) {
         try {
           await this.run({ dayKey, publish: true, source: startup ? 'startup-catchup' : 'scheduled' });
         } catch (error) {
@@ -363,7 +415,7 @@ export class DailyMomentsManager {
         }
       }
     }
-    if (!this.stopped) {
+    if (!this.stopped && version === this.scheduleVersion) {
       const next = this.deferredDay
         ? timeControlState(getConfig().timeControl, '', this.now()).nextActiveAt || this.now() + 60000
         : nextDailyMomentAt(this.now(), cfg);
@@ -375,9 +427,73 @@ export class DailyMomentsManager {
     }
   }
 
-  #hasBlockingRecord(dayKey) {
-    return this.state.records.some((record) =>
-      record.dayKey === dayKey && BLOCKING_STATUSES.has(record.status));
+  #blockingRecord(target, publishingOnly = false) {
+    return this.state.records.find((record) =>
+      record.id !== target.id
+      && samePublicationScope(record, target)
+      && (publishingOnly ? PUBLICATION_STATUSES : BLOCKING_STATUSES).has(record.status));
+  }
+
+  #scheduleCheck(check) {
+    this.state.lastScheduleCheck = { ...check, at: this.now() };
+    writeJson(this.stateFile, this.state);
+    this.emit('daily-moments-status', this.status());
+  }
+
+  #updatePlan(cfg, startup = false) {
+    if (updateMomentPlan(this.state.scheduleSlots, cfg.scheduleWindows, this.now(), this.random, {
+      startup, catchup: cfg.startupCatchup
+    })) writeJson(this.stateFile, this.state);
+  }
+
+  async #tickWindows(cfg, startup, version) {
+    this.#updatePlan(cfg);
+    const pending = this.state.scheduleSlots.filter((slot) => slot.status === 'pending');
+    const slot = pending.find((item) => item.at <= this.now());
+    if (slot) {
+      const root = getConfig();
+      const time = timeControlState(root.timeControl, '', this.now());
+      const unresolved = this.state.records.find((record) =>
+        ['publishing', 'publish-unknown'].includes(record.status));
+      const lastAttempt = this.state.records.reduce((latest, record) =>
+        Math.max(latest, Number(record.publishStartedAt) || Number(record.publishedAt) || 0), 0);
+      const reason = this.running ? '其他动态任务正在执行'
+        : root.runtime?.mode !== 'active' || root.runtime?.paused ? '机器人处于观察或暂停状态'
+        : !time.active ? '等待活跃时间'
+        : unresolved ? '存在发布结果待核对的动态'
+        : this.now() - lastAttempt < MOMENT_MIN_GAP_MS ? '等待发布间隔（5 分钟）'
+        : '';
+      if (reason) {
+        if (slot.reason !== reason) {
+          slot.reason = reason;
+          this.#scheduleCheck({ dayKey: slot.dayKey, slotId: slot.id, status: 'waiting', reason });
+        }
+      } else {
+        slot.status = 'running';
+        slot.reason = '';
+        writeJson(this.stateFile, this.state);
+        try {
+          const result = await this.run({
+            dayKey: todayKey(this.now()), publish: true,
+            source: startup ? 'startup-catchup' : 'scheduled', scheduleSlot: { ...slot }
+          });
+          slot.status = result.record.status;
+          slot.recordId = result.record.id;
+          slot.reason = result.record.error || result.record.reason || '';
+        } catch (error) {
+          const record = this.state.records.find((item) => item.scheduleSlotId === slot.id);
+          slot.status = record?.status || (['MOMENT_BUSY', 'TIME_CONTROL_INACTIVE'].includes(error.code) ? 'pending' : 'failed');
+          slot.recordId = record?.id || '';
+          slot.reason = cleanText(error?.message ?? error, 1000);
+        }
+        this.#scheduleCheck({ dayKey: slot.dayKey, slotId: slot.id, status: slot.status, reason: slot.reason, recordId: slot.recordId });
+      }
+    }
+    if (!this.stopped && version === this.scheduleVersion) {
+      const next = this.state.scheduleSlots.find((item) => item.status === 'pending');
+      const nextAt = next ? (next.at <= this.now() ? Math.min(next.endAt, this.now() + 30000) : next.at) : this.now() + 3600000;
+      this.#schedule(Math.min(3600000, nextAt - this.now()), false, nextAt);
+    }
   }
 
   #saveRecord(record) {
@@ -394,18 +510,28 @@ export class DailyMomentsManager {
     publish = true,
     force = false,
     confirmDuplicateRisk = false,
-    source = 'scheduled'
+    source = 'scheduled',
+    scheduleSlot = null
   } = {}) {
     const cfg = normalizedConfig();
     dayStartFromKey(dayKey);
-    const automatic = source === 'scheduled' || source === 'startup-catchup';
-    const previous = this.state.records.find((record) => record.dayKey === dayKey
-      && (publish && PUBLICATION_STATUSES.has(record.status)
-        || automatic && BLOCKING_STATUSES.has(record.status)));
+    const automatic = automaticSource(source);
+    const previous = (publish || automatic) && this.#blockingRecord({
+      dayKey, source, scheduleSlotId: scheduleSlot?.id || ''
+    }, !automatic);
     // #region debug-point B:moment-publish-gate
     if (!process.env.NODE_TEST_CONTEXT) (() => { try { const body = JSON.stringify({ sessionId: 'daily-moment-publish', runId: process.env.QQ_MOMENT_DEBUG_RUN || 'post-fix', hypothesisId: 'B', location: 'daily-moments:#run', msg: '[DEBUG] Publication gate evaluated', data: { dayKey, publish, force, priorId: previous?.id || null, priorStatus: previous?.status || null, priorSource: previous?.source || null }, ts: Date.now() }); const req = process.getBuiltinModule('node:http').request(process.env.QQ_MOMENT_DEBUG_URL || 'http://192.168.31.10:7780/event', { method: 'POST', signal: AbortSignal.timeout(500), headers: { 'content-type': 'application/json' } }, (res) => res.resume()); req.on('error', () => {}); req.on('socket', (socket) => socket.unref()); req.end(body); } catch {} })();
     // #endregion
-    if (previous) return { ok: true, alreadyAttempted: true, record: previous };
+    if (previous && publish && force && !confirmDuplicateRisk) {
+      throw momentError(
+        'MOMENT_DUPLICATE_CONFIRMATION_REQUIRED',
+        '该日期可能已经发布；重新运行需明确确认重复发布风险'
+      );
+    }
+    const allowManualDuplicate = !automatic && publish && force && confirmDuplicateRisk;
+    if (previous && !allowManualDuplicate) {
+      return { ok: true, alreadyAttempted: true, record: previous };
+    }
     if (publish && getConfig().runtime?.mode !== 'active') {
       throw new Error('当前不是 active 模式，禁止自动发布说说');
     }
@@ -414,6 +540,9 @@ export class DailyMomentsManager {
       id: crypto.randomUUID(),
       dayKey,
       source,
+      scheduleSlotId: scheduleSlot?.id || '',
+      scheduleAt: scheduleSlot?.at || 0,
+      scheduleEndAt: scheduleSlot?.endAt || 0,
       promptVersion: MOMENT_PROMPT_VERSION,
       personaHash: momentPersonaHash(getConfig().persona),
       accountId: String(this.onebot.selfId || ''),
@@ -444,6 +573,10 @@ export class DailyMomentsManager {
     let releaseGroupGuards = () => {};
     const timeout = setTimeout(() => this.controller?.abort(new Error('Daily moments run timed out')), 10 * 60 * 1000);
     timeout.unref?.();
+    const windowTimeout = scheduleSlot ? setTimeout(() => this.controller?.abort(
+      momentError('MOMENT_WINDOW_EXPIRED', '已超过允许发布时间范围，本次未发布')
+    ), Math.max(1, scheduleSlot.endAt - this.now())) : null;
+    windowTimeout?.unref?.();
     let session = null;
 
     try {
@@ -510,12 +643,16 @@ export class DailyMomentsManager {
         return { ok: true, record };
       }
 
-      const result = await this.#publishRecord(record, snapshot, this.controller.signal);
+      const result = await this.#publishRecord(record, snapshot, this.controller.signal, {
+        force,
+        confirmDuplicateRisk
+      });
       this.#finishSession(session, record);
       return result;
     } catch (error) {
       if (record.status !== 'publish-unknown') {
-        record.status = error?.code === 'TIME_CONTROL_INACTIVE' ? 'deferred' : 'failed';
+        record.status = error?.code === 'MOMENT_WINDOW_EXPIRED' ? 'missed'
+          : error?.code === 'TIME_CONTROL_INACTIVE' ? 'deferred' : 'failed';
         if (session) {
           record.usage = { ...session.usage };
           record.model = session.model || record.model;
@@ -530,6 +667,7 @@ export class DailyMomentsManager {
       releaseTimeGuard();
       releaseGroupGuards();
       clearTimeout(timeout);
+      clearTimeout(windowTimeout);
     }
   }
 
@@ -537,6 +675,17 @@ export class DailyMomentsManager {
     signal?.throwIfAborted();
     assertTimeAllowed(['', ...(record.groupSummaries || []).map((group) => group.chatKey)]);
     const cfg = getConfig();
+    if (automaticRecord(record) && record.scheduleSlotId) {
+      const slot = this.state.scheduleSlots.find((item) => item.id === record.scheduleSlotId);
+      const window = cfg.dailyMoments?.scheduleWindows?.find((item) =>
+        `${item.start}-${item.end}` === slot?.windowKey);
+      if (!window || slot.index >= window.count) {
+        throw momentError('MOMENT_SCHEDULE_CHANGED', '本次计划已取消或修改，未发布');
+      }
+      if (this.now() >= record.scheduleEndAt) {
+        throw momentError('MOMENT_WINDOW_EXPIRED', '已超过允许发布时间范围，本次未发布');
+      }
+    }
     if (cfg.runtime?.mode !== 'active' || cfg.runtime?.paused) {
       throw momentError('MOMENT_INACTIVE', '机器人处于观察或暂停状态，禁止发布');
     }
@@ -555,11 +704,21 @@ export class DailyMomentsManager {
     }
   }
 
-  async #publishRecord(record, snapshot, signal) {
+  async #publishRecord(record, snapshot, signal, {
+    force = false,
+    confirmDuplicateRisk = false
+  } = {}) {
     this.#assertPublishAllowed(record, signal);
-    const blocked = this.state.records.find((item) => item.id !== record.id
-      && item.dayKey === record.dayKey && PUBLICATION_STATUSES.has(item.status));
-    if (blocked) return { ok: true, alreadyAttempted: true, record: blocked };
+    const blocked = this.#blockingRecord(record, true);
+    if (blocked && force && !confirmDuplicateRisk) {
+      throw momentError(
+        'MOMENT_DUPLICATE_CONFIRMATION_REQUIRED',
+        '该日期可能已经发布；发布草稿需明确确认重复发布风险'
+      );
+    }
+    if (blocked && !(force && confirmDuplicateRisk)) {
+      return { ok: true, alreadyAttempted: true, record: blocked };
+    }
     const cfg = normalizedConfig();
     const imageSources = [];
     record.imageErrors = [];
@@ -610,7 +769,10 @@ export class DailyMomentsManager {
     }
   }
 
-  async publishDraft(id) {
+  async publishDraft(id, {
+    force = false,
+    confirmDuplicateRisk = false
+  } = {}) {
     return this.#exclusive('publish-draft', async () => {
       const record = this.state.records.find((item) => item.id === id);
       if (!record) throw momentError('MOMENT_NOT_FOUND', '草稿不存在', 404);
@@ -620,12 +782,16 @@ export class DailyMomentsManager {
       if (record.status !== 'preview' || record.decision !== 'publish' || !record.content?.trim()) {
         throw momentError('MOMENT_NOT_DRAFT', '这不是可发布的草稿，请重新生成');
       }
+      record.publicationSource = 'manual';
       this.controller = new AbortController();
       const scopes = ['', ...record.groupSummaries.map((group) => group.chatKey)];
       const release = watchTimeWindow((error) => this.controller?.abort(error), scopes);
       try {
         const snapshot = { imageMap: new Map((record.imageRefs || []).map((ref) => [ref.id, { ...ref }])) };
-        return await this.#publishRecord(record, snapshot, this.controller.signal);
+        return await this.#publishRecord(record, snapshot, this.controller.signal, {
+          force,
+          confirmDuplicateRisk
+        });
       } catch (error) {
         if (!record.publishAttempted) {
           record.error = cleanText(error?.message ?? error, 1000);
@@ -652,6 +818,10 @@ export class DailyMomentsManager {
       const found = await this.#findDuplicate(record.content);
       if (found) {
         Object.assign(record, { status: 'published', tid: String(found.tid), error: '', reconciledAt: this.now() });
+        const slot = this.state.scheduleSlots.find((item) => item.id === record.scheduleSlotId);
+        if (slot) {
+          Object.assign(slot, { status: 'published', recordId: record.id, reason: '已在空间核对到发布结果' });
+        }
         this.#saveRecord(record);
       }
       return { ok: true, matched: Boolean(found), record };
@@ -861,8 +1031,9 @@ export class DailyMomentsManager {
     for (let round = 0; round < cfg.maxRounds && !finalDecision; round++) {
       signal.throwIfAborted();
       assertTimeAllowed();
-      const toolChoice = round === cfg.maxRounds - 1
-        ? { type: 'function', function: { name: 'submit_daily_moment' } } : 'auto';
+      // DeepSeek thinking mode rejects named/required tool choices, including
+      // on the final retry. Validation below still requires an explicit submit.
+      const toolChoice = 'auto';
       if (session) {
         session.inputRequestOptions.toolChoice = toolChoice;
         session.inputRound = round + 1;

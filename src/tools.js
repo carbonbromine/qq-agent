@@ -8,10 +8,19 @@ import { normalizeMessageList, unquoteJsonString } from './util.js';
 import { formatStickerList } from './stickers.js';
 import { validateImageUrl, safeFetchBinary } from './safe-fetch.js';
 import { webSearch, webFetch } from './web-search.js';
-import { expandForwardNodes } from './onebot.js';
+import { expandForwardNodes, extractMediaFromSegments } from './onebot.js';
 
 async function downloadImageAsDataUrl(url, signal) {
   signal?.throwIfAborted();
+  if (String(url || '').startsWith('base64://')) {
+    const buffer = Buffer.from(String(url).slice('base64://'.length), 'base64');
+    if (!buffer.length || buffer.length > 12 * 1024 * 1024) {
+      throw new Error('本地表情图片为空或超过 12 MiB');
+    }
+    const mime = detectMime(buffer);
+    if (!mime) throw new Error('本地表情图片格式无效');
+    return `data:${mime};base64,${buffer.toString('base64')}`;
+  }
   const safeUrl = await validateImageUrl(url);
   const { buffer, contentType } = await safeFetchBinary(safeUrl, 12 * 1024 * 1024, signal);
   if (!buffer || !buffer.length) throw new Error('图片内容为空');
@@ -24,7 +33,7 @@ function detectMime(buf) {
   if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png';
   if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
   if (buf.toString('ascii', 0, 6) === 'GIF87a' || buf.toString('ascii', 0, 6) === 'GIF89a') return 'image/gif';
-  if (buf.toString('ascii', 0, 8) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') return 'image/webp';
+  if (buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') return 'image/webp';
   return null;
 }
 
@@ -32,8 +41,8 @@ function ok(payload) {
   return { content: typeof payload === 'string' ? payload : JSON.stringify(payload, null, 1) };
 }
 
-function err(message) {
-  return { content: `错误：${message}`, isError: true };
+function err(message, metadata = {}) {
+  return { content: `错误：${message}`, isError: true, ...metadata };
 }
 
 // 找不到消息 id 时，把当前会话真实可见的 id 告诉模型，避免它继续瞎猜。
@@ -53,6 +62,63 @@ function memberHint(ctx) {
   if (!members.length) return '当前没有可用的成员列表，请先等有群友发言后再试';
   const lines = members.map((m) => `- ${m.name}：${m.userId}`).join('\n');
   return `请从当前会话成员里选一个 QQ 号填进去：\n${lines}`;
+}
+
+function hasParticipant(ctx, userId) {
+  if (typeof ctx.store?.hasParticipant === 'function') {
+    return ctx.store.hasParticipant(ctx.chatKey, userId);
+  }
+  return (ctx.store?.activeMembers?.(ctx.chatKey, 1000) || [])
+    .some((member) => String(member.userId) === String(userId));
+}
+
+function messageTargetError(ctx, { replyToMessageId, atUserId }) {
+  const reply = String(replyToMessageId ?? '').trim();
+  const at = String(atUserId ?? '').trim();
+  if (reply && at) return 'replyToMessageId 和 atUserId 只能选择一个';
+  if (reply) {
+    if (!/^-?[1-9]\d*$/.test(reply)) {
+      return `replyToMessageId 必须是聊天记录中的消息 id。${midHint(ctx)}`;
+    }
+    if (!ctx.store?.findByMid?.(ctx.chatKey, reply)) {
+      return `当前会话找不到要引用的消息 ${reply}。${midHint(ctx)}`;
+    }
+  }
+  if (at) {
+    if (ctx.kind !== 'group') return '私聊不需要 atUserId';
+    if (!/^\d{1,15}$/.test(at)) {
+      return `atUserId 必须是当前群成员的数字 QQ 号。${memberHint(ctx)}`;
+    }
+    if (!hasParticipant(ctx, at)) {
+      const looksLikeMessageId = Boolean(ctx.store?.findByMid?.(ctx.chatKey, at));
+      return `${at} 不是当前群中已出现的成员 QQ 号`
+        + `${looksLikeMessageId ? '，它是消息 id；如需引用请改用 replyToMessageId' : ''}。${memberHint(ctx)}`;
+    }
+  }
+  return '';
+}
+
+async function currentMessageImageUrls(ctx, entry) {
+  let media = entry.media || [];
+  if (entry.mid != null && typeof ctx.onebot?.getMsg === 'function') {
+    try {
+      const data = await ctx.onebot.getMsg(entry.mid);
+      const segments = Array.isArray(data?.message) ? data.message : [];
+      const fresh = extractMediaFromSegments(segments)
+        .filter((item) => item.kind === 'image' && (item.url || item.file));
+      if (fresh.length) {
+        media = fresh;
+        ctx.store?.updateByMid?.(ctx.chatKey, entry.mid, { appendMedia: fresh });
+      }
+    } catch {
+      // Stored URLs remain a best-effort fallback when the source message expired.
+    }
+  }
+  return media
+    .filter((item) => item.kind === 'image')
+    .map((item) => String(item.url || item.file || '').trim())
+    .filter(Boolean)
+    .slice(0, 4);
 }
 
 function imageParts(text, dataUrls) {
@@ -87,6 +153,8 @@ export function buildToolDefs() {
         try {
           const messages = normalizeMessageList(args.messages);
           if (!messages.length) return err('消息内容为空');
+          const targetError = messageTargetError(ctx, args);
+          if (targetError) return err(targetError);
           // #region debug-point A-B:send-message-owner
           if (!String(process.argv[1]).includes('/test/')) (() => { try { const body = JSON.stringify({ sessionId: 'daily-summary-group-send', runId: 'post-fix', hypothesisId: 'A,B', location: 'src/tools.js:send_message', msg: '[DEBUG] QQ send_message attributed to Agent Session', data: { agentSessionId: ctx.session?.id || null, chatKey: ctx.chatKey, trigger: ctx.session?.trigger || null, triggerSummary: ctx.session?.triggerSummary || '', conversationMode: ctx.session?.conversationMode || null, leaseId: ctx.session?.leaseId || null, messageCount: messages.length, previews: messages.map((text) => String(text).slice(0, 80)) }, ts: Date.now() }); const req = process.getBuiltinModule('node:http').request('http://192.168.31.10:7777/event', { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } }, (res) => res.resume()); req.on('error', () => {}); req.on('socket', (socket) => socket.unref()); req.setTimeout(500, () => req.destroy()); req.end(body); } catch {} })();
           // #endregion
@@ -101,7 +169,9 @@ export function buildToolDefs() {
           if (result.failed.length) note.push(`（另有 ${result.failed.length} 条发送失败：${result.failed.map((f) => f.error).join('；')}——成功的不需要重发，失败的请稍后再试或减少条数）`);
           return ok({ sent: result.sent.length, messageIds: result.sent.map((s) => s.messageId), note: note.join('') });
         } catch (error) {
-          return err(error?.message ?? error);
+          return err(error?.message ?? error, {
+            incidentCaptured: error?.incidentCaptured === true
+          });
         }
       }
     },
@@ -122,13 +192,20 @@ export function buildToolDefs() {
           const sticker = await ctx.stickers.findForSend(unquoteJsonString(args.stickerId));
           if (!sticker) return err(`找不到表情 ${args.stickerId}，请先用 list_stickers 获取有效 id`);
           if (!sticker.url) return err(`表情 ${sticker.id} 没有可发送的图片地址`);
+          const targetError = messageTargetError(ctx, args);
+          if (targetError) return err(targetError);
+          const managedInline = sticker.source === 'manual'
+            && Boolean(sticker.localFile)
+            && sticker.url.startsWith('base64://');
           // #region debug-point C-D:sticker-resolution
-          if (!String(process.argv[1]).includes('/test/')) (() => { try { const parsed = new URL(sticker.url); const body = JSON.stringify({ sessionId: 'agent-time-sticker-download', runId: 'post-fix', hypothesisId: 'C,D', location: 'src/tools.js:send_sticker', msg: '[DEBUG] Resolved sticker before OneBot delivery', data: { stickerId: sticker.id, source: sticker.source, host: parsed.host, pathname: parsed.pathname, queryKeys: [...parsed.searchParams.keys()], urlLength: sticker.url.length, replyToMessageId: args.replyToMessageId ?? null }, ts: Date.now() }); const req = process.getBuiltinModule('node:http').request('http://192.168.31.10:7777/event', { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } }, (res) => res.resume()); req.on('error', () => {}); req.on('socket', (socket) => socket.unref()); req.setTimeout(500, () => req.destroy()); req.end(body); } catch {} })();
+          if (!String(process.argv[1]).includes('/test/')) (() => { try { let host = '', pathname = '', queryKeys = []; if (!managedInline) { const parsed = new URL(sticker.url); host = parsed.host; pathname = parsed.pathname; queryKeys = [...parsed.searchParams.keys()]; } const body = JSON.stringify({ sessionId: 'agent-time-sticker-download', runId: 'post-fix', hypothesisId: 'C,D', location: 'src/tools.js:send_sticker', msg: '[DEBUG] Resolved sticker before OneBot delivery', data: { stickerId: sticker.id, source: sticker.source, transport: managedInline ? 'managed-base64' : 'remote-http', host, pathname, queryKeys, urlLength: sticker.url.length, replyToMessageId: args.replyToMessageId ?? null }, ts: Date.now() }); const req = process.getBuiltinModule('node:http').request('http://192.168.31.10:7777/event', { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } }, (res) => res.resume()); req.on('error', () => {}); req.on('socket', (socket) => socket.unref()); req.setTimeout(500, () => req.destroy()); req.end(body); } catch {} })();
           // #endregion
-          try {
-            await validateImageUrl(sticker.url); // 只允许公网 http(s)，防止本地库被污染后诱导 OneBot 抓内网
-          } catch (error) {
-            return err(`表情 ${sticker.id} 的图片地址不合法，已拒绝发送：${error?.message ?? error}`);
+          if (!managedInline) {
+            try {
+              await validateImageUrl(sticker.url); // 只允许公网 http(s)，防止本地库被污染后诱导 OneBot 抓内网
+            } catch (error) {
+              return err(`表情 ${sticker.id} 的图片地址不合法，已拒绝发送：${error?.message ?? error}`);
+            }
           }
           const result = await ctx.sender.sendSticker(ctx.chatKey, sticker, {
             runId: ctx.session.leaseId, signal: ctx.signal,
@@ -140,7 +217,9 @@ export function buildToolDefs() {
           ctx.emit('session-update', ctx.session.id);
           return ok({ sent: true, messageId: result?.message_id ?? null, note: '表情已发送。' });
         } catch (error) {
-          return err(error?.message ?? error);
+          return err(error?.message ?? error, {
+            incidentCaptured: error?.incidentCaptured === true
+          });
         }
       }
     },
@@ -159,7 +238,9 @@ export function buildToolDefs() {
           const result = await ctx.stickers.list(String(args.query ?? ''), Math.min(100, Math.max(1, Number(args.limit) || 24)));
           return ok(result);
         } catch (error) {
-          return err(error?.message ?? error);
+          return err(error?.message ?? error, {
+            incidentCaptured: error?.incidentCaptured === true
+          });
         }
       }
     },
@@ -244,17 +325,28 @@ export function buildToolDefs() {
           }
           let target = args.targetUserId;
           if (target !== undefined && target !== null && String(target).trim() !== '') {
-            target = Number(target);
-            if (!Number.isInteger(target) || target <= 0) {
+            const targetText = String(target).trim();
+            if (!/^\d{1,15}$/.test(targetText)) {
               return err(`targetUserId 必须是正整数的 QQ 号（收到：${JSON.stringify(args.targetUserId)}）。${memberHint(ctx)}`);
             }
+            if (ctx.kind === 'group' && !hasParticipant(ctx, targetText)) {
+              const looksLikeMessageId = Boolean(ctx.store?.findByMid?.(ctx.chatKey, targetText));
+              return err(`${targetText} 不是当前群中已出现的成员 QQ 号`
+                + `${looksLikeMessageId ? '，它是消息 id' : ''}。${memberHint(ctx)}`);
+            }
+            if (ctx.kind === 'private' && String(ctx.chatId) !== targetText) {
+              return err('私聊只能拍当前聊天对象，省略 targetUserId 即可');
+            }
+            target = Number(targetText);
             await ctx.sender.poke(ctx.chatKey, target, { runId: ctx.session.leaseId, signal: ctx.signal });
           } else {
             await ctx.sender.poke(ctx.chatKey, null, { runId: ctx.session.leaseId, signal: ctx.signal });
           }
           return ok({ poked: true });
         } catch (error) {
-          return err(error?.message ?? error);
+          return err(error?.message ?? error, {
+            incidentCaptured: error?.incidentCaptured === true
+          });
         }
       }
     },
@@ -365,7 +457,7 @@ export function buildToolDefs() {
         try {
           const entry = ctx.store.findByMid(ctx.chatKey, args.messageId);
           if (!entry) return err(`当前会话找不到消息 ${args.messageId}。${midHint(ctx)}`);
-          const urls = (entry.media || []).filter((m) => m.kind === 'image' && m.url).map((m) => m.url).slice(0, 4);
+          const urls = await currentMessageImageUrls(ctx, entry);
           if (!urls.length) return ok(`消息 ${args.messageId} 没有可查看的图片`);
           const dataUrls = [];
           const failed = [];
@@ -397,7 +489,7 @@ export function buildToolDefs() {
       async execute(ctx, args) {
         const userId = String(args.userId ?? '').trim();
         if (!/^\d{1,15}$/.test(userId)) {
-          return err(`userId 必须是数字 QQ 号（收到：${JSON.stringify(args.userId)}）。先用 get_active_members 查准确 QQ 号再记。`);
+          return err(`userId 必须是数字 QQ 号（收到：${JSON.stringify(args.userId)}）。${memberHint(ctx)}`);
         }
         const entry = ctx.memory.append(ctx.chatKey, 'memberImpression', String(args.content ?? ''), {
           userId,
@@ -454,7 +546,7 @@ export function buildToolDefs() {
     {
       name: 'friend_request_propose',
       feature: 'friendProposal',
-      description: '把当前聊天对象或群成员列为“想主动添加好友”的候选，并请求管理员审批。仅在你对对方确实感兴趣、长期聊得频繁，或真心想以后继续互怼时使用；这不会直接发送好友申请，也不能替管理员批准。',
+      description: '由你自主判断是否把当前聊天对象或群成员列为“想主动添加好友”的候选，并请求管理员审批。不需要等用户或管理员要求；仅在你确实持续感兴趣、长期聊得频繁，或真心想以后继续互怼时偶尔触发。这不会直接发送好友申请，也不能替管理员批准。',
       parameters: {
         type: 'object',
         properties: {
@@ -698,7 +790,11 @@ export async function executeTool(defs, ctx, name, argsJson) {
   try {
     args = typeof raw === 'string' ? JSON.parse(raw) : raw;
   } catch {
-    return { content: `错误：工具 ${name} 的参数不是合法 JSON：${String(raw).slice(0, 200)}`, isError: true };
+    return {
+      content: `错误：工具 ${name} 的参数不是合法 JSON：${String(raw).slice(0, 200)}`
+        + '。请重新调用：字符串值必须放在双引号内，字符串里的双引号必须转义；不要重复已经成功的外部操作。',
+      isError: true
+    };
   }
   try {
     ctx.signal?.throwIfAborted();

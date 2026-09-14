@@ -21,12 +21,17 @@ export function normalizeStickerEntry(raw) {
     id,
     resId: String(entry.resId || entry.emoji_id || id).trim(),
     url: String(entry.url || '').trim(),
+    localFile: /^sticker-assets\/[a-z0-9_-]+\.(png|jpe?g|gif|webp)$/i.test(String(entry.localFile || ''))
+      ? String(entry.localFile)
+      : '',
     md5: String(entry.md5 || '').trim().toUpperCase(),
     desc: String(entry.desc ?? '').trim(),
     localNote: String(entry.localNote ?? '').trim(),
     tags,
     usage: String(entry.usage ?? '').trim(),
     source: entry.source === 'manual' ? 'manual' : (entry.source === 'ai' ? 'ai' : 'qq'),
+    hidden: entry.hidden === true,
+    metadataEdited: entry.metadataEdited === true,
     useCount: Math.max(0, Number(entry.useCount) || 0),
     lastUsedAt: Number(entry.lastUsedAt) || 0,
     lastContext: String(entry.lastContext ?? '').slice(0, 200),
@@ -35,14 +40,23 @@ export function normalizeStickerEntry(raw) {
   };
 }
 
-export function loadStickerStore(file = STICKER_FILE) {
+export function loadStickerStore(file = STICKER_FILE, { strict = false } = {}) {
   try {
     let text = fs.readFileSync(file, 'utf8');
     if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
     const parsed = JSON.parse(text);
-    if (!Array.isArray(parsed)) return [];
+    if (!Array.isArray(parsed)) {
+      if (strict) throw new Error('表情库根节点必须是数组');
+      return [];
+    }
     return parsed.map(normalizeStickerEntry).filter(Boolean);
-  } catch {
+  } catch (error) {
+    if (error?.code === 'ENOENT') return [];
+    if (strict) {
+      throw new Error(`表情库读取失败，已停止写入：${String(error?.message ?? error)}`, {
+        cause: error
+      });
+    }
     return [];
   }
 }
@@ -73,7 +87,9 @@ export function mergeStickerLibrary(existing, fetched) {
       resId: String(item.resId || item.emoji_id || id).trim(),
       url: String(item.url || old?.url || '').trim(),
       md5: String(item.md5 || old?.md5 || '').trim().toUpperCase(),
-      desc: String(item.desc ?? old?.desc ?? '').trim(),
+      desc: old?.metadataEdited
+        ? old.desc
+        : String(item.desc ?? old?.desc ?? '').trim(),
       localNote: old?.localNote || '',
       tags: old?.tags || [],
       usage: old?.usage || '',
@@ -93,7 +109,7 @@ export function mergeStickerLibrary(existing, fetched) {
       if (idx >= 0) out[idx] = merged;
     }
   }
-  return out.filter((e) => e.source !== 'qq' || fetchedIds.has(e.id));
+  return out.filter((e) => e.source !== 'qq' || e.hidden || fetchedIds.has(e.id));
 }
 
 export function findSticker(entries, ref) {
@@ -101,18 +117,28 @@ export function findSticker(entries, ref) {
   if (!raw) return null;
   const md5 = raw.toUpperCase();
   const urlNormalized = raw.replace(/\/+$/, '').replace(/^https?:\/\//i, '');
-  return (Array.isArray(entries) ? entries : []).find((e) => {
+  const visible = (Array.isArray(entries) ? entries : []).filter((entry) =>
+    entry && entry.hidden !== true);
+  const direct = visible.find((e) => {
     if (!e) return false;
     if (e.id === raw || e.resId === raw) return true;
     if (e.md5 && e.md5 === md5) return true;
     const eUrl = String(e.url || '').replace(/\/+$/, '').replace(/^https?:\/\//i, '');
     if (eUrl && urlNormalized && (eUrl === urlNormalized || eUrl.includes(urlNormalized) || urlNormalized.includes(eUrl))) return true;
     return false;
-  }) || null;
+  });
+  if (direct) return direct;
+  const label = raw.toLowerCase();
+  const exactLabels = visible.filter((entry) =>
+    [entry.desc, entry.localNote].some((value) =>
+      String(value || '').trim().toLowerCase() === label));
+  return exactLabels.length === 1 ? exactLabels[0] : null;
 }
 
 export function formatStickerList(entries, query = '', limit = 48) {
-  const list = (Array.isArray(entries) ? entries : []).map(normalizeStickerEntry).filter(Boolean);
+  const list = (Array.isArray(entries) ? entries : [])
+    .map(normalizeStickerEntry)
+    .filter((entry) => entry && !entry.hidden);
   const q = String(query ?? '').trim().toLowerCase();
   const filtered = q
     ? list.filter((e) => {
@@ -133,7 +159,9 @@ export function formatStickerList(entries, query = '', limit = 48) {
 
 /** 提示词里的【可用表情包】摘要（不暴露完整 URL，控制上下文体积）。 */
 export function buildStickerContext(entries, max = 10) {
-  const list = (Array.isArray(entries) ? entries : []).map(normalizeStickerEntry).filter(Boolean);
+  const list = (Array.isArray(entries) ? entries : [])
+    .map(normalizeStickerEntry)
+    .filter((entry) => entry && !entry.hidden);
   if (!list.length) return '';
   const top = [...list]
     .sort((a, b) => (b.useCount || 0) - (a.useCount || 0) || ((b.desc || b.localNote) ? 1 : 0) - ((a.desc || a.localNote) ? 1 : 0))
@@ -142,7 +170,7 @@ export function buildStickerContext(entries, max = 10) {
     const label = e.desc || e.localNote || '（无备注，可先看图）';
     const extra = e.tags?.length ? ` [${e.tags.join('/')}]` : '';
     const used = e.useCount ? `（用过${e.useCount}次）` : '';
-    return `- ${label}${extra}${used}`;
+    return `- ${label}${extra}${used}（stickerId：${e.id}）`;
   });
   return `【可用表情包】你的 QQ 收藏表情里有 ${list.length} 个表情（以下为常用/有备注的 ${top.length} 个，完整列表可用 list_stickers 查询）：\n${lines.join('\n')}`;
 }

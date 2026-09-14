@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { PERSONAS } from './personas.js';
 import { sliderToTier } from './tier-slider.js';   // 零依赖模块，避免循环依赖
 import { DEFAULT_TIME_CONTROL, normalizeTimeControl } from './time-control.js';
+import { normalizeMomentWindows } from './moment-schedule.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const ROOT = path.resolve(__dirname, '..');
@@ -172,6 +173,7 @@ export const DEFAULT_CONFIG = {
     enabled: false,
     hour: 23,                    // 上海时间
     minute: 30,
+    scheduleWindows: null,       // null 保留固定时刻；数组为 {start, end, count}
     startupCatchup: true,        // 错过定时点后，服务恢复时补一次
     minMessagesPerGroup: 3,
     maxGroups: 12,
@@ -208,15 +210,74 @@ export const DEFAULT_CONFIG = {
   },
   // 跨会话人物画像与好友关系试点。第一阶段只提供总开关；
   // 关闭时不得注册工具、注入提示词、启动任务或创建实验数据文件。
+  // graduated 只控制独立产品入口，不改变 enabled 的运行语义。
   identityPilot: {
     enabled: false,
+    graduated: false,
+    incomingFriendRequest: {
+      enabled: false,
+      autoWhitelist: true,
+      maxPending: 50
+    },
     friendProposal: {
       enabled: false,
+      graduated: false,
+      activeDispatchEnabled: false,
       ownerUin: '',
+      mode: 'triggered',
       minMessageCount: 50,
       cooldownDays: 30,
-      maxPending: 10
+      maxPending: 10,
+      triggered: {
+        probability: 0.05,
+        historyDays: 30,
+        minMessages: 50,
+        minActiveDays: 3,
+        minDirectExchanges: 3,
+        maxTriggerAgeMinutes: 10,
+        friendStatusMaxAgeMinutes: 15,
+        drawCooldownMinutes: 30,
+        maxDrawsPerUserPerDay: 6,
+        maxReviewsPerDay: 10,
+        skipCooldownDays: 7,
+        errorCooldownMinutes: 60,
+        maxQueueAgeSeconds: 120,
+        scoreThreshold: 70,
+        weights: {
+          quality: 40,
+          interest: 30,
+          reciprocity: 20,
+          stability: 10
+        }
+      }
     }
+  },
+  // 黑话语料库试点。关闭时不建库、不扫描消息、不注册任务或改变模型请求。
+  slangPilot: {
+    enabled: false,
+    graduated: false,
+    ownerUin: '',
+    minOccurrences: 3,
+    minSpeakers: 2,
+    windowHours: 72,
+    maxPending: 100,
+    perChatDailyLimit: 5,
+    rejectCooldownDays: 14,
+    maxEvidence: 12,
+    webResearch: true,
+    maxSearchResults: 5,
+    maxFetchPages: 2,
+    maxResearchRounds: 2
+  },
+  // 异常处理试点。关闭时不建库、不改变会话阻塞策略、不发送管理员告警。
+  incidentPilot: {
+    enabled: false,
+    graduated: false,
+    ownerUin: '',
+    notifyWarnings: true,
+    duplicateWindowMinutes: 10,
+    unknownWritesBlockChat: false,
+    retentionDays: 90
   },
   // 表情包
   sticker: {
@@ -288,6 +349,15 @@ export const DEFAULT_CONFIG = {
 
 function migrateConfig(parsed) {
   const out = structuredClone(parsed);
+  if (
+    out.identityPilot?.friendProposal
+    && out.identityPilot.friendProposal.mode == null
+  ) {
+    // The experiment has moved to controller-owned message triggers. Existing
+    // pilot configs without a mode follow the new path; "prompt" remains an
+    // explicit rollback mode in the friend management page.
+    out.identityPilot.friendProposal.mode = 'triggered';
+  }
   if (out.wakeDelayMinMs == null && out.wakeDelayMaxMs == null && out.wakeDelayMs != null) {
     const legacy = Math.max(0, Number(out.wakeDelayMs) || 0);
     if (legacy === 10000) {
@@ -380,11 +450,40 @@ export function friendProposalEnabled(cfg = getConfig()) {
   return identityPilotEnabled(cfg) && cfg?.identityPilot?.friendProposal?.enabled === true;
 }
 
+export function triggeredFriendProposalEnabled(cfg = getConfig()) {
+  return friendProposalEnabled(cfg)
+    && cfg?.identityPilot?.friendProposal?.mode === 'triggered';
+}
+
+export function promptFriendProposalEnabled(cfg = getConfig()) {
+  return friendProposalEnabled(cfg)
+    && cfg?.identityPilot?.friendProposal?.mode !== 'triggered';
+}
+
+export function incomingFriendRequestEnabled(cfg = getConfig()) {
+  return identityPilotEnabled(cfg)
+    && cfg?.identityPilot?.incomingFriendRequest?.enabled === true;
+}
+
+export function friendRequestDispatchEnabled(cfg = getConfig()) {
+  return friendProposalEnabled(cfg)
+    && cfg?.identityPilot?.friendProposal?.activeDispatchEnabled === true;
+}
+
+export function slangPilotEnabled(cfg = getConfig()) {
+  return cfg?.slangPilot?.enabled === true;
+}
+
+export function incidentPilotEnabled(cfg = getConfig()) {
+  return cfg?.incidentPilot?.enabled === true;
+}
+
 /** 更新并持久化配置（浅合并到当前值；patch 里传对象字段则整体替换该字段）。 */
 export function updateConfig(patch) {
   const next = migrateConfig(deepMerge(getConfig(), patch));
   const oldTimeControl = JSON.stringify(getConfig().timeControl);
   next.timeControl = normalizeTimeControl(next.timeControl);
+  next.dailyMoments.scheduleWindows = normalizeMomentWindows(next.dailyMoments.scheduleWindows);
   if (!['observe', 'active'].includes(next.runtime?.mode)) throw new Error('Invalid runtime mode');
   if (!['legacy', 'threaded', 'lifecycle'].includes(next.conversation?.mode)) {
     throw new Error('Invalid conversation mode');
@@ -451,16 +550,51 @@ export function updateConfig(patch) {
     maxDecisionRounds: Math.min(5, Math.max(1, Number(interactions.maxDecisionRounds) || 3))
   };
   const identity = next.identityPilot || {};
+  const incomingFriendRequest = identity.incomingFriendRequest || {};
   const friendProposal = identity.friendProposal || {};
+  const triggered = friendProposal.triggered || {};
+  const rawWeights = triggered.weights || {};
+  const finiteNumber = (value, fallback) => (
+    Number.isFinite(Number(value)) ? Number(value) : fallback
+  );
+  const clampNumber = (value, min, max, fallback) => Math.min(
+    max,
+    Math.max(min, finiteNumber(value, fallback))
+  );
+  const clampInteger = (value, min, max, fallback) =>
+    Math.round(clampNumber(value, min, max, fallback));
+  const weights = {
+    quality: clampInteger(rawWeights.quality, 0, 100, 40),
+    interest: clampInteger(rawWeights.interest, 0, 100, 30),
+    reciprocity: clampInteger(rawWeights.reciprocity, 0, 100, 20),
+    stability: clampInteger(rawWeights.stability, 0, 100, 10)
+  };
+  if (Object.values(weights).reduce((sum, value) => sum + value, 0) !== 100) {
+    throw new Error('主动好友评估权重合计必须为 100');
+  }
   next.identityPilot = {
     ...identity,
     enabled: identity.enabled === true,
+    graduated: identity.graduated === true,
+    incomingFriendRequest: {
+      ...incomingFriendRequest,
+      enabled: incomingFriendRequest.enabled === true,
+      autoWhitelist: incomingFriendRequest.autoWhitelist !== false,
+      maxPending: Math.min(
+        500,
+        Math.max(1, Math.round(Number(incomingFriendRequest.maxPending) || 50))
+      )
+    },
     friendProposal: {
       ...friendProposal,
       enabled: friendProposal.enabled === true,
+      graduated: friendProposal.graduated === true,
+      activeDispatchEnabled: friendProposal.enabled === true
+        && friendProposal.activeDispatchEnabled === true,
       ownerUin: /^\d{5,15}$/.test(String(friendProposal.ownerUin || '').trim())
         ? String(friendProposal.ownerUin).trim()
         : '',
+      mode: friendProposal.mode === 'prompt' ? 'prompt' : 'triggered',
       minMessageCount: Math.min(
         10000,
         Math.max(1, Math.round(Number(friendProposal.minMessageCount) || 50))
@@ -472,17 +606,151 @@ export function updateConfig(patch) {
       maxPending: Math.min(
         100,
         Math.max(1, Math.round(Number(friendProposal.maxPending) || 10))
-      )
+      ),
+      triggered: {
+        ...triggered,
+        probability: clampNumber(triggered.probability, 0, 1, 0.05),
+        historyDays: clampInteger(triggered.historyDays, 1, 365, 30),
+        minMessages: clampInteger(triggered.minMessages, 0, 10000, 50),
+        minActiveDays: clampInteger(triggered.minActiveDays, 0, 365, 3),
+        minDirectExchanges: clampInteger(triggered.minDirectExchanges, 0, 1000, 3),
+        maxTriggerAgeMinutes: clampInteger(
+          triggered.maxTriggerAgeMinutes,
+          1,
+          1440,
+          10
+        ),
+        friendStatusMaxAgeMinutes: clampInteger(
+          triggered.friendStatusMaxAgeMinutes,
+          1,
+          1440,
+          15
+        ),
+        drawCooldownMinutes: clampInteger(triggered.drawCooldownMinutes, 1, 10080, 30),
+        maxDrawsPerUserPerDay: clampInteger(
+          triggered.maxDrawsPerUserPerDay,
+          1,
+          1000,
+          6
+        ),
+        maxReviewsPerDay: clampInteger(triggered.maxReviewsPerDay, 0, 1000, 10),
+        skipCooldownDays: clampInteger(triggered.skipCooldownDays, 0, 365, 7),
+        errorCooldownMinutes: clampInteger(
+          triggered.errorCooldownMinutes,
+          1,
+          10080,
+          60
+        ),
+        maxQueueAgeSeconds: clampInteger(triggered.maxQueueAgeSeconds, 5, 3600, 120),
+        scoreThreshold: clampInteger(triggered.scoreThreshold, 0, 100, 70),
+        weights
+      }
     }
   };
-  if (next.identityPilot.enabled && next.identityPilot.friendProposal.enabled) {
+  if (
+    next.identityPilot.enabled
+    && (
+      next.identityPilot.friendProposal.enabled
+      || next.identityPilot.incomingFriendRequest.enabled
+    )
+  ) {
     const ownerUin = next.identityPilot.friendProposal.ownerUin;
-    if (!ownerUin) throw new Error('主动好友候选需要配置审批管理员 QQ');
+    if (!ownerUin) throw new Error('好友审批功能需要配置管理员 QQ');
     if (
       next.allowAllWhenEmpty !== true
       && !(next.allow?.private || []).map(String).includes(ownerUin)
     ) {
       throw new Error('审批管理员 QQ 必须同时加入私聊白名单');
+    }
+  }
+  const incidentPilot = next.incidentPilot || {};
+  next.incidentPilot = {
+    ...incidentPilot,
+    enabled: incidentPilot.enabled === true,
+    graduated: incidentPilot.graduated === true,
+    ownerUin: /^\d{5,15}$/.test(String(incidentPilot.ownerUin || '').trim())
+      ? String(incidentPilot.ownerUin).trim()
+      : '',
+    notifyWarnings: incidentPilot.notifyWarnings !== false,
+    duplicateWindowMinutes: Math.min(
+      1440,
+      Math.max(1, Math.round(Number(incidentPilot.duplicateWindowMinutes) || 10))
+    ),
+    unknownWritesBlockChat: incidentPilot.unknownWritesBlockChat === true,
+    retentionDays: Math.min(
+      3650,
+      Math.max(1, Math.round(Number(incidentPilot.retentionDays) || 90))
+    )
+  };
+  if (next.incidentPilot.enabled) {
+    if (!next.incidentPilot.ownerUin) {
+      throw new Error('异常处理试点需要配置告警管理员 QQ');
+    }
+    if (
+      next.allowAllWhenEmpty !== true
+      && !(next.allow?.private || []).map(String).includes(next.incidentPilot.ownerUin)
+    ) {
+      throw new Error('异常告警管理员 QQ 必须同时加入私聊白名单');
+    }
+  }
+  const slangPilot = next.slangPilot || {};
+  next.slangPilot = {
+    ...slangPilot,
+    enabled: slangPilot.enabled === true,
+    graduated: slangPilot.graduated === true,
+    ownerUin: /^\d{5,15}$/.test(String(slangPilot.ownerUin || '').trim())
+      ? String(slangPilot.ownerUin).trim()
+      : '',
+    minOccurrences: Math.min(
+      20,
+      Math.max(2, Math.round(Number(slangPilot.minOccurrences) || 3))
+    ),
+    minSpeakers: Math.min(
+      20,
+      Math.max(1, Math.round(Number(slangPilot.minSpeakers) || 2))
+    ),
+    windowHours: Math.min(
+      720,
+      Math.max(1, Math.round(Number(slangPilot.windowHours) || 72))
+    ),
+    maxPending: Math.min(
+      500,
+      Math.max(1, Math.round(Number(slangPilot.maxPending) || 100))
+    ),
+    perChatDailyLimit: Math.min(
+      50,
+      Math.max(1, Math.round(Number(slangPilot.perChatDailyLimit) || 5))
+    ),
+    rejectCooldownDays: Math.min(
+      365,
+      Math.max(1, Math.round(Number(slangPilot.rejectCooldownDays) || 14))
+    ),
+    maxEvidence: Math.min(
+      30,
+      Math.max(3, Math.round(Number(slangPilot.maxEvidence) || 12))
+    ),
+    webResearch: slangPilot.webResearch !== false,
+    maxSearchResults: Math.min(
+      10,
+      Math.max(1, Math.round(Number(slangPilot.maxSearchResults) || 5))
+    ),
+    maxFetchPages: Math.min(
+      3,
+      Math.max(0, Math.round(Number(slangPilot.maxFetchPages) || 0))
+    ),
+    maxResearchRounds: Math.min(
+      3,
+      Math.max(1, Math.round(Number(slangPilot.maxResearchRounds) || 2))
+    )
+  };
+  if (next.slangPilot.enabled) {
+    const ownerUin = next.slangPilot.ownerUin;
+    if (!ownerUin) throw new Error('黑话语料库试点需要配置审批管理员 QQ');
+    if (
+      next.allowAllWhenEmpty !== true
+      && !(next.allow?.private || []).map(String).includes(ownerUin)
+    ) {
+      throw new Error('黑话审批管理员 QQ 必须同时加入私聊白名单');
     }
   }
   if (!Number.isInteger(Number(next.server?.port)) || next.server.port < 1 || next.server.port > 65535) {

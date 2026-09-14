@@ -215,6 +215,54 @@ function publicReply(item) {
   };
 }
 
+function publicRunDetails(run, state) {
+  const feeds = new Map(state.feeds.map((item) => [item.key, item]));
+  const comments = new Map(state.comments.map((item) => [item.key, item]));
+  const details = new Map();
+  for (const action of run.actions || []) {
+    const kind = action.type === 'reply' ? 'reply' : 'feed';
+    let detail = details.get(action.key);
+    if (!detail) {
+      const item = kind === 'reply' ? comments.get(action.key) : feeds.get(action.key);
+      if (kind === 'reply' && item) {
+        const reply = publicReply(item);
+        detail = {
+          kind,
+          post: reply.post,
+          comment: {
+            author: reply.author,
+            time: reply.time,
+            content: reply.content
+          },
+          thread: reply.thread,
+          decision: item.decision || '',
+          response: item.replyContent || '',
+          reason: item.reason || '',
+          operations: []
+        };
+      } else {
+        detail = {
+          kind,
+          ...(item ? {
+            post: publicPost(item.post),
+            decision: item.decision || '',
+            response: item.commentContent || '',
+            reason: item.reason || ''
+          } : {}),
+          operations: []
+        };
+      }
+      details.set(action.key, detail);
+    }
+    detail.operations.push({
+      type: action.type,
+      status: action.status,
+      ...(action.error ? { error: cleanText(action.error, 300) } : {})
+    });
+  }
+  return [...details.values()];
+}
+
 export class QzoneInteractionManager {
   constructor({
     onebot,
@@ -280,7 +328,10 @@ export class QzoneInteractionManager {
       unreadReplies: this.state.comments.filter((item) => item.status === 'unread').length,
       uncertain: [...this.state.feeds, ...this.state.comments]
         .filter((item) => item.status === 'unknown').length,
-      records: this.state.runs.slice(0, 20)
+      records: this.state.runs.slice(0, 20).map((run) => ({
+        ...run,
+        details: publicRunDetails(run, this.state)
+      }))
     };
   }
 
@@ -694,7 +745,7 @@ export class QzoneInteractionManager {
       session.promptLayout = QZONE_INTERACTION_PROMPT_VERSION;
       session.promptChars = systemPrompt.length + userPrompt.length;
       session.inputTools = structuredClone(tools);
-      session.inputRequestOptions = { toolChoice: 'submit_qzone_interactions', temperature: 1 };
+      session.inputRequestOptions = { toolChoice: 'auto', temperature: 1 };
       this.sessions.update(session.id);
     }
     for (let round = 0; round < cfg.maxDecisionRounds && !finalPlan; round++) {
@@ -710,10 +761,9 @@ export class QzoneInteractionManager {
       const response = await this.complete({
         messages,
         tools,
-        toolChoice: {
-          type: 'function',
-          function: { name: 'submit_qzone_interactions' }
-        },
+        // DeepSeek thinking mode rejects named/required tool choices.
+        // The prompt and finalPlan validation still require this sole submit tool.
+        toolChoice: 'auto',
         temperature: 1,
         signal,
         cacheKey: `qq-agent:qzone-interactions:${qzoneInteractionPersonaHash(root.persona).slice(0, 24)}`
