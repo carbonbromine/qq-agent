@@ -156,6 +156,60 @@ try {
       results.push({ name, err: e && e.message });
     }
   }
+  const { PERSONAS } = await import('../src/personas.js');
+  const personaTemplates = {
+    ...PERSONAS,
+    custom_0: {
+      ...PERSONAS.xiaojingyu_game_client,
+      name: 'Developer copy',
+      customRules: 'Explain version assumptions'
+    }
+  };
+  vm.runInContext(`state.personaTemplates = ${JSON.stringify(personaTemplates)};`, ctx);
+  ctx.applyPersonaDraft(personaTemplates.custom_0);
+  if (ctx.currentPersonaId() === 'custom_0'
+      && document.querySelector('#cfg-behavior-profile').value === 'grounded'
+      && document.querySelector('#cfg-customrules').value === personaTemplates.custom_0.customRules
+      && !document.querySelector('#del-persona-btn').classList.contains('hidden')) {
+    pass++;
+    console.log('  OK    自定义人设同步正文、策略与附加规则');
+  } else {
+    fail++;
+    console.log('  FAIL  自定义人设草稿字段未同步');
+  }
+  document.querySelector('#cfg-roletext').value += '\nEdited';
+  ctx.syncPersonaButtons();
+  if (ctx.currentPersonaId() === ''
+      && document.querySelector('#cfg-persona-pick').value === '') {
+    pass++;
+    console.log('  OK    修改人设后不错误标记为原模板');
+  } else {
+    fail++;
+    console.log('  FAIL  修改人设后模板匹配未更新');
+  }
+  ctx.applyPersonaDraft(PERSONAS.xiaojingyu);
+  if (ctx.currentPersonaId() === 'xiaojingyu'
+      && document.querySelector('#cfg-behavior-profile').value === 'legacy'
+      && document.querySelector('#cfg-customrules').value === ''
+      && document.querySelector('#del-persona-btn').classList.contains('hidden')) {
+    pass++;
+    console.log('  OK    切回原版时恢复策略并清除模板附加规则');
+  } else {
+    fail++;
+    console.log('  FAIL  原版人设回退不完整');
+  }
+  const groundedHtml = ctx.renderPersonaSection({
+    ...cfg, persona: { ...cfg.persona, behaviorProfile: 'grounded' }
+  });
+  if (groundedHtml.includes('id="cfg-behavior-profile"')
+      && groundedHtml.includes('value="grounded" selected')) {
+    pass++;
+    console.log('  OK    自然可靠交流策略正确回显');
+  } else {
+    fail++;
+    console.log('  FAIL  交流策略未回显');
+  }
+  vm.runInContext('state.personaTemplates = {};', ctx);
   const desktopHtml = ctx.renderDesktopSection(cfg);
   const apiHtml = ctx.renderApiSection(cfg);
   if (apiHtml.includes('id="cfg-max-run-tokens"')

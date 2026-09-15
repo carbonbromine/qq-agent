@@ -3760,7 +3760,10 @@ async function loadSettings() {
   state.visionScanning = !!visionData.scanning;
   state.modelPrices = priceData || { prices: [], current: null };
   state.personaTemplates = {};
-  for (const t of tplData.templates || []) state.personaTemplates[t.id] = { name: t.name, text: t.text, builtin: !!t.builtin };
+  for (const t of tplData.templates || []) state.personaTemplates[t.id] = {
+    name: t.name, text: t.text, customRules: t.customRules || '',
+    behaviorProfile: t.behaviorProfile || 'legacy', builtin: !!t.builtin
+  };
   renderSettings();
 }
 
@@ -4084,8 +4087,42 @@ function openBatchPriceModal() {
   });
 }
 
+function findPersonaTemplateId(roleText, behaviorProfile = 'legacy', customRules = '') {
+  return Object.entries(state.personaTemplates || {}).find(([, p]) =>
+    p.text === roleText && (p.behaviorProfile || 'legacy') === behaviorProfile
+      && (p.customRules || '') === customRules)?.[0] || '';
+}
+
+function currentPersonaId() {
+  return findPersonaTemplateId(
+    $('#cfg-roletext')?.value ?? '',
+    $('#cfg-behavior-profile')?.value || 'legacy',
+    $('#cfg-customrules')?.value ?? ''
+  );
+}
+
+function syncPersonaButtons() {
+  const id = currentPersonaId();
+  const tpl = state.personaTemplates[id];
+  const delBtn = $('#del-persona-btn');
+  if (delBtn) delBtn.classList.toggle('hidden', !id.startsWith('custom_'));
+  const input = $('#cfg-persona-pick');
+  if (input) input.value = tpl?.name || '';
+  const hint = $('#persona-pick-hint');
+  if (hint) hint.textContent = tpl ? (tpl.builtin ? '内置人设' : '自定义人设') : '';
+}
+
+function applyPersonaDraft(tpl) {
+  $('#cfg-roletext').value = tpl.text;
+  $('#cfg-customrules').value = tpl.customRules || '';
+  $('#cfg-behavior-profile').value = tpl.behaviorProfile || 'legacy';
+  syncPersonaButtons();
+}
+
 function renderPersonaPicker(c) {
-  const currentId = Object.entries(state.personaTemplates || {}).find(([, p]) => p.text === (c.persona?.roleText || ''))?.[0] || '';
+  const currentId = findPersonaTemplateId(
+    c.persona?.roleText || '', c.persona?.behaviorProfile || 'legacy', c.persona?.customRules || ''
+  );
   const currentName = state.personaTemplates[currentId]?.name || '';
   return `
     <div class="field-row" style="align-items:flex-end">
@@ -6033,6 +6070,11 @@ function renderPersonaSection(c) {
     <div class="field-row">
       <div class="field"><label>机器人名字</label><input type="text" id="cfg-botname" value="${esc(c.persona.botName)}" /></div>
       <div class="field"><label>群内展示名（可选）</label><input type="text" id="cfg-selfnick" value="${esc(c.persona.selfNickname || '')}" /></div>
+      <div class="field"><label>交流策略</label>
+        <select id="cfg-behavior-profile">
+          <option value="legacy" ${c.persona.behaviorProfile !== 'grounded' ? 'selected' : ''}>原版群友</option>
+          <option value="grounded" ${c.persona.behaviorProfile === 'grounded' ? 'selected' : ''}>自然可靠</option>
+        </select></div>
       <div class="field"><label>参与度</label>
         <select id="cfg-participation">
           <option value="low" ${c.persona.participation === 'low' ? 'selected' : ''}>安静型</option>
@@ -7264,19 +7306,9 @@ function bindSettingsEvents(c) {
 
   // ── 人设区块事件 ──
   const personaPick = $('#cfg-persona-pick');
-  function currentPersonaId() {
-    const roleText = $('#cfg-roletext')?.value ?? '';
-    const found = Object.entries(state.personaTemplates || {}).find(([, p]) => p.text === roleText);
-    return found ? found[0] : '';
-  }
-  function syncPersonaButtons() {
-    const id = currentPersonaId();
-    const tpl = state.personaTemplates[id];
-    const isCustom = id.startsWith('custom_');
-    const delBtn = $('#del-persona-btn');
-    if (delBtn) delBtn.classList.toggle('hidden', !isCustom);
-    const hint = $('#persona-pick-hint');
-    if (hint) hint.textContent = tpl ? (tpl.builtin ? '内置人设' : '自定义人设') : '';
+  for (const selector of ['#cfg-roletext', '#cfg-customrules', '#cfg-behavior-profile']) {
+    $(selector)?.addEventListener('input', syncPersonaButtons);
+    $(selector)?.addEventListener('change', syncPersonaButtons);
   }
   if (personaPick) {
     personaPick.addEventListener('click', () => openPersonaPicker());
@@ -7292,9 +7324,8 @@ function bindSettingsEvents(c) {
     if (!await askForConfirmation(`确定删除自定义人设「${tpl.name}」？`)) return;
     try {
       await api(`/api/persona-templates/${id}`, { method: 'DELETE', body: '{}' });
-      $('#cfg-roletext').value = state.personaTemplates.xiaojingyu?.text || '';
-      $('#cfg-customrules').value = '';
       await loadSettings();
+      applyPersonaDraft(state.personaTemplates.xiaojingyu);
     } catch (e) {
       $('#persona-pick-hint').textContent = `删除失败：${e.message}`;
     }
@@ -7439,7 +7470,7 @@ function openPersonaPicker() {
       <div class="model-modal-right" id="persona-list" style="flex:1">
         ${entries.map(([id, p]) => `
           <div class="mm-model" data-id="${esc(id)}">
-            <span class="mm-check">${(state.personaTemplates[id]?.text === ($('#cfg-roletext')?.value ?? '')) ? '✓' : ''}</span>
+            <span class="mm-check">${id === currentPersonaId() ? '✓' : ''}</span>
             <span>${esc(p.name)}</span>
             <span class="muted" style="font-size:11px">${p.builtin ? '内置' : '自定义'}</span>
           </div>`).join('')}
@@ -7450,12 +7481,7 @@ function openPersonaPicker() {
     el.addEventListener('click', () => {
       const id = el.dataset.id;
       const tpl = state.personaTemplates[id];
-      if (tpl) {
-        $('#cfg-roletext').value = tpl.text;
-        $('#cfg-customrules').value = tpl.customRules || '';
-        const input = $('#cfg-persona-pick');
-        if (input) input.value = tpl.name;
-      }
+      if (tpl) applyPersonaDraft(tpl);
       closeModelModal(overlay);
       syncPersonaButtons();
     });
@@ -7473,12 +7499,19 @@ function openPersonaCreateModal() {
         <input type="text" id="new-persona-name" placeholder="例如：毒舌老哥" />
       </div>
       <div class="field" style="flex:1;min-width:0">
+        <label>交流策略</label>
+        <select id="new-persona-profile">
+          <option value="legacy" ${$('#cfg-behavior-profile')?.value !== 'grounded' ? 'selected' : ''}>原版群友</option>
+          <option value="grounded" ${$('#cfg-behavior-profile')?.value === 'grounded' ? 'selected' : ''}>自然可靠</option>
+        </select>
+      </div>
+      <div class="field" style="flex:1;min-width:0">
         <label>角色设定</label>
-        <textarea id="new-persona-text" class="persona-role-text" style="min-height:220px" placeholder="人设文本"></textarea>
+        <textarea id="new-persona-text" class="persona-role-text" style="min-height:220px" placeholder="人设文本">${esc($('#cfg-roletext')?.value || '')}</textarea>
       </div>
       <div class="field" style="flex:1;min-width:0">
         <label>管理员附加规则（可选）</label>
-        <textarea id="new-persona-rules" style="min-height:90px" placeholder="可选：追加到系统提示的规则"></textarea>
+        <textarea id="new-persona-rules" style="min-height:90px" placeholder="可选：追加到系统提示的规则">${esc($('#cfg-customrules')?.value || '')}</textarea>
       </div>`,
     foot: `<button class="btn" id="persona-add-cancel">取消</button>
            <button class="btn btn-primary" id="persona-add-apply">确认添加</button>`
@@ -7488,20 +7521,18 @@ function openPersonaCreateModal() {
     const name = overlay.querySelector('#new-persona-name').value.trim();
     const text = overlay.querySelector('#new-persona-text').value.trim();
     const customRules = overlay.querySelector('#new-persona-rules').value.trim();
+    const behaviorProfile = overlay.querySelector('#new-persona-profile').value;
     if (!name) { $('#persona-pick-hint').textContent = '人设名称不能为空'; return; }
     if (!text) { $('#persona-pick-hint').textContent = '角色设定不能为空'; return; }
     try {
       await api('/api/persona-templates', {
         method: 'POST',
-        body: JSON.stringify({ name, text, customRules })
+        body: JSON.stringify({ name, text, customRules, behaviorProfile })
       });
       closeModelModal(overlay);
-      $('#cfg-roletext').value = text;
-      $('#cfg-customrules').value = customRules;
-      const input = $('#cfg-persona-pick');
-      if (input) input.value = name;
-      $('#persona-pick-hint').textContent = `人设「${name}」已添加。记得点「保存人设修改」使当前填写生效。`;
       await loadSettings();
+      applyPersonaDraft({ name, text, customRules, behaviorProfile });
+      $('#persona-pick-hint').textContent = `人设「${name}」已添加。记得点「保存人设修改」使当前填写生效。`;
     } catch (e) {
       $('#persona-pick-hint').textContent = `添加失败：${e.message}`;
     }
@@ -8159,6 +8190,7 @@ async function saveConfig({ quiet = false } = {}) {
       botName: val('#cfg-botname', c.persona.botName).trim() || '小鲸鱼',
       selfNickname: val('#cfg-selfnick', c.persona.selfNickname || '').trim(),
       participation: val('#cfg-participation', c.persona.participation),
+      behaviorProfile: val('#cfg-behavior-profile', c.persona.behaviorProfile || 'legacy'),
       roleText: val('#cfg-roletext', c.persona.roleText || ''),
       customRules: val('#cfg-customrules', c.persona.customRules || '')
     };

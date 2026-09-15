@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PERSONAS } from './personas.js';
+import { PERSONAS, normalizeBehaviorProfile } from './personas.js';
 import { sliderToTier } from './tier-slider.js';   // 零依赖模块，避免循环依赖
 import { DEFAULT_TIME_CONTROL, normalizeTimeControl } from './time-control.js';
 import { normalizeMomentWindows } from './moment-schedule.js';
@@ -117,6 +117,7 @@ export const DEFAULT_CONFIG = {
     botName: '小鲸鱼',
     selfNickname: '',                       // 在群里的展示名（留空用 QQ 昵称）
     roleText: PERSONAS.xiaojingyu.text,     // 默认人设：原版"小鲸鱼"角色卡（适配版）
+    behaviorProfile: 'legacy',             // legacy | grounded，选择模板时一起切换
     participation: 'medium',                // low | medium | high —— 参与度参考
     customRules: ''                         // 追加自定义规则（可选）
   },
@@ -482,6 +483,7 @@ export function incidentPilotEnabled(cfg = getConfig()) {
 export function updateConfig(patch) {
   const next = migrateConfig(deepMerge(getConfig(), patch));
   const oldTimeControl = JSON.stringify(getConfig().timeControl);
+  next.persona.behaviorProfile = normalizeBehaviorProfile(next.persona.behaviorProfile);
   next.timeControl = normalizeTimeControl(next.timeControl);
   next.dailyMoments.scheduleWindows = normalizeMomentWindows(next.dailyMoments.scheduleWindows);
   if (!['observe', 'active'].includes(next.runtime?.mode)) throw new Error('Invalid runtime mode');

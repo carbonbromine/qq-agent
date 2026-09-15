@@ -1,7 +1,22 @@
 // 把 agent 的 Markdown 回复转成适合 QQ 发送的纯文本。（移植自 qq-bridge src/md-to-plain.js）
 
-export function mdToPlain(md) {
+export function mdToPlain(md, { preserveCode = false } = {}) {
   let s = String(md ?? '');
+  const code = [];
+  let marker = '\u0000QQ_CODE_';
+  // Protect code before prose replacements can consume operators such as *, > and |.
+  if (preserveCode) {
+    while (s.includes(marker)) marker += '_';
+    const protect = (body) => {
+      const index = code.push(body) - 1;
+      return `${marker}${index}\u0000`;
+    };
+    s = s.replace(
+      /^ {0,3}(`{3,}|~{3,})[^\r\n]*\r?\n([\s\S]*?)^ {0,3}\1[ \t]*(?=\r?$)/gm,
+      (_, fence, body) => protect(body.replace(/\r?\n$/, ''))
+    );
+    s = s.replace(/(`+)([^`\r\n]+)\1/g, (_, ticks, body) => protect(body));
+  }
   // 代码块：保留内容，去掉围栏
   s = s.replace(/```[a-zA-Z0-9_+-]*\n?([\s\S]*?)```/g, (_, body) => body.replace(/\n+$/, ''));
   // 行内代码
@@ -26,7 +41,11 @@ export function mdToPlain(md) {
   s = s.replace(/^\s*\|/gm, '').replace(/\|\s*$/gm, '');
   // 折叠的连续空行
   s = s.replace(/\n{3,}/g, '\n\n');
-  return s.trim();
+  s = s.trim();
+  if (preserveCode) {
+    s = s.replace(new RegExp(`${marker}(\\d+)\\u0000`, 'g'), (_, index) => code[Number(index)]);
+  }
+  return s;
 }
 
 /** 按 QQ 单条消息长度上限切分（群消息一般 ≤ 4500 字，留余量）。 */

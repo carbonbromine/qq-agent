@@ -1295,12 +1295,15 @@ export function createApp({ log = console.log } = {}) {
 
       if (pathname === '/api/persona-templates' && method === 'GET') {
         const { PERSONAS } = await import('./personas.js');
-        const builtins = Object.entries(PERSONAS).map(([id, p]) => ({ id, name: p.name, text: p.text, builtin: true }));
+        const builtins = Object.entries(PERSONAS).map(([id, p]) => ({
+          id, name: p.name, text: p.text, behaviorProfile: p.behaviorProfile || 'legacy', builtin: true
+        }));
         const customs = (getConfig().customPersonas || []).map((p, i) => ({
           id: `custom_${i}`,
           name: p.name,
           text: p.text,
           customRules: p.customRules || '',
+          behaviorProfile: p.behaviorProfile || 'legacy',
           builtin: false
         }));
         return json(res, 200, { templates: [...builtins, ...customs] });
@@ -1312,8 +1315,15 @@ export function createApp({ log = console.log } = {}) {
         const name = String(body.name ?? '').trim().slice(0, 50);
         const text = String(body.text ?? '').trim();
         if (!name || !text) return json(res, 400, { ok: false, error: '人设名称和角色设定都不能为空' });
+        const { normalizeBehaviorProfile } = await import('./personas.js');
+        let behaviorProfile;
+        try {
+          behaviorProfile = normalizeBehaviorProfile(body.behaviorProfile);
+        } catch (error) {
+          return json(res, 400, { ok: false, error: error.message });
+        }
         // customRules 允许为空
-        const entry = { name, text };
+        const entry = { name, text, behaviorProfile };
         if (String(body.customRules ?? '').trim()) entry.customRules = String(body.customRules).trim();
         const next = [...(getConfig().customPersonas || []), entry];
         updateConfig({ customPersonas: next });

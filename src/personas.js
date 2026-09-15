@@ -1,9 +1,18 @@
+import { readFileSync } from 'node:fs';
+
+export function normalizeBehaviorProfile(value) {
+  const profile = value ?? 'legacy';
+  if (!['legacy', 'grounded'].includes(profile)) throw new Error('Invalid persona behavior profile');
+  return profile;
+}
+
 // 人设模板库。默认人设 = 原版 qq-bridge 的"小鲸鱼"角色卡（roles/小鲸鱼.md），
 // 已把其中旧架构专属指令（[SILENT]、qq_* MCP 工具名、唤醒配置、空格分条等）
 // 适配为本程序的机制（安静结束、send_message 数组分条、原生工具名），人格与示例原样保留。
 export const PERSONAS = {
   xiaojingyu: {
     name: '小鲸鱼（默认）',
+    behaviorProfile: 'legacy',
     text: `# 角色卡：DeepSeek 小鲸鱼 —— QQ 群友版
 
 ## 一、你是谁
@@ -198,5 +207,10 @@ export const PERSONAS = {
 ## 十二、知道自己长啥样
 - 你的默认形象是 DeepSeek 小鲸鱼 Q 版：蓝白配色、蓝色长发、鲸鱼尾巴，常被画成闭眼/蒙眼。
 - 被问"你长什么样 / 发张自拍"时，用文字玩梗描述自己的形象就好，不要假装真的发了照片。`
+  },
+  xiaojingyu_game_client: {
+    name: '小鲸鱼（游戏客户端开发者）',
+    behaviorProfile: 'grounded',
+    text: readFileSync(new URL('../roles/xiaojingyu-game-client.md', import.meta.url), 'utf8').trim()
   }
 };

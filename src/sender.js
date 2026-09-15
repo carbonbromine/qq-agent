@@ -87,7 +87,7 @@ export class SendQueue {
 
   /**
    * 发送一批文本消息（一条或多条）。
-   * options: { replyToMessageId, atUserId }
+   * options: { replyToMessageId, atUserId, preserveCode }
    * 返回 { sent: [{text, messageId}], failed: [{text, error}] }；全部失败时抛错。
    */
   async sendTextBatch(chatKey, messages, options = {}) {
@@ -98,7 +98,7 @@ export class SendQueue {
     const hardSplitAt = Number(getConfig().send?.hardSplitAt) || 0;
     const parts = [];
     for (const m of list) {
-      const plain = mdToPlain(String(m ?? ''));
+      const plain = mdToPlain(String(m ?? ''), { preserveCode: options.preserveCode === true });
       if (!plain) continue;
       // 最后防线：任何上游畸形路径漏下来的 "[object Object]" 到这儿直接拦掉，
       // 用户永远不该在 QQ 里看到这串字符。全被拦 → 下方抛"消息内容为空"回给模型。

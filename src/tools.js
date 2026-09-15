@@ -160,6 +160,7 @@ export function buildToolDefs() {
           // #endregion
           const result = await ctx.sender.sendTextBatch(ctx.chatKey, messages, {
             runId: ctx.session.leaseId, signal: ctx.signal,
+            preserveCode: ctx.behaviorProfile === 'grounded',
             replyToMessageId: args.replyToMessageId ?? null,
             atUserId: args.atUserId ?? null
           });

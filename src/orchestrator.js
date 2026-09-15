@@ -1227,6 +1227,7 @@ export class Orchestrator {
       selfId: this.onebot.selfId,
       selfNickname,
       botName: cfg.persona.botName,
+      behaviorProfile: cfg.persona.behaviorProfile || 'legacy',
       onebot: this.onebot,
       store: this.store,
       memory: this.memory,
