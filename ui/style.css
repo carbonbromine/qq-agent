@@ -1598,11 +1598,38 @@ body {
 .control-result { min-height: 18px; margin-top: 8px; font-size: 11px; }
 .control-result.success { color: var(--green); }
 .control-result.error { color: var(--red); }
+.update-deploy-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-top: 12px;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.update-deploy-summary > div { min-width: 0; padding: 10px 12px; }
+.update-deploy-summary > div + div { border-left: 1px solid var(--border); }
+.update-deploy-summary span,
+.update-deploy-summary strong { display: block; overflow-wrap: anywhere; }
+.update-deploy-summary span { color: var(--muted); font-size: 10.5px; }
+.update-deploy-summary strong { margin-top: 4px; font-family: var(--mono); font-size: 11.5px; }
+.update-deploy-settings {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(140px, .5fr) auto;
+  align-items: end;
+  gap: 9px;
+  margin-top: 12px;
+}
+.update-deploy-settings label { display: grid; gap: 5px; min-width: 0; }
+.update-deploy-settings label > span { color: var(--muted); font-size: 11px; }
+.update-deploy-settings input { min-width: 0; width: 100%; }
 
 @media (max-width: 600px) {
   .control-pane { padding: 16px; }
   .control-service-grid { grid-template-columns: 1fr; }
   .control-password-form { grid-template-columns: 1fr; }
+  .update-deploy-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .update-deploy-summary > div:nth-child(3) { border-left: 0; border-top: 1px solid var(--border); }
+  .update-deploy-summary > div:nth-child(4) { border-top: 1px solid var(--border); }
+  .update-deploy-settings { grid-template-columns: 1fr; }
   .control-section-title {
     align-items: stretch;
     flex-direction: column;

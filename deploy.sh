@@ -124,7 +124,7 @@ NODE_BIN="$("$NODE_BIN" -p 'process.execPath')"
 [[ "$NODE_BIN" != *[[:space:]%\"]* ]] || { printf 'Node path contains unsupported characters\n' >&2; exit 2; }
 export PATH="$(dirname "$NODE_BIN"):$PATH"
 
-for required in package.json package-lock.json src/server.js scripts/configure-linux.mjs scripts/install-service.mjs scripts/manage.mjs manage.sh; do
+for required in package.json package-lock.json src/server.js src/auto-update.js scripts/auto-update.mjs scripts/configure-linux.mjs scripts/install-service.mjs scripts/manage.mjs manage.sh; do
   [[ -f "$ROOT/$required" ]] || {
     printf 'Source repository is incomplete: missing %s\n' "$required" >&2
     exit 1
@@ -169,12 +169,19 @@ if [[ "$BACKUP_ENABLED" == true && -f "$INSTALL_DIR/package.json" ]]; then
 fi
 
 UNIT_FILE="$HOME/.config/systemd/user/$SERVICE.service"
+UPDATE_SERVICE="${SERVICE}-update"
+UPDATE_UNIT_FILE="$HOME/.config/systemd/user/$UPDATE_SERVICE.service"
+UPDATE_TIMER_FILE="$HOME/.config/systemd/user/$UPDATE_SERVICE.timer"
 mkdir -p "$LOCK_DIR/state"
 HAD_CONFIG=false
 HAD_ACCESS_FILE=false
 HAD_UNIT=false
 HAD_DEPLOYMENT_JSON=false
 HAD_DEPLOYMENT_NODE=false
+HAD_UPDATE_UNIT=false
+HAD_UPDATE_TIMER=false
+WAS_UPDATE_TIMER_ENABLED=false
+WAS_UPDATE_TIMER_ACTIVE=false
 if [[ -f "$DATA_DIR/config.json" ]]; then
   HAD_CONFIG=true
   cp -p "$DATA_DIR/config.json" "$LOCK_DIR/state/config.json"
@@ -186,6 +193,20 @@ fi
 if [[ -f "$UNIT_FILE" ]]; then
   HAD_UNIT=true
   cp -p "$UNIT_FILE" "$LOCK_DIR/state/service.unit"
+fi
+if [[ -f "$UPDATE_UNIT_FILE" ]]; then
+  HAD_UPDATE_UNIT=true
+  cp -p "$UPDATE_UNIT_FILE" "$LOCK_DIR/state/update.service"
+fi
+if [[ -f "$UPDATE_TIMER_FILE" ]]; then
+  HAD_UPDATE_TIMER=true
+  cp -p "$UPDATE_TIMER_FILE" "$LOCK_DIR/state/update.timer"
+fi
+if systemctl --user is-enabled --quiet "$UPDATE_SERVICE.timer" 2>/dev/null; then
+  WAS_UPDATE_TIMER_ENABLED=true
+fi
+if systemctl --user is-active --quiet "$UPDATE_SERVICE.timer" 2>/dev/null; then
+  WAS_UPDATE_TIMER_ACTIVE=true
 fi
 if [[ -f "$INSTALL_DIR/.deployment.json" ]]; then
   HAD_DEPLOYMENT_JSON=true
@@ -202,6 +223,7 @@ rollback_deployment() {
   set +e
   printf '\nDeployment failed; restoring the previous installation...\n' >&2
   systemctl --user stop "$SERVICE.service" >/dev/null 2>&1
+  systemctl --user disable --now "$UPDATE_SERVICE.timer" >/dev/null 2>&1
   if [[ -n "$ROLLBACK_DIR" && -d "$ROLLBACK_DIR/app" ]]; then
     rsync -a --delete "${RSYNC_PRESERVE[@]}" "$ROLLBACK_DIR/app/" "$INSTALL_DIR/"
   fi
@@ -221,6 +243,16 @@ rollback_deployment() {
   else
     rm -f -- "$UNIT_FILE"
   fi
+  if [[ "$HAD_UPDATE_UNIT" == true ]]; then
+    cp -p "$LOCK_DIR/state/update.service" "$UPDATE_UNIT_FILE"
+  else
+    rm -f -- "$UPDATE_UNIT_FILE"
+  fi
+  if [[ "$HAD_UPDATE_TIMER" == true ]]; then
+    cp -p "$LOCK_DIR/state/update.timer" "$UPDATE_TIMER_FILE"
+  else
+    rm -f -- "$UPDATE_TIMER_FILE"
+  fi
   if [[ "$HAD_DEPLOYMENT_JSON" == true ]]; then
     cp -p "$LOCK_DIR/state/deployment.json" "$INSTALL_DIR/.deployment.json"
   else
@@ -232,6 +264,11 @@ rollback_deployment() {
     rm -f -- "$INSTALL_DIR/.deployment-node"
   fi
   systemctl --user daemon-reload
+  if [[ "$WAS_UPDATE_TIMER_ENABLED" == true ]]; then
+    systemctl --user enable --now "$UPDATE_SERVICE.timer" >/dev/null 2>&1
+  elif [[ "$WAS_UPDATE_TIMER_ACTIVE" == true ]]; then
+    systemctl --user start "$UPDATE_SERVICE.timer" >/dev/null 2>&1
+  fi
   if [[ "$WAS_ACTIVE" == true ]]; then
     systemctl --user start "$SERVICE.service"
   else
@@ -267,8 +304,11 @@ ARGS=(--data-dir "$DATA_DIR" --host "$HOST" --port "$PORT")
 export QQ_INSTALL_DIR="$INSTALL_DIR" QQ_DATA_DIR="$DATA_DIR" QQ_NODE="$NODE_BIN" QQ_SERVICE="$SERVICE"
 "$NODE_BIN" scripts/install-service.mjs
 systemd-analyze --user verify "$HOME/.config/systemd/user/$SERVICE.service"
+systemd-analyze --user verify "$UPDATE_UNIT_FILE"
+systemd-analyze --user verify "$UPDATE_TIMER_FILE"
 systemctl --user daemon-reload
 systemctl --user enable --now "$SERVICE.service"
+systemctl --user enable --now "$UPDATE_SERVICE.timer"
 if [[ "$(loginctl show-user "$USER" -p Linger --value)" != yes ]]; then
   sudo loginctl enable-linger "$USER"
 fi
@@ -288,7 +328,9 @@ for _ in {1..50}; do
 done
 [[ "$HEALTHY" == true ]] || { printf 'Service health check failed\n' >&2; exit 1; }
 trap - ERR INT TERM
-if command -v git >/dev/null && git -C "$ROOT" rev-parse --verify HEAD >/dev/null 2>&1; then
+if [[ "${QQ_AGENT_SOURCE_REVISION:-}" =~ ^[0-9a-f]{40}$ ]]; then
+  REVISION="$QQ_AGENT_SOURCE_REVISION"
+elif command -v git >/dev/null && git -C "$ROOT" rev-parse --verify HEAD >/dev/null 2>&1; then
   REVISION="$(git -C "$ROOT" rev-parse HEAD)"
   if ! git -C "$ROOT" diff --quiet --ignore-submodules HEAD --; then
     REVISION="${REVISION}-dirty"

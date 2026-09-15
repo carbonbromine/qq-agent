@@ -79,6 +79,10 @@ test('migrates legacy desktop and DSH keys into the Linux configuration', async 
   assert.equal(config.incidentPilot.graduated, false);
   assert.equal(config.incidentPilot.unknownWritesBlockChat, false);
   assert.equal(incidentPilotEnabled(config), false);
+  assert.equal(config.autoUpdate.enabled, false);
+  assert.equal(config.autoUpdate.ownerUin, '');
+  assert.equal(config.autoUpdate.intervalHours, 6);
+  assert.equal(config.autoUpdate.branch, 'main');
   assert.equal(config.wakeDelayMinMs, 8000);
   assert.equal(config.wakeDelayMaxMs, 12000);
   updateConfig({
@@ -125,6 +129,11 @@ test('migrates legacy desktop and DSH keys into the Linux configuration', async 
       duplicateWindowMinutes: 30,
       unknownWritesBlockChat: true,
       retentionDays: 120
+    },
+    autoUpdate: {
+      enabled: true,
+      ownerUin: '123456',
+      intervalHours: 12
     },
     allow: { private: ['123456'] },
     wakeDelayMinMs: 14000,
@@ -183,6 +192,10 @@ test('migrates legacy desktop and DSH keys into the Linux configuration', async 
   assert.equal(saved.incidentPilot.unknownWritesBlockChat, true);
   assert.equal(saved.incidentPilot.retentionDays, 120);
   assert.equal(incidentPilotEnabled(), true);
+  assert.equal(saved.autoUpdate.enabled, true);
+  assert.equal(saved.autoUpdate.ownerUin, '123456');
+  assert.equal(saved.autoUpdate.intervalHours, 12);
+  assert.equal(saved.autoUpdate.repository, 'https://github.com/carbonbromine/qq-agent.git');
   assert.equal(saved.wakeDelayMinMs, 6000);
   assert.equal(saved.wakeDelayMaxMs, 14000);
   assert.equal(saved.wakeDelayMs, 10000);
@@ -232,6 +245,8 @@ test('migrates legacy desktop and DSH keys into the Linux configuration', async 
   updateConfig({ incidentPilot: { enabled: false } });
   assert.equal(incidentPilotEnabled(), false);
   assert.equal(getConfig().incidentPilot.graduated, true);
+  updateConfig({ autoUpdate: { enabled: false } });
+  assert.equal(getConfig().autoUpdate.enabled, false);
   assert.throws(
     () => updateConfig({
       identityPilot: { enabled: true, friendProposal: { enabled: true, ownerUin: '' } }
@@ -245,6 +260,14 @@ test('migrates legacy desktop and DSH keys into the Linux configuration', async 
   assert.throws(
     () => updateConfig({ incidentPilot: { enabled: true, ownerUin: '' } }),
     /异常处理试点需要配置告警管理员 QQ/
+  );
+  assert.throws(
+    () => updateConfig({ autoUpdate: { enabled: true, ownerUin: '' } }),
+    /自动更新需要配置告警管理员 QQ/
+  );
+  assert.throws(
+    () => updateConfig({ autoUpdate: { repository: 'https://example.com/repo.git' } }),
+    /GitHub HTTPS/
   );
   assert.throws(() => updateConfig({ conversation: { mode: 'invalid' } }), /conversation mode/);
   assert.throws(

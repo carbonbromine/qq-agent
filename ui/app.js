@@ -13,6 +13,7 @@ const CHAT_MSG_MORE = 200;    // 存档页：每次滚动追加
 const state = {
   tab: 'sessions',
   integrationStatus: null,
+  autoUpdateStatus: null,
   sessions: [],          // 摘要列表
   currentSessionId: null,
   sessionDetail: null,   // 完整记录
@@ -628,6 +629,24 @@ function renderControlHub(data = {}) {
   const box = $('#control-page');
   if (!box) return;
   const statuses = new Map((data.services || []).map((service) => [service.id, service]));
+  const update = state.autoUpdateStatus || {};
+  const updateLabels = {
+    idle: '等待检查',
+    disabled: '已暂停',
+    queued: '等待启动',
+    checking: '检查更新',
+    testing: '验证更新',
+    deploying: '部署中',
+    succeeded: '更新成功',
+    'no-update': '已是最新',
+    failed: '更新失败'
+  };
+  const updateState = update.status === 'failed'
+    ? updateLabels.failed
+    : update.enabled
+      ? (updateLabels[update.status] || '等待检查')
+      : '已暂停';
+  const revision = (value) => value ? String(value).slice(0, 12) : '-';
   box.innerHTML = `
     <div class="control-head">
       <div><h2>服务与访问控制</h2><span class="muted">统一入口</span></div>
@@ -644,6 +663,31 @@ function renderControlHub(data = {}) {
         </a>`;
       }).join('')}
     </div>
+    <section class="control-section">
+      <div class="control-section-title">
+        <div><h3>更新部署</h3><span class="muted">${esc(update.repository || '-')} · ${esc(update.branch || 'main')}</span></div>
+        <span class="control-service-state ${update.status === 'failed' ? 'offline' : update.enabled ? 'online' : ''}">${esc(updateState)}</span>
+      </div>
+      <div class="update-deploy-summary">
+        <div><span>当前版本</span><strong>${esc(revision(update.currentRevision))}</strong></div>
+        <div><span>目标版本</span><strong>${esc(revision(update.targetRevision))}</strong></div>
+        <div><span>上次检查</span><strong>${update.lastCheckAt ? esc(fmtTime(update.lastCheckAt)) : '-'}</strong></div>
+        <div><span>下次检查</span><strong>${update.nextCheckAt ? esc(fmtTime(update.nextCheckAt)) : '-'}</strong></div>
+      </div>
+      <div class="update-deploy-settings">
+        <label><span>告警管理员 QQ</span><input type="text" id="auto-update-owner" inputmode="numeric" value="${esc(update.ownerUin || '')}" /></label>
+        <label><span>检查间隔（小时）</span><input type="number" id="auto-update-interval" min="1" max="168" value="${esc(update.intervalHours || 6)}" /></label>
+        <button type="button" class="btn btn-small" id="auto-update-save" ${update.busy ? 'disabled' : ''}>保存设置</button>
+      </div>
+      ${update.error ? `<div class="control-result error">${esc(update.error)}</div>` : ''}
+      <div class="settings-actions">
+        <button type="button" class="btn btn-primary btn-small" id="auto-update-run" ${!update.installed || update.busy ? 'disabled' : ''}>↻ 手动更新</button>
+        ${update.enabled
+          ? `<button type="button" class="btn btn-small" id="auto-update-pause" ${update.busy ? 'disabled' : ''}>暂停自动更新</button>`
+          : `<button type="button" class="btn btn-small" id="auto-update-resume" ${!update.installed || update.busy ? 'disabled' : ''}>恢复自动更新</button>`}
+        <span id="auto-update-result" class="control-result muted" role="status" aria-live="polite"></span>
+      </div>
+    </section>
     <section class="control-section">
       <h3>密钥控制</h3>
       <div class="control-key-list">
@@ -679,6 +723,10 @@ function renderControlHub(data = {}) {
     </section>`;
 
   $('#control-refresh')?.addEventListener('click', () => loadControlHub({ force: true }));
+  $('#auto-update-save')?.addEventListener('click', () => saveAutoUpdateSettings(false));
+  $('#auto-update-run')?.addEventListener('click', runManualUpdate);
+  $('#auto-update-resume')?.addEventListener('click', () => saveAutoUpdateSettings(true));
+  $('#auto-update-pause')?.addEventListener('click', pauseAutoUpdate);
   $$('#control-page [data-open-settings]').forEach((button) => {
     button.addEventListener('click', () => {
       state.settingsSection = button.dataset.openSettings;
@@ -695,10 +743,96 @@ async function loadControlHub({ force = false } = {}) {
     box.innerHTML = '<div class="empty-hint">正在检查服务…</div>';
   }
   try {
-    state.integrationStatus = await api('/api/integrations/status');
+    const [integrations, update] = await Promise.all([
+      api('/api/integrations/status'),
+      api('/api/auto-update/status')
+    ]);
+    state.integrationStatus = integrations;
+    state.autoUpdateStatus = update;
     if (state.tab === 'control') renderControlHub(state.integrationStatus);
   } catch (error) {
     box.innerHTML = `<div class="empty-hint">服务状态读取失败：${esc(error.message)}</div>`;
+  }
+}
+
+async function refreshAutoUpdateStatus() {
+  try {
+    state.autoUpdateStatus = await api('/api/auto-update/status');
+    if (state.tab === 'control') renderControlHub(state.integrationStatus || {});
+  } catch {
+    // A deployment restart can briefly interrupt polling; EventSource and the
+    // next interval will reconnect without replacing the current status.
+  }
+}
+
+function autoUpdateSettingsBody() {
+  return {
+    ownerUin: $('#auto-update-owner')?.value?.trim() || '',
+    intervalHours: clampInt($('#auto-update-interval')?.value, 1, 168, 6)
+  };
+}
+
+async function saveAutoUpdateSettings(resume) {
+  const result = $('#auto-update-result');
+  if (resume && !await askForConfirmation('恢复定时拉取 GitHub 并自动部署？部署失败时会自动暂停并通知管理员。')) {
+    return;
+  }
+  if (result) result.textContent = resume ? '正在恢复…' : '正在保存…';
+  try {
+    const response = await api(
+      resume ? '/api/auto-update/resume' : '/api/auto-update/settings',
+      {
+        method: resume ? 'POST' : 'PUT',
+        body: JSON.stringify({
+          ...autoUpdateSettingsBody(),
+          ...(resume ? { confirm: true } : {})
+        })
+      }
+    );
+    state.autoUpdateStatus = response.status;
+    renderControlHub(state.integrationStatus || {});
+  } catch (error) {
+    if (result) {
+      result.textContent = `操作失败：${error.message}`;
+      result.className = 'control-result error';
+    }
+  }
+}
+
+async function pauseAutoUpdate() {
+  if (!await askForConfirmation('暂停自动更新？手动更新仍可使用。')) return;
+  const result = $('#auto-update-result');
+  if (result) result.textContent = '正在暂停…';
+  try {
+    const response = await api('/api/auto-update/pause', {
+      method: 'POST',
+      body: JSON.stringify({ confirm: true })
+    });
+    state.autoUpdateStatus = response.status;
+    renderControlHub(state.integrationStatus || {});
+  } catch (error) {
+    if (result) result.textContent = `暂停失败：${error.message}`;
+  }
+}
+
+async function runManualUpdate() {
+  if (!await askForConfirmation('立即检查 GitHub 最新代码并尝试部署？服务会在部署阶段短暂重启。')) {
+    return;
+  }
+  const result = $('#auto-update-result');
+  if (result) result.textContent = '更新任务已提交…';
+  try {
+    const response = await api('/api/auto-update/run', {
+      method: 'POST',
+      body: JSON.stringify({ confirm: true })
+    });
+    state.autoUpdateStatus = response.status;
+    renderControlHub(state.integrationStatus || {});
+  } catch (error) {
+    if (result) {
+      result.textContent = `启动失败：${error.message}`;
+      result.className = 'control-result error';
+    }
   }
 }
 
@@ -1023,6 +1157,9 @@ function connectSSE() {
     if (state.tab === 'incidents') loadIncidentFeaturePage();
     if (state.tab === 'chats') loadChats({ quiet: true });
   });
+  es.addEventListener('auto-update', () => {
+    if (state.tab === 'control') loadControlHub({ force: true });
+  });
   es.addEventListener('status', () => refreshStatus());
   es.addEventListener('feedback', (ev) => {
     const d = JSON.parse(ev.data);
@@ -1153,6 +1290,7 @@ function initChatScrollLoader() {
 function startListPoller() {
   if (listPoller) clearInterval(listPoller);
   listPoller = setInterval(() => {
+    if (state.tab === 'control') refreshAutoUpdateStatus();
     if (state.tab === 'sessions') loadSessions({ quiet: true });
     if (state.tab === 'chats') loadChats({ quiet: true });
     if (state.tab === 'usage') loadUsageView();   // 无 force：只更新数值，不重建 DOM

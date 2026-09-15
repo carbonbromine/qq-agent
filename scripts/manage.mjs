@@ -39,6 +39,25 @@ if (['start', 'stop', 'restart', 'status'].includes(command)) {
     confirmExclusive: confirm, skipBacklog: active && !process.argv.includes('--with-backlog') }));
 } else if (command === 'health') {
   console.log(JSON.stringify(await api('/api/status'), null, 2));
+} else if (command === 'update-status') {
+  console.log(JSON.stringify(await api('/api/auto-update/status'), null, 2));
+} else if (command === 'update-now') {
+  if (!process.argv.includes('--confirm')) {
+    throw new Error('Use update-now --confirm');
+  }
+  console.log(JSON.stringify(await api('/api/auto-update/run', { confirm: true }), null, 2));
+} else if (command === 'update-resume') {
+  if (!process.argv.includes('--confirm')) {
+    throw new Error('Use update-resume --confirm after configuring the administrator in the console');
+  }
+  console.log(JSON.stringify(await api('/api/auto-update/resume', {
+    confirm: true,
+    ownerUin: cfg.autoUpdate?.ownerUin || '',
+    intervalHours: cfg.autoUpdate?.intervalHours || 6
+  }), null, 2));
+} else if (command === 'update-pause') {
+  if (!process.argv.includes('--confirm')) throw new Error('Use update-pause --confirm');
+  console.log(JSON.stringify(await api('/api/auto-update/pause', { confirm: true }), null, 2));
 } else if (command === 'retry-failed' || command === 'resolve-held') {
   const key = process.argv[3];
   if (!/^(group|private):\d+$/.test(key || '') || !process.argv.includes('--confirm')) {
@@ -57,5 +76,5 @@ if (['start', 'stop', 'restart', 'status'].includes(command)) {
   }
   console.log(`Backup saved to ${target}`);
 } else {
-  throw new Error('Commands: status start stop restart logs health token observe activate retry-failed resolve-held backup');
+  throw new Error('Commands: status start stop restart logs health token observe activate update-status update-now update-resume update-pause retry-failed resolve-held backup');
 }

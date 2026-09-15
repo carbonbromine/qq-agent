@@ -22,6 +22,16 @@ function runNode(script, args, options = {}) {
   });
 }
 
+test('deploy script verifies and rolls back the update service and timer', () => {
+  const source = fs.readFileSync(path.join(repo, 'deploy.sh'), 'utf8');
+  assert.match(source, /scripts\/auto-update\.mjs/);
+  assert.match(source, /UPDATE_SERVICE="\$\{SERVICE\}-update"/);
+  assert.match(source, /systemd-analyze --user verify "\$UPDATE_UNIT_FILE"/);
+  assert.match(source, /systemctl --user enable --now "\$UPDATE_SERVICE\.timer"/);
+  assert.match(source, /cp -p "\$LOCK_DIR\/state\/update\.service" "\$UPDATE_UNIT_FILE"/);
+  assert.match(source, /QQ_AGENT_SOURCE_REVISION/);
+});
+
 test('configure-linux creates observe config and preserves runtime mode on update', (t) => {
   const dataDir = tempDir(t, 'qq-deploy-config-');
   const script = path.join(repo, 'scripts/configure-linux.mjs');
@@ -152,6 +162,22 @@ test('installed manage launcher uses the exact deployed Node runtime', (t) => {
   assert.equal(fs.statSync(path.join(root, '.deployment-node')).mode & 0o777, 0o600);
   const unit = fs.readFileSync(path.join(home, '.config/systemd/user/qq-agent-test.service'), 'utf8');
   assert.match(unit, /Environment="SNOWLUMA_WEBUI_URL=http:\/\/127\.0\.0\.1:15099"/);
+  const updateUnit = fs.readFileSync(
+    path.join(home, '.config/systemd/user/qq-agent-test-update.service'),
+    'utf8'
+  );
+  const updateTimer = fs.readFileSync(
+    path.join(home, '.config/systemd/user/qq-agent-test-update.timer'),
+    'utf8'
+  );
+  assert.match(updateUnit, /scripts\/auto-update\.mjs/);
+  assert.match(updateUnit, /TimeoutStartSec=30min/);
+  assert.match(updateTimer, /OnUnitInactiveSec=1h/);
+  assert.match(updateTimer, /RandomizedDelaySec=10min/);
+  const deployment = JSON.parse(fs.readFileSync(path.join(root, '.deployment.json'), 'utf8'));
+  assert.equal(deployment.updateService, 'qq-agent-test-update');
+  assert.equal(deployment.repository, 'https://github.com/carbonbromine/qq-agent.git');
+  assert.equal(deployment.branch, 'main');
 
   const manage = spawnSync('/bin/bash', [path.join(root, 'manage.sh'), 'health'], {
     cwd: root,

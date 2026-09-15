@@ -745,6 +745,21 @@ try {
     + '确认弹窗通过后四类资产各发送一次带显式确认的 DELETE');
   sandbox.fetch = originalFetch;
 
+  vm.runInContext(`state.autoUpdateStatus = ${JSON.stringify({
+    installed: true,
+    enabled: false,
+    busy: false,
+    status: 'failed',
+    ownerUin: '2948771712',
+    repository: 'https://github.com/carbonbromine/qq-agent.git',
+    branch: 'main',
+    intervalHours: 6,
+    currentRevision: 'a'.repeat(40),
+    targetRevision: 'b'.repeat(40),
+    lastCheckAt: Date.now() - 60000,
+    nextCheckAt: 0,
+    error: '测试失败'
+  })};`, ctx);
   ctx.renderControlHub({
     services: [
       { id: 'agent', online: true },
@@ -760,6 +775,11 @@ try {
     && indexHtml.includes('id="view-control"')
     && controlHtml.includes('服务与访问控制')
     && controlHtml.includes('SnowLuma 登录密钥')
+    && controlHtml.includes('更新部署')
+    && controlHtml.includes('手动更新')
+    && controlHtml.includes('恢复自动更新')
+    && controlHtml.includes('2948771712')
+    && controlHtml.includes('测试失败')
     && controlHtml.includes('QQ Agent 控制台 Token')
     && controlHtml.includes(':3080')
     && controlHtml.includes(':3100')
@@ -768,10 +788,10 @@ try {
     && !/id="snowluma-current-password"[^>]*\svalue=/.test(controlHtml);
   if (controlUiOk) {
     pass++;
-    console.log('  OK    服务入口与密钥控制视图完整且不包含明文密钥');
+    console.log('  OK    服务入口、更新部署与密钥控制视图完整');
   } else {
     fail++;
-    console.log('  FAIL  服务入口或密钥控制视图缺失');
+    console.log('  FAIL  服务入口、更新部署或密钥控制视图缺失');
   }
   const timeHtml = ctx.renderTimeControlSection({
     ...cfg, allow: { groups: ['123'], private: ['456'] }

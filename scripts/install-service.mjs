@@ -15,6 +15,24 @@ try {
 const snowlumaWebuiUrl = String(
   process.env.QQ_SNOWLUMA_WEBUI_URL || previous.snowlumaWebuiUrl || ''
 ).trim();
+const repository = String(
+  process.env.QQ_AGENT_REPOSITORY
+  || previous.repository
+  || 'https://github.com/carbonbromine/qq-agent.git'
+).trim();
+const branch = String(process.env.QQ_AGENT_BRANCH || previous.branch || 'main').trim();
+if (!/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/.test(repository)) {
+  throw new Error('QQ_AGENT_REPOSITORY must be a GitHub HTTPS repository');
+}
+if (
+  !/^[A-Za-z0-9._/-]{1,100}$/.test(branch)
+  || branch.startsWith('-')
+  || branch.includes('..')
+  || branch.endsWith('/')
+) {
+  throw new Error('QQ_AGENT_BRANCH is invalid');
+}
+const updateService = `${service}-update`;
 fs.mkdirSync(dir, { recursive: true });
 const unit = `[Unit]
 Description=QQ Agent Linux (isolated stateless instance)
@@ -38,13 +56,48 @@ NoNewPrivileges=true
 [Install]
 WantedBy=default.target
 `;
+const updateUnit = `[Unit]
+Description=QQ Agent GitHub update deployment
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=${root}
+Environment=${quote(`QQ_AGENT_DATA_DIR=${data}`)}
+Environment=NODE_ENV=production
+ExecStart=${quote(node)} ${quote(path.join(root, 'scripts/auto-update.mjs'))} --app-dir ${quote(root)} --data-dir ${quote(data)} --service ${quote(service)}
+TimeoutStartSec=30min
+UMask=0077
+NoNewPrivileges=true
+Nice=10
+IOSchedulingClass=idle
+`;
+const updateTimer = `[Unit]
+Description=Periodic QQ Agent GitHub update check
+
+[Timer]
+OnStartupSec=15min
+OnUnitInactiveSec=1h
+RandomizedDelaySec=10min
+Persistent=true
+Unit=${updateService}.service
+
+[Install]
+WantedBy=timers.target
+`;
 fs.writeFileSync(path.join(dir, `${service}.service`), unit, { mode: 0o600 });
+fs.writeFileSync(path.join(dir, `${updateService}.service`), updateUnit, { mode: 0o600 });
+fs.writeFileSync(path.join(dir, `${updateService}.timer`), updateTimer, { mode: 0o600 });
 fs.writeFileSync(deploymentFile, JSON.stringify({
   root,
   data,
   node,
   service,
+  updateService,
+  repository,
+  branch,
   ...(snowlumaWebuiUrl ? { snowlumaWebuiUrl } : {})
 }), { mode: 0o600 });
 fs.writeFileSync(path.join(root, '.deployment-node'), `${node}\n`, { mode: 0o600 });
-console.log(`Installed ${service}.service`);
+console.log(`Installed ${service}.service and ${updateService}.timer`);

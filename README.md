@@ -164,6 +164,11 @@ bash deploy.sh \
 `DATA_DIR/deploy-backups/` 创建部署前代码快照；任何安装、配置、systemd
 校验或健康检查失败都会自动恢复旧代码、配置和服务。
 
+部署脚本还会安装独立的 GitHub 更新 service/timer。自动更新默认关闭，可在
+“控制 -> 更新部署”配置管理员后恢复。启用后默认每 6 小时浅拉取 `main`，
+先执行单元测试，再复用 `deploy.sh` 部署；失败会回滚、停止自动更新并私聊管理员。
+详见[自动更新部署](docs/AUTO_UPDATE.md)。
+
 ## 运维
 
 ```bash
@@ -174,6 +179,8 @@ bash manage.sh token
 bash manage.sh restart
 bash manage.sh observe
 bash manage.sh activate --confirm-exclusive
+bash manage.sh update-status
+bash manage.sh update-now --confirm
 bash manage.sh backup /path/to/new-backup-dir
 ```
 
@@ -182,7 +189,8 @@ bash manage.sh backup /path/to/new-backup-dir
 
 顶层“控制”页是统一运维入口，集中提供 QQ Agent、DSH、Bridge、SnowLuma 和
 QQ 远程桌面的入口与在线状态，并可跳转到模型、搜索、OneBot 和控制台 Token
-设置。SnowLuma 登录密钥可在该页直接修改，密钥仅随单次请求发送，不写入 QQ
+设置。该页还可手动更新、暂停或恢复自动更新。SnowLuma 登录密钥可在该页直接修改，
+密钥仅随单次请求发送，不写入 QQ
 Agent 配置或前端存储。旧的 `3110` 门户不再映射。
 
 启用前必须确保旧机器人未处理相同会话，否则会产生双回复。

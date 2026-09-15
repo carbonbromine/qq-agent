@@ -119,9 +119,15 @@ own idempotency and recovery rules.
    dependency installation.
 5. Create or update configuration without resetting an existing runtime mode.
 6. Install and verify a hardened user-level systemd unit.
-7. Enable linger, start the service and require `/healthz` to succeed.
+7. Install the independent GitHub update service/timer, enable linger, start the
+   Agent and require `/healthz` to succeed.
 8. Restore the prior code, configuration, unit and active state on failure.
 
 The installer records the exact deployed Node executable. `manage.sh` uses that
 runtime, so status, backup and recovery commands still work when the host has no
 system Node.js installation.
+
+The update timer never modifies the live tree directly. Its oneshot worker
+shallow-fetches GitHub into the data directory, tests a temporary checkout and
+then invokes the same `deploy.sh` transaction. Failed updates disable future
+automatic attempts and are reported through the running or restored Agent.

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { conversationConfigForChat, getConfig, identityPilotEnabled, incidentPilotEnabled, slangPilotEnabled, updateConfig, onTimeControlChange, DATA_DIR } from './config.js';
+import { conversationConfigForChat, getConfig, identityPilotEnabled, incidentPilotEnabled, slangPilotEnabled, updateConfig, onTimeControlChange, DATA_DIR, ROOT } from './config.js';
 import { customSearch } from './web-search.js';
 import { OneBotClient, segmentsToText, extractMediaFromSegments, expandForwardNodes } from './onebot.js';
 import { ChatStore } from './store.js';
@@ -35,6 +35,7 @@ import {
 } from './incident-pilot.js';
 import { safeFetchBinary } from './safe-fetch.js';
 import { integrationStatus, updateSnowLumaPassword } from './integrations.js';
+import { AutoUpdateManager } from './auto-update.js';
 
 // 全局 fetch（undici）默认连接建立超时只有 10 秒，openrouter.ai 这类海外端点
 // 握手慢时会直接报 "Connect Timeout Error ... timeout: 10000ms"（注意这不是
@@ -76,7 +77,7 @@ function decodeImageDataUrl(value) {
   return buffer;
 }
 
-export function createApp({ log = console.log } = {}) {
+export function createApp({ log = console.log, autoUpdateOptions = {} } = {}) {
   const cfg = getConfig();
   const bus = createEventBus();
   const sseClients = new Set();
@@ -139,6 +140,7 @@ export function createApp({ log = console.log } = {}) {
   const sessions = new SessionRegistry(cfg.store?.keepSessionFiles ?? 0);   // 0 = 不限
   let incidentPilot = null;
   let incidentPilotError = '';
+  let autoUpdate = null;
   const moduleLog = (source) => (...args) => {
     log(...args);
     const supplied = args.find((value) => value instanceof Error);
@@ -297,6 +299,19 @@ export function createApp({ log = console.log } = {}) {
     emit('chat-update', `private:${userId}`);
     return data;
   }
+  autoUpdate = new AutoUpdateManager({
+    appDir: autoUpdateOptions.appDir || ROOT,
+    dataDir: DATA_DIR,
+    config: getConfig,
+    updateConfig,
+    emit,
+    log,
+    notifyAvailable: () => onebot.connected === true,
+    notify: (text, ownerUin) => sendIdentityAdminText(ownerUin, text),
+    ...(autoUpdateOptions.runSystemctl
+      ? { runSystemctl: autoUpdateOptions.runSystemctl }
+      : {})
+  });
   async function syncIdentityPilot({ reindex = false, reconfigure = false } = {}) {
     if (!identityPilotEnabled()) {
       identityPilot?.stop();
@@ -486,6 +501,7 @@ export function createApp({ log = console.log } = {}) {
   onebot.onStatus((status) => {
     emit('onebot-status', status);
     if (status.connected) incidentPilot?.resumeNotifications();
+    if (status.connected) autoUpdate?.resumeNotifications();
   });
 
   // ── 入站事件处理 ──
@@ -1059,6 +1075,72 @@ export function createApp({ log = console.log } = {}) {
             error: String(error?.message ?? error)
           });
         }
+      }
+
+      if (pathname === '/api/auto-update/status' && method === 'GET') {
+        return json(res, 200, autoUpdate.status());
+      }
+
+      if (pathname === '/api/auto-update/settings' && method === 'PUT') {
+        const body = await readBody(req);
+        try {
+          autoUpdate.configure({
+            ownerUin: body.ownerUin,
+            intervalHours: body.intervalHours
+          });
+          return json(res, 200, { ok: true, status: autoUpdate.status() });
+        } catch (error) {
+          return json(res, error.httpStatus || 400, {
+            error: String(error?.message ?? error)
+          });
+        }
+      }
+
+      if (pathname === '/api/auto-update/run' && method === 'POST') {
+        const body = await readBody(req);
+        if (body.confirm !== true) {
+          return json(res, 409, { error: '手动更新需要显式确认' });
+        }
+        try {
+          const status = autoUpdate.requestManual();
+          return json(res, 202, { ok: true, status });
+        } catch (error) {
+          return json(res, error.httpStatus || 409, {
+            error: String(error?.message ?? error)
+          });
+        }
+      }
+
+      if (pathname === '/api/auto-update/resume' && method === 'POST') {
+        const body = await readBody(req);
+        if (body.confirm !== true) {
+          return json(res, 409, { error: '恢复自动更新需要显式确认' });
+        }
+        try {
+          autoUpdate.resume({
+            ownerUin: body.ownerUin,
+            intervalHours: body.intervalHours
+          });
+          return json(res, 200, { ok: true, status: autoUpdate.status() });
+        } catch (error) {
+          return json(res, error.httpStatus || 400, {
+            error: String(error?.message ?? error)
+          });
+        }
+      }
+
+      if (pathname === '/api/auto-update/pause' && method === 'POST') {
+        const body = await readBody(req);
+        if (body.confirm !== true) {
+          return json(res, 409, { error: '暂停自动更新需要显式确认' });
+        }
+        autoUpdate.pause();
+        return json(res, 200, { ok: true, status: autoUpdate.status() });
+      }
+
+      if (pathname === '/api/auto-update/notify-pending' && method === 'POST') {
+        const status = await autoUpdate.handlePendingFailure();
+        return json(res, 200, { ok: true, status });
       }
 
       if (pathname === '/api/runtime' && method === 'POST') {
@@ -2749,6 +2831,7 @@ export function createApp({ log = console.log } = {}) {
     if (getConfig().dailyMoments?.enabled) dailyMoments.start();
     if (getConfig().qzoneInteractions?.enabled) qzoneInteractions.start();
     if (getConfig().proactive?.enabled) orchestrator.startProactiveLoop();
+    autoUpdate.start();
     log(`控制台已就绪：http://${serverCfg.host}:${port} (${getConfig().runtime.mode})`);
     log(`OneBot: ws=${getConfig().onebot?.wsUrl} http=${getConfig().onebot?.httpUrl}`);
     log(`模型: ${getConfig().api.model || '（未设置，请在设置里选择）'} @ ${getConfig().api.baseUrl}`);
@@ -2762,6 +2845,7 @@ export function createApp({ log = console.log } = {}) {
     dailyMoments.abort();
     qzoneInteractions.stop();
     await qzoneInteractions.abort();
+    autoUpdate.stop();
     identityPilot?.stop();
     identityPilot = null;
     await slangPilot?.stop();
@@ -2802,6 +2886,7 @@ export function createApp({ log = console.log } = {}) {
     dailyMoments,
     qzoneInteractions,
     assetObserver,
+    autoUpdate,
     get incidentPilot() { return incidentPilot; },
     incidentPilotStatus,
     captureIncident(error, context = {}) {

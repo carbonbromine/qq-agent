@@ -135,6 +135,15 @@ systemd validation or health checking fails, the installer restores the previous
 code, configuration and service unit before restarting the old service. Use
 `--no-backup` only when an external rollback mechanism is already in place.
 
+The deployment also installs `${SERVICE}-update.service` and
+`${SERVICE}-update.timer`. The timer wakes hourly, while the persisted
+`autoUpdate.intervalHours` setting controls whether a GitHub check is due.
+Automatic updates default to disabled. When enabled from the Control page, the
+updater shallow-fetches the configured GitHub branch into a persistent bare
+cache, tests the candidate checkout, then delegates deployment and rollback to
+`deploy.sh`. Any failure disables automatic updates and queues one administrator
+notification. See [GitHub automatic updates](AUTO_UPDATE.md).
+
 Optional import on FIRST install only:
 
 ```bash
@@ -148,8 +157,8 @@ The first installation enters observe mode and does not activate replies
 automatically. Updating an existing installation preserves its current mode.
 Model/API settings for non-DeepSeek providers must be configured in the new console.
 The repository contains no Electron shell, Windows installer, bundled protocol
-launcher, community upload client, telemetry client, or online updater. Manage the
-external OneBot implementation as its own Linux service.
+launcher, community upload client or telemetry client. Manage the external
+OneBot implementation as its own Linux service.
 
 ## Control Panel
 

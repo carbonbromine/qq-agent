@@ -169,6 +169,14 @@ export const DEFAULT_CONFIG = {
     idleThresholdMs: 1800000,   // 群里静默多久才算"冷场"
     probability: 0.25
   },
+  // GitHub 自动更新。外部 systemd timer 只负责唤醒，是否实际检查由 enabled 控制。
+  autoUpdate: {
+    enabled: false,
+    ownerUin: '',
+    repository: 'https://github.com/carbonbromine/qq-agent.git',
+    branch: 'main',
+    intervalHours: 6
+  },
   // 每日群聊记忆总结与 QQ 空间动态
   dailyMoments: {
     enabled: false,
@@ -693,6 +701,52 @@ export function updateConfig(patch) {
       && !(next.allow?.private || []).map(String).includes(next.incidentPilot.ownerUin)
     ) {
       throw new Error('异常告警管理员 QQ 必须同时加入私聊白名单');
+    }
+  }
+  const autoUpdate = next.autoUpdate || {};
+  const updateRepository = String(
+    autoUpdate.repository || DEFAULT_CONFIG.autoUpdate.repository
+  ).trim();
+  const updateBranch = String(
+    autoUpdate.branch || DEFAULT_CONFIG.autoUpdate.branch
+  ).trim();
+  if (!/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/.test(
+    updateRepository
+  )) {
+    throw new Error('自动更新仓库必须是 GitHub HTTPS 地址');
+  }
+  if (
+    !/^[A-Za-z0-9._/-]{1,100}$/.test(updateBranch)
+    || updateBranch.startsWith('-')
+    || updateBranch.includes('..')
+    || updateBranch.endsWith('/')
+  ) {
+    throw new Error('自动更新分支名称无效');
+  }
+  next.autoUpdate = {
+    ...autoUpdate,
+    enabled: autoUpdate.enabled === true,
+    ownerUin: /^\d{5,15}$/.test(String(autoUpdate.ownerUin || '').trim())
+      ? String(autoUpdate.ownerUin).trim()
+      : '',
+    repository: updateRepository.endsWith('.git')
+      ? updateRepository
+      : `${updateRepository}.git`,
+    branch: updateBranch,
+    intervalHours: Math.min(
+      168,
+      Math.max(1, Math.round(Number(autoUpdate.intervalHours) || 6))
+    )
+  };
+  if (next.autoUpdate.enabled) {
+    if (!next.autoUpdate.ownerUin) {
+      throw new Error('自动更新需要配置告警管理员 QQ');
+    }
+    if (
+      next.allowAllWhenEmpty !== true
+      && !(next.allow?.private || []).map(String).includes(next.autoUpdate.ownerUin)
+    ) {
+      throw new Error('自动更新管理员 QQ 必须同时加入私聊白名单');
     }
   }
   const slangPilot = next.slangPilot || {};
