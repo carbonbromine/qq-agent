@@ -116,6 +116,19 @@ The batch timeline scrolls horizontally and preserves both its horizontal
 position and the detail pane's vertical position when another batch is selected.
 Legacy Sessions remain one item per run because they do not share a thread.
 
+Each Session persists a structured trigger kind instead of relying on display
+text. The initial lifecycle trigger distinguishes `mention`, `keyword`,
+`probability` and `all`; later batches use `lifecycle`, `rollover` or `reply` as
+appropriate. The console shows the origin trigger for the grouped lifecycle and
+the actual trigger kind for every batch in its timeline.
+
+The Session API overlays the persisted audit record with the matching current
+thread state. Lifecycle views therefore expose active/listening/rollover/closed
+state, effective and hard deadlines, a live remaining-time display, accumulated
+Token usage and estimated cost across all Sessions sharing the `threadId`.
+Historical threads are reported as closed even if their final Session snapshot
+was written while the thread was still active.
+
 The pre-run debounce is a random duration between `wakeDelayMinMs` and
 `wakeDelayMaxMs` for each newly scheduled batch. The defaults are 8000 and
 12000 milliseconds. Repeated messages redraw the delay while

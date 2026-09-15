@@ -818,15 +818,21 @@ try {
   const statusText = ctx.sessionStatusText || sandbox.sessionStatusText;
   const conversationText = ctx.conversationStatusText || sandbox.conversationStatusText;
   const modeBand = ctx.renderSessionModeBand || sandbox.renderSessionModeBand;
+  const triggerLabel = ctx.triggerKindLabel || sandbox.triggerKindLabel;
   const lifecycleSession = {
     status: 'done',
     conversationMode: 'lifecycle',
     threadState: 'listening',
-    threadId: '12345678-abcd'
+    threadId: '12345678-abcd',
+    triggerKind: 'mention',
+    lifecycle: { state: 'listening', isCurrent: true }
   };
   if (
     statusText(lifecycleSession) === '本轮已发言'
     && conversationText(lifecycleSession) === '完整生命周期 · 监听中'
+    && triggerLabel(lifecycleSession) === '@ 触发'
+    && triggerLabel({ triggerKind: 'keyword' }) === '关键词触发'
+    && triggerLabel({ triggerKind: 'probability' }) === '传统概率触发'
     && statusText({ status: 'done', conversationMode: 'legacy' }) === '已发言'
     && modeBand(lifecycleSession).includes('session-mode-band mode-lifecycle')
     && modeBand(lifecycleSession).includes('线程 12345678')
@@ -839,23 +845,34 @@ try {
   }
   const groupSessions = ctx.buildSessionDisplayItems || sandbox.buildSessionDisplayItems;
   const threadTimeline = ctx.renderSessionThreadTimeline || sandbox.renderSessionThreadTimeline;
+  const lifecycleOverview = ctx.renderLifecycleOverview || sandbox.renderLifecycleOverview;
+  const lifecycleDeadline = Date.now() + 10 * 60 * 1000;
+  const hardDeadline = Date.now() + 20 * 60 * 1000;
   const groupedRuns = [
     {
       id: 'life-wait', chatKey: 'group:1', startedAt: 3, status: 'waiting',
       conversationMode: 'lifecycle', threadId: 'thread-1', threadState: 'active',
-      trigger: '等待第三批', rounds: 0, webSearchCount: 0, waitUntil: Date.now() + 5000,
+      trigger: '等待第三批', triggerKind: 'lifecycle', triggerReason: '生命周期：活跃状态',
+      rounds: 0, webSearchCount: 0, waitUntil: Date.now() + 5000,
+      lifecycle: {
+        threadId: 'thread-1', state: 'active', isCurrent: true,
+        deadline: lifecycleDeadline, hardDeadline
+      },
+      sessionMetrics: { estimatedCost: 0 },
       usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, cachedTokens: 0, calls: 0 }
     },
     {
       id: 'life-2', chatKey: 'group:1', startedAt: 2, status: 'done',
       conversationMode: 'lifecycle', threadId: 'thread-1', threadState: 'listening',
-      trigger: '第二批', rounds: 2, webSearchCount: 1,
+      trigger: '第二批', triggerKind: 'lifecycle', triggerReason: '生命周期：监听状态',
+      rounds: 2, webSearchCount: 1, sessionMetrics: { estimatedCost: 0.002 },
       usage: { promptTokens: 20, completionTokens: 2, totalTokens: 22, cachedTokens: 15, calls: 2 }
     },
     {
       id: 'life-1', chatKey: 'group:1', startedAt: 1, status: 'done',
       conversationMode: 'lifecycle', threadId: 'thread-1', threadState: 'active',
-      trigger: '第一批', rounds: 1, webSearchCount: 0,
+      trigger: '第一批', triggerKind: 'mention', triggerReason: '被艾特',
+      rounds: 1, webSearchCount: 0, sessionMetrics: { estimatedCost: 0.004 },
       usage: { promptTokens: 10, completionTokens: 1, totalTokens: 11, cachedTokens: 0, calls: 1 }
     },
     {
@@ -867,20 +884,30 @@ try {
   const groupedView = groupSessions(groupedRuns);
   vm.runInContext(`state.sessions = ${JSON.stringify(groupedRuns)};`, ctx);
   const timelineHtml = threadTimeline(groupedRuns[0]);
+  const lifecycleHtml = lifecycleOverview(groupedRuns[0]);
   const lifecycleGroup = groupedView.find((item) => item.threadId === 'thread-1');
   if (
     groupedView.length === 2
     && lifecycleGroup?.runCount === 3
     && lifecycleGroup?.usage?.totalTokens === 33
+    && lifecycleGroup?.estimatedCost === 0.006
+    && lifecycleGroup?.originTriggerKind === 'mention'
     && lifecycleGroup?.latestSessionId === 'life-wait'
     && (timelineHtml.match(/data-thread-session-id=/g) || []).length === 3
     && timelineHtml.includes('3 批 · 3 次调用')
+    && timelineHtml.includes('@ 触发')
+    && timelineHtml.includes('生命周期续接')
+    && timelineHtml.includes('¥0.0060')
+    && lifecycleHtml.includes('当前状态')
+    && lifecycleHtml.includes('生命周期剩余')
+    && lifecycleHtml.includes('预估总消耗')
+    && lifecycleHtml.includes('¥0.0060')
   ) {
     pass++;
-    console.log('  OK    生命周期 Session 按 threadId 聚合并保留批次时间线');
+    console.log('  OK    生命周期 Session 展示触发方式、状态、剩余时间和累计消耗');
   } else {
     fail++;
-    console.log('  FAIL  生命周期 Session 聚合或时间线不完整');
+    console.log('  FAIL  生命周期 Session 运行摘要或时间线不完整');
   }
   vm.runInContext('state.sessions = [];', ctx);
   const contextInspector = ctx.renderSessionContextInspector || sandbox.renderSessionContextInspector;

@@ -90,6 +90,7 @@ export function createApp({ log = console.log } = {}) {
         // （运行中的会话每次更新都广播，克隆大会话会拖慢事件投递）
         const s = sessions?.peek(payload.sessionId);
         if (s) {
+          const view = buildSessionView(s, store);
           line = `event: ${type}\ndata: ${JSON.stringify({
             sessionId: s.id,
             chatKey: s.chatKey,
@@ -102,10 +103,13 @@ export function createApp({ log = console.log } = {}) {
             usage: s.usage ?? null,
             trigger: s.triggerSummary ?? '',
             triggerSummary: s.triggerSummary ?? '',
+            triggerKind: s.triggerKind ?? '',
+            triggerReason: s.triggerReason ?? s.contextReason ?? '',
             messages: s.messages ?? [],
             conversationMode: s.conversationMode ?? 'legacy',
             threadId: s.threadId ?? null,
-            threadState: s.threadState ?? null,
+            threadState: view.threadState ?? null,
+            lifecycle: view.lifecycle,
             promptLayout: s.promptLayout ?? '',
             lifecycleContinuation: s.lifecycleContinuation === true,
             callUsage: s.callUsage ?? [],
@@ -2328,14 +2332,19 @@ export function createApp({ log = console.log } = {}) {
         // 上限 2^20（Kondius 钦定 1048576）：约等于不限，但拦得住真正的失控请求。
         // 前端靠分页（一次渲染 50 条）避免卡顿，后端不截断。
         const limit = Math.min(1048576, Math.max(1, Number(url.searchParams.get('limit')) || 1048576));
-        return json(res, 200, { sessions: sessions.listSummaries(limit) });
+        const now = Date.now();
+        const threadCache = new Map();
+        return json(res, 200, {
+          sessions: sessions.listSummaries(limit)
+            .map((session) => buildSessionView(session, store, { now, threadCache }))
+        });
       }
 
       const sessionMatch = /^\/api\/sessions\/([\w-]+)$/.exec(pathname);
       if (sessionMatch && method === 'GET') {
         const s = sessions.get(sessionMatch[1]);
         if (!s) return json(res, 404, { error: '会话不存在' });
-        return json(res, 200, { ...s, sessionMetrics: buildSessionMetrics(s) });
+        return json(res, 200, buildSessionView(s, store));
       }
 
       if (pathname === '/api/chats' && method === 'GET') {
@@ -2912,6 +2921,94 @@ function buildSessionMetrics(s) {
     estimatedCost: priced.cost,
     costBreakdown: priced.breakdown,
     exactCostCalls: priced.exactCalls
+  };
+}
+
+function lifecycleDeadline(thread) {
+  if (!thread) return 0;
+  if (thread.state === 'rollover_armed') {
+    return Number(thread.resumeArmedUntil) || Number(thread.expiresAt) || 0;
+  }
+  const deadlines = [
+    Number(thread.idleDeadline) || 0,
+    Number(thread.hardDeadline) || 0,
+    Number(thread.expiresAt) || 0
+  ].filter((value) => value > 0);
+  return deadlines.length ? Math.min(...deadlines) : 0;
+}
+
+function sessionLifecycleView(s, store, {
+  now = Date.now(),
+  threadCache = new Map()
+} = {}) {
+  if (s?.conversationMode !== 'lifecycle') return null;
+  const chatKey = String(s.chatKey || '');
+  const threadId = String(s.threadId || '');
+  if (!threadId) {
+    return {
+      threadId: '',
+      state: ['waiting', 'running'].includes(s.status) ? 'starting' : 'closed',
+      disposition: '',
+      openedAt: Number(s.threadOpenedAt) || 0,
+      idleDeadline: 0,
+      hardDeadline: 0,
+      resumeArmedUntil: 0,
+      expiresAt: 0,
+      deadline: 0,
+      remainingMs: 0,
+      hardRemainingMs: 0,
+      closeReason: String(s.threadCloseReason || ''),
+      isCurrent: false
+    };
+  }
+
+  let current = null;
+  if (threadCache.has(chatKey)) {
+    current = threadCache.get(chatKey);
+  } else {
+    current = store?.getConversationThread?.(chatKey, now) || null;
+    threadCache.set(chatKey, current);
+  }
+  const isCurrent = current?.mode === 'lifecycle'
+    && String(current.threadId || '') === threadId;
+  const source = isCurrent ? current : {
+    threadId,
+    state: 'closed',
+    disposition: '',
+    openedAt: Number(s.threadOpenedAt) || 0,
+    idleDeadline: Number(s.threadIdleDeadline) || 0,
+    hardDeadline: Number(s.threadHardDeadline) || 0,
+    resumeArmedUntil: Number(s.threadResumeArmedUntil) || 0,
+    expiresAt: Number(s.threadExpiresAt) || 0,
+    closeReason: String(s.threadCloseReason || '')
+  };
+  const deadline = isCurrent ? lifecycleDeadline(source) : 0;
+  return {
+    threadId,
+    state: String(source.state || (isCurrent ? s.threadState : 'closed') || 'closed'),
+    disposition: String(source.disposition || ''),
+    openedAt: Number(source.openedAt) || 0,
+    idleDeadline: Number(source.idleDeadline) || 0,
+    hardDeadline: Number(source.hardDeadline) || 0,
+    resumeArmedUntil: Number(source.resumeArmedUntil) || 0,
+    expiresAt: Number(source.expiresAt) || 0,
+    deadline,
+    remainingMs: deadline ? Math.max(0, deadline - now) : 0,
+    hardRemainingMs: isCurrent && Number(source.hardDeadline) > 0
+      ? Math.max(0, Number(source.hardDeadline) - now)
+      : 0,
+    closeReason: String(source.closeReason || ''),
+    isCurrent
+  };
+}
+
+function buildSessionView(s, store, options = {}) {
+  const lifecycle = sessionLifecycleView(s, store, options);
+  return {
+    ...s,
+    threadState: lifecycle?.state || s.threadState || null,
+    lifecycle,
+    sessionMetrics: buildSessionMetrics(s)
   };
 }
 

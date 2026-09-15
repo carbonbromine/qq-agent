@@ -255,12 +255,110 @@ function esc(s) {
 const STATUS_LABEL = { waiting: '等待中', done: '已发言', noreply: '未回复', running: '运行中', error: '出错', aborted: '中止' };
 const CONVERSATION_MODE_LABEL = { legacy: '传统触发', threaded: '参与者续接', lifecycle: '完整生命周期' };
 const THREAD_STATE_LABEL = {
+  starting: '启动中',
   engaged: '续接窗口中',
   active: '活跃中',
   listening: '监听中',
   rollover_armed: '等待下一条消息续接',
   closed: '已结束'
 };
+const TRIGGER_KIND_LABEL = {
+  mention: '@ 触发',
+  keyword: '关键词触发',
+  probability: '传统概率触发',
+  all: '全部响应',
+  lifecycle: '生命周期续接',
+  rollover: '换代续接',
+  reply: '引用触发',
+  private: '私聊触发',
+  manual: '控制台触发',
+  proactive: '主动触发',
+  retry: '失败重试',
+  unknown: '其他触发'
+};
+
+function triggerKindOf(value) {
+  if (typeof value === 'string') return value || 'unknown';
+  if (value?.triggerKind) return value.triggerKind;
+  const reason = String(value?.triggerReason || value?.contextReason || '');
+  if (reason === '被艾特') return 'mention';
+  if (reason === '关键词命中') return 'keyword';
+  if (reason.startsWith('随机命中')) return 'probability';
+  if (reason === '全部响应') return 'all';
+  if (/生命周期：(?:活跃|监听)状态/.test(reason)) return 'lifecycle';
+  if (/硬上限后的任意消息续接/.test(reason)) return 'rollover';
+  if (/引用机器人/.test(reason)) return 'reply';
+  if (reason === '私聊') return 'private';
+  if (reason === '控制台主动唤醒') return 'manual';
+  if (reason === '失败批次重试') return 'retry';
+  return 'unknown';
+}
+
+function triggerKindLabel(value) {
+  const kind = triggerKindOf(value);
+  return TRIGGER_KIND_LABEL[kind] || TRIGGER_KIND_LABEL.unknown;
+}
+
+function lifecycleStateOf(s) {
+  return s?.lifecycle?.state || s?.threadState || (s?.threadId ? 'closed' : 'starting');
+}
+
+function fmtRemainingMs(ms) {
+  const seconds = Math.max(0, Math.ceil((Number(ms) || 0) / 1000));
+  if (seconds < 60) return `${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  if (minutes < 60) return rest ? `${minutes} 分 ${rest} 秒` : `${minutes} 分`;
+  const hours = Math.floor(minutes / 60);
+  const restMinutes = minutes % 60;
+  return restMinutes ? `${hours} 小时 ${restMinutes} 分` : `${hours} 小时`;
+}
+
+function lifecycleRemainingText(deadline, lifecycleState) {
+  if (lifecycleState === 'closed') return '已结束';
+  if (lifecycleState === 'starting') return '建立中';
+  if (!Number(deadline)) return '-';
+  const remaining = Number(deadline) - Date.now();
+  return remaining > 0 ? fmtRemainingMs(remaining) : '状态更新中';
+}
+
+function lifecycleRunsFor(s) {
+  if (s?.conversationMode !== 'lifecycle' || !s?.threadId) return [];
+  return (state.sessions || [])
+    .filter((entry) =>
+      entry.conversationMode === 'lifecycle'
+      && entry.chatKey === s.chatKey
+      && entry.threadId === s.threadId)
+    .slice()
+    .sort((a, b) => Number(a.startedAt) - Number(b.startedAt));
+}
+
+function lifecycleAggregate(s) {
+  const groupedRuns = lifecycleRunsFor(s);
+  const runs = groupedRuns.length ? groupedRuns : [s];
+  const origin = runs[0];
+  const current = runs.find((run) => run.lifecycle?.isCurrent)
+    || (s.lifecycle ? s : null)
+    || runs.at(-1)
+    || s;
+  return {
+    runs,
+    origin,
+    lifecycle: current?.lifecycle || s.lifecycle || null,
+    totalTokens: runs.reduce(
+      (sum, run) => sum + (Number(run.usage?.totalTokens) || 0),
+      0
+    ),
+    totalCalls: runs.reduce(
+      (sum, run) => sum + (Number(run.usage?.calls) || 0),
+      0
+    ),
+    estimatedCost: runs.reduce(
+      (sum, run) => sum + (Number(run.sessionMetrics?.estimatedCost) || 0),
+      0
+    )
+  };
+}
 
 function sessionStatusText(s) {
   const base = STATUS_LABEL[s.status] || s.status;
@@ -272,7 +370,7 @@ function sessionStatusText(s) {
 function conversationStatusText(s) {
   const mode = s.conversationMode || 'legacy';
   const modeLabel = CONVERSATION_MODE_LABEL[mode] || mode;
-  const threadLabel = THREAD_STATE_LABEL[s.threadState];
+  const threadLabel = THREAD_STATE_LABEL[lifecycleStateOf(s)];
   return threadLabel ? `${modeLabel} · ${threadLabel}` : modeLabel;
 }
 
@@ -280,7 +378,7 @@ function renderSessionModeBand(s) {
   const mode = ['legacy', 'threaded', 'lifecycle'].includes(s.conversationMode)
     ? s.conversationMode
     : 'legacy';
-  const stateLabel = THREAD_STATE_LABEL[s.threadState]
+  const stateLabel = THREAD_STATE_LABEL[lifecycleStateOf(s)]
     || (mode === 'legacy' ? '单轮运行' : '尚未建立线程');
   const detail = mode === 'legacy'
     ? '本轮按响应档位独立触发'
@@ -297,21 +395,62 @@ function renderSessionModeBand(s) {
     </div>`;
 }
 
+function renderLifecycleOverview(s) {
+  if (s.conversationMode !== 'lifecycle') return '';
+  const aggregate = lifecycleAggregate(s);
+  const lifecycle = aggregate.lifecycle || {};
+  const lifecycleState = lifecycle.state || lifecycleStateOf(s);
+  const deadline = Number(lifecycle.deadline) || 0;
+  const hardDeadline = Number(lifecycle.hardDeadline) || 0;
+  const hardRemaining = hardDeadline > Date.now()
+    ? fmtRemainingMs(hardDeadline - Date.now())
+    : '-';
+  return `
+    <section class="lifecycle-overview" aria-label="生命周期运行摘要">
+      <div>
+        <span>起始触发</span>
+        <strong>${esc(triggerKindLabel(aggregate.origin))}</strong>
+        <small>${esc(aggregate.origin?.triggerReason || '未记录具体判定')}</small>
+      </div>
+      <div>
+        <span>当前状态</span>
+        <strong>${esc(THREAD_STATE_LABEL[lifecycleState] || lifecycleState || '-')}</strong>
+        <small>${lifecycle.isCurrent ? '当前线程' : lifecycleState === 'closed' ? '线程已关闭' : '等待线程建立'}</small>
+      </div>
+      <div>
+        <span>生命周期剩余</span>
+        <strong class="lifecycle-remaining" data-deadline="${deadline}" data-lifecycle-state="${esc(lifecycleState)}">${esc(lifecycleRemainingText(deadline, lifecycleState))}</strong>
+        <small>${lifecycleState === 'rollover_armed' ? '可续接窗口' : `硬上限 ${hardRemaining}`}</small>
+      </div>
+      <div>
+        <span>预估总消耗</span>
+        <strong>${fmtYuan(aggregate.estimatedCost)}</strong>
+        <small>${fmtTokens(aggregate.totalTokens)} · ${fmtTok(aggregate.totalCalls)} 次调用 · ${fmtTok(aggregate.runs.length)} 批</small>
+      </div>
+    </section>`;
+}
+
 function renderSessionThreadTimeline(s) {
   const mode = ['threaded', 'lifecycle'].includes(s.conversationMode)
     ? s.conversationMode
     : '';
   if (!mode || !s.threadId) return '';
-  const runs = (state.sessions || [])
-    .filter((entry) =>
-      entry.conversationMode === mode
-      && entry.chatKey === s.chatKey
-      && entry.threadId === s.threadId)
-    .slice()
-    .sort((a, b) => Number(a.startedAt) - Number(b.startedAt));
+  const runs = mode === 'lifecycle'
+    ? lifecycleRunsFor(s)
+    : (state.sessions || [])
+      .filter((entry) =>
+        entry.conversationMode === mode
+        && entry.chatKey === s.chatKey
+        && entry.threadId === s.threadId)
+      .slice()
+      .sort((a, b) => Number(a.startedAt) - Number(b.startedAt));
   if (!runs.length) return '';
   const totalTokens = runs.reduce((sum, run) => sum + (Number(run.usage?.totalTokens) || 0), 0);
   const totalCalls = runs.reduce((sum, run) => sum + (Number(run.usage?.calls) || 0), 0);
+  const totalCost = runs.reduce(
+    (sum, run) => sum + (Number(run.sessionMetrics?.estimatedCost) || 0),
+    0
+  );
   const title = mode === 'lifecycle' ? '生命周期批次' : '续接线程批次';
   return `
     <section class="thread-timeline mode-${mode}">
@@ -320,17 +459,17 @@ function renderSessionThreadTimeline(s) {
           <strong>${title}</strong>
           <span>${esc(s.threadId)}</span>
         </div>
-        <span>${runs.length} 批 · ${totalCalls} 次调用 · ${fmtTokens(totalTokens)}</span>
+        <span>${runs.length} 批 · ${totalCalls} 次调用 · ${fmtTokens(totalTokens)} · ${fmtYuan(totalCost)}</span>
       </div>
       <div class="thread-run-list">
         ${runs.map((run, index) => `
           <button type="button"
             class="thread-run${run.id === s.id ? ' active' : ''}"
             data-thread-session-id="${esc(run.id)}"
-            title="${esc(run.trigger || '')}">
-            <span>#${index + 1}</span>
+            title="${esc(`${triggerKindLabel(run)} · ${run.triggerReason || ''} · ${run.trigger || ''}`)}">
+            <span>#${index + 1} · ${esc(triggerKindLabel(run))}</span>
             <strong>${fmtClock(run.startedAt)}</strong>
-            <small>${esc(sessionStatusText(run))} · ${fmtTokens(run.usage?.totalTokens)}</small>
+            <small>${esc(sessionStatusText(run))} · ${fmtYuan(run.sessionMetrics?.estimatedCost)}</small>
           </button>`).join('')}
       </div>
     </section>`;
@@ -755,9 +894,12 @@ function connectSSE() {
       rounds: data.rounds || 0,
       usage: data.usage || null,
       messages: data.messages || [],
+      triggerKind: data.triggerKind || '',
+      triggerReason: data.triggerReason || '',
       conversationMode: data.conversationMode || 'legacy',
       threadId: data.threadId ?? null,
       threadState: data.threadState ?? null,
+      lifecycle: data.lifecycle || null,
       promptLayout: data.promptLayout || '',
       lifecycleContinuation: data.lifecycleContinuation === true,
       callUsage: data.callUsage || [],
@@ -1040,6 +1182,10 @@ function buildSessionDisplayItems(sessions = []) {
         runCount: 0,
         totalRounds: 0,
         totalSearches: 0,
+        estimatedCost: 0,
+        originTriggerKind: session.triggerKind || '',
+        originTriggerReason: session.triggerReason || '',
+        originTriggerAt: Number(session.startedAt) || 0,
         usage: {
           promptTokens: 0,
           completionTokens: 0,
@@ -1055,6 +1201,17 @@ function buildSessionDisplayItems(sessions = []) {
     item.runCount += 1;
     item.totalRounds += Number(session.rounds) || 0;
     item.totalSearches += Number(session.webSearchCount) || 0;
+    item.estimatedCost += Number(session.sessionMetrics?.estimatedCost) || 0;
+    if (mode === 'lifecycle'
+      && (!item.originTriggerAt || Number(session.startedAt) < item.originTriggerAt)) {
+      item.originTriggerKind = session.triggerKind || '';
+      item.originTriggerReason = session.triggerReason || '';
+      item.originTriggerAt = Number(session.startedAt) || 0;
+    }
+    if (session.lifecycle?.isCurrent) {
+      item.lifecycle = session.lifecycle;
+      item.threadState = session.lifecycle.state;
+    }
     for (const key of ['promptTokens', 'completionTokens', 'totalTokens', 'cachedTokens', 'calls']) {
       item.usage[key] += Number(session.usage?.[key]) || 0;
     }
@@ -1089,6 +1246,17 @@ function renderSessionList() {
     const isNew = !state.seenSessionIds.has(s.displayKey);
     const selected = s.sessionIds.includes(state.currentSessionId);
     const runLabel = s.runCount > 1 ? `${s.runCount} 批` : '';
+    const triggerLabel = mode === 'lifecycle'
+      ? triggerKindLabel({
+          triggerKind: s.originTriggerKind,
+          triggerReason: s.originTriggerReason
+        })
+      : triggerKindLabel(s);
+    const lifecycle = mode === 'lifecycle' ? (s.lifecycle || {}) : null;
+    const lifecycleState = lifecycle?.state || lifecycleStateOf(s);
+    const lifecycleRemain = mode === 'lifecycle'
+      ? `<span class="lifecycle-remaining" data-deadline="${Number(lifecycle?.deadline) || 0}" data-lifecycle-state="${esc(lifecycleState)}">${esc(lifecycleRemainingText(lifecycle?.deadline, lifecycleState))}</span>`
+      : '';
     return `
       <div class="session-item mode-${mode} ${s.runCount > 1 ? 'session-thread-group' : ''} ${selected ? 'selected' : ''} ${s.status === 'waiting' ? 'session-waiting-row' : ''} ${isNew ? 'new-item' : ''}"
         data-id="${s.latestSessionId}" data-display-key="${esc(s.displayKey)}" role="button" tabindex="0">
@@ -1096,13 +1264,14 @@ function renderSessionList() {
           <span class="session-chat">${esc(chatName)}</span>
           <span class="session-time">${fmtTime(s.startedAt)}</span>
         </div>
-        <div class="session-trigger">${esc(s.trigger || '')}${runLabel ? ` · ${runLabel}` : ''}</div>
+        <div class="session-trigger"><span class="trigger-method">${esc(triggerLabel)}</span><span>${esc(s.trigger || '')}${runLabel ? ` · ${runLabel}` : ''}</span></div>
         <div class="session-meta">
           <span class="status-badge status-${s.status}">${esc(sessionStatusText(s))}</span>
           <span class="mode-chip mode-${mode}">${esc(conversationStatusText(s))}</span>
+          ${lifecycleRemain}
           ${waitHtml}
           ${activityHtml}
-          ${s.status !== 'waiting' ? `<span>${s.usage ? fmtTokens(s.usage.totalTokens) : '-'}</span><span>${s.totalRounds || 0} 模型轮</span>${searchHtml}</span>` : ''}
+          ${s.status !== 'waiting' ? `<span>${s.usage ? fmtTokens(s.usage.totalTokens) : '-'}</span>${mode === 'lifecycle' ? `<span>${fmtYuan(s.estimatedCost)}</span>` : ''}<span>${s.totalRounds || 0} 模型轮</span>${searchHtml}</span>` : ''}
         </div>
       </div>`;
   }).join('');
@@ -1132,6 +1301,7 @@ function renderSessionList() {
   });
   // 等待中会话的剩余时间按 0.1s 本地刷新（不重新拉列表）
   if ($$('.session-wait[data-until]', box).length) startWaitTicker();
+  if ($$('.lifecycle-remaining[data-deadline]').length) startLifecycleTicker();
 }
 
 function updateSessionListSelection() {
@@ -1165,14 +1335,39 @@ function startWaitTicker() {
   }, 100);
 }
 
+let lifecycleTicker = null;
+function startLifecycleTicker() {
+  if (lifecycleTicker) return;
+  lifecycleTicker = setInterval(() => {
+    const elements = $$('.lifecycle-remaining[data-deadline]');
+    if (!elements.length) {
+      clearInterval(lifecycleTicker);
+      lifecycleTicker = null;
+      return;
+    }
+    for (const element of elements) {
+      element.textContent = lifecycleRemainingText(
+        Number(element.dataset.deadline),
+        element.dataset.lifecycleState || ''
+      );
+    }
+  }, 1000);
+}
+
 async function selectSession(id, { preserveDetail = false } = {}) {
-  if (!id || id === state.currentSessionId) return;
+  if (!id) return;
+  const sessionView = $('#view-sessions');
+  if (id === state.currentSessionId) {
+    sessionView?.classList.add('mobile-detail-open');
+    return;
+  }
   const detail = $('#session-detail');
   const scrollTop = preserveDetail ? detail?.scrollTop ?? 0 : 0;
   const timelineScrollLeft = preserveDetail
     ? detail?.querySelector('.thread-run-list')?.scrollLeft ?? 0
     : 0;
   state.currentSessionId = id;
+  sessionView?.classList.add('mobile-detail-open');
   state.sessionDetail = null;
   lastDetailFp = null;
   updateSessionListSelection();
@@ -1371,7 +1566,7 @@ function renderSessionDetail(s, {
   if (!detail) return;
   // 内容没变（轮询/SSE 重复推送）→ 完全不动 DOM，保住滚动位置和展开状态
   // json 模式切换也要触发重渲染
-  const fp = `${s.id}|${s.status}|${s.conversationMode || 'legacy'}|${s.threadState || ''}|${s.rounds || 0}|${s.inputRound || 0}|${s.inputPayloadChars || 0}|${(s.messages || []).length}|${(s.sent || []).length}|${s.error ? 1 : 0}|${s.activity || ''}|${state.sessionInspectorTab}|${state.sessionJsonMode === s.id ? 'json' : 'ui'}`;
+  const fp = `${s.id}|${s.status}|${s.conversationMode || 'legacy'}|${s.threadState || ''}|${s.lifecycle?.state || ''}|${s.lifecycle?.deadline || 0}|${s.triggerKind || ''}|${s.rounds || 0}|${s.inputRound || 0}|${s.inputPayloadChars || 0}|${(s.messages || []).length}|${(s.sent || []).length}|${s.error ? 1 : 0}|${s.activity || ''}|${s.sessionMetrics?.estimatedCost || 0}|${state.sessionInspectorTab}|${state.sessionJsonMode === s.id ? 'json' : 'ui'}`;
   if (lastDetailFp === fp) return;
   const firstRender = lastDetailFp === null;
   lastDetailFp = fp;
@@ -1390,16 +1585,19 @@ function renderSessionDetail(s, {
   html.push(`
     <div class="detail-header">
       <h2>${esc(chatName)} ${statusBadge}
+        <button type="button" class="icon-btn session-mobile-back" id="session-mobile-back" title="返回会话列表" aria-label="返回会话列表">←</button>
         <button class="btn btn-small" id="json-mode-btn" style="margin-left:10px">JSON 模式</button>
       </h2>
       <div class="sub">
-        <span>触发：${esc(s.triggerSummary || (s.trigger === 'proactive' ? '主动机会' : '-'))}</span>
+        <span>触发方式：${esc(triggerKindLabel(s))}${s.triggerReason ? ` · ${esc(s.triggerReason)}` : ''}</span>
+        <span>触发消息：${esc(s.triggerSummary || (s.trigger === 'proactive' ? '主动机会' : '-'))}</span>
         <span>开始 ${fmtClock(s.startedAt)}${s.endedAt ? ` · ${s.conversationMode === 'lifecycle' ? '本轮结束' : '结束'} ${fmtClock(s.endedAt)}` : ' · 进行中'}</span>
         <span>模型 ${esc(s.model || '-')}</span>
         <span>${fmtTok(metrics.modelCalls)} 次模型调用 · ${fmtTok(metrics.toolCalls)} 次工具调用</span>
       </div>
     </div>
     ${renderSessionModeBand(s)}
+    ${renderLifecycleOverview(s)}
     ${renderSessionThreadTimeline(s)}`);
 
   const jsonMode = state.sessionJsonMode === s.id;
@@ -1412,6 +1610,9 @@ function renderSessionDetail(s, {
       conversationMode: s.conversationMode || 'legacy',
       threadId: s.threadId || null,
       threadState: s.threadState || null,
+      lifecycle: s.lifecycle || null,
+      triggerKind: s.triggerKind || '',
+      triggerReason: s.triggerReason || '',
       promptLayout: s.promptLayout || '',
       callUsage: s.callUsage || [],
       sessionMetrics: metrics,
@@ -1489,6 +1690,12 @@ function renderSessionDetail(s, {
   const openStates = new Map();
   detail.querySelectorAll('details.collapsible').forEach((d, i) => openStates.set(i, d.open));
   detail.innerHTML = html.join('');
+  if (detail.querySelector('.lifecycle-remaining[data-deadline]')) {
+    startLifecycleTicker();
+  }
+  $('#session-mobile-back')?.addEventListener('click', () => {
+    $('#view-sessions')?.classList.remove('mobile-detail-open');
+  });
   detail.querySelectorAll('details.collapsible').forEach((d, i) => { if (openStates.has(i)) d.open = openStates.get(i); });
   const jsonBtn = $('#json-mode-btn');
   if (jsonBtn) jsonBtn.addEventListener('click', () => {

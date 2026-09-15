@@ -9,7 +9,8 @@ process.env.QQ_AGENT_DATA_DIR = root;
 const {
   Orchestrator,
   estimateNextPromptTokens,
-  randomWakeDelay
+  randomWakeDelay,
+  triggerKindForTier
 } = await import('../src/orchestrator.js');
 const { ChatStore } = await import('../src/store.js');
 const { SessionRegistry } = await import('../src/sessions.js');
@@ -22,6 +23,15 @@ describe('Orchestrator', () => {
     assert.equal(randomWakeDelay(cfg, () => 0.5), 10000);
     assert.equal(randomWakeDelay(cfg, () => 1), 12000);
     assert.equal(randomWakeDelay({ wakeDelayMinMs: 12000, wakeDelayMaxMs: 8000 }, () => 0), 8000);
+  });
+
+  it('classifies persisted Session trigger kinds without parsing display text', () => {
+    assert.equal(triggerKindForTier({ tier: 1, reason: '被艾特' }), 'mention');
+    assert.equal(triggerKindForTier({ tier: 2, reason: '关键词命中' }), 'keyword');
+    assert.equal(triggerKindForTier({ tier: 3, reason: '随机命中(12%)' }), 'probability');
+    assert.equal(triggerKindForTier({ tier: 6, reason: '生命周期：活跃状态' }), 'lifecycle');
+    assert.equal(triggerKindForTier({ tier: 7, reason: '生命周期：硬上限后的任意消息续接' }), 'rollover');
+    assert.equal(triggerKindForTier({}, { manual: true, proactive: true }), 'manual');
   });
 
   it('omits inline image bytes from next-round Token estimation', () => {
@@ -658,7 +668,7 @@ describe('Orchestrator', () => {
   });
 
   it('deterministically wakes the same participant inside the threaded continuation window', async (t) => {
-    const { cfg, runner, store, append } = fixture(t);
+    const { cfg, runner, store, sessions, append } = fixture(t);
     cfg.conversation.mode = 'threaded';
     let calls = 0;
     globalThis.fetch = async () => {
@@ -737,7 +747,7 @@ describe('Orchestrator', () => {
   });
 
   it('supports per-group lifecycle mode and reuses the append-only DeepSeek transcript', async (t) => {
-    const { cfg, runner, store, append } = fixture(t);
+    const { cfg, runner, store, sessions, append } = fixture(t);
     cfg.conversation.mode = 'legacy';
     cfg.conversation.unifiedMode = false;
     cfg.conversation.groupModes = { 1: 'lifecycle' };
@@ -781,6 +791,12 @@ describe('Orchestrator', () => {
     assert.equal(firstThread.state, 'active');
     assert.ok(firstThread.hardDeadline > firstThread.idleDeadline);
     assert.ok(store.getThreadTurns(firstThread.threadId).length >= 3);
+    const firstSession = sessions.get(sessions.listSummaries(1)[0].id);
+    assert.equal(firstSession.triggerKind, 'mention');
+    assert.equal(firstSession.triggerReason, '被艾特');
+    assert.equal(firstSession.threadId, firstThread.threadId);
+    assert.equal(firstSession.threadState, 'active');
+    assert.equal(firstSession.threadHardDeadline, firstThread.hardDeadline);
 
     append(2, '路过说一句', '99');
     await runner.wake('group:1');
@@ -810,6 +826,10 @@ describe('Orchestrator', () => {
     const latest = runner.sessions.get(runner.sessions.listSummaries(1)[0].id);
     assert.equal(latest.contextTier, 6);
     assert.match(latest.contextReason, /生命周期/);
+    assert.equal(latest.triggerKind, 'lifecycle');
+    assert.match(latest.triggerReason, /生命周期/);
+    assert.equal(latest.threadIdleDeadline, secondThread.idleDeadline);
+    assert.equal(latest.threadHardDeadline, secondThread.hardDeadline);
     assert.deepEqual(
       latest.injectedMessages,
       requests[2].messages.slice(1, -1),

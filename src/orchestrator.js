@@ -135,6 +135,27 @@ export function randomWakeDelay(config = getConfig(), random = Math.random) {
   return Math.round(min + (max - min) * ratio);
 }
 
+export function triggerKindForTier(result = {}, {
+  manual = false,
+  proactive = false,
+  chatKey = ''
+} = {}) {
+  const tier = Number(result?.tier);
+  const reason = String(result?.reason || '');
+  if (manual) return 'manual';
+  if (proactive) return 'proactive';
+  if (reason === '私聊' || String(chatKey).startsWith('private:')) return 'private';
+  if (tier === 1 || reason === '被艾特') return 'mention';
+  if (tier === 2 || reason === '关键词命中') return 'keyword';
+  if (tier === 3 || reason.startsWith('随机命中')) return 'probability';
+  if (tier === 4 || reason === '全部响应') return 'all';
+  if (tier === 5 || /引用机器人/.test(reason)) return 'reply';
+  if (tier === 6 || /生命周期：(?:活跃|监听)状态/.test(reason)) return 'lifecycle';
+  if (tier === 7 || /硬上限后的任意消息续接/.test(reason)) return 'rollover';
+  if (tier === 8 || reason === '失败批次重试') return 'retry';
+  return 'unknown';
+}
+
 export class Orchestrator {
   constructor({
     store,
@@ -397,6 +418,26 @@ export class Orchestrator {
     return { ...fallback, conversationMode: 'lifecycle' };
   }
 
+  #applySessionTrigger(session, result, options = {}) {
+    if (!session) return;
+    session.triggerKind = triggerKindForTier(result, options);
+    session.triggerReason = String(result?.reason || '').slice(0, 160);
+    session.contextTier = Number.isFinite(Number(result?.tier))
+      ? Number(result.tier)
+      : null;
+  }
+
+  #applyThreadSnapshot(session, thread, fallbackState = null) {
+    if (!session) return;
+    session.threadState = thread?.state || fallbackState || session.threadState || null;
+    session.threadOpenedAt = Number(thread?.openedAt) || Number(session.threadOpenedAt) || 0;
+    session.threadIdleDeadline = Number(thread?.idleDeadline) || 0;
+    session.threadHardDeadline = Number(thread?.hardDeadline) || 0;
+    session.threadResumeArmedUntil = Number(thread?.resumeArmedUntil) || 0;
+    session.threadExpiresAt = Number(thread?.expiresAt) || 0;
+    session.threadCloseReason = String(thread?.closeReason || '');
+  }
+
   #applyWaitingConversation(session, predicted, chatKey) {
     if (!session) return;
     const mode = ['legacy', 'threaded', 'lifecycle'].includes(predicted?.conversationMode)
@@ -408,8 +449,13 @@ export class Orchestrator {
     const thread = currentThread?.mode === mode ? currentThread : null;
     session.conversationMode = mode;
     session.threadId = predicted?.threadId || thread?.threadId || null;
-    session.threadState = predicted?.lifecycleState || thread?.state || null;
+    this.#applyThreadSnapshot(
+      session,
+      thread,
+      predicted?.lifecycleState || (mode === 'lifecycle' && !session.threadId ? 'starting' : null)
+    );
     session.lifecycleContinuation = mode === 'lifecycle' && Boolean(session.threadId);
+    this.#applySessionTrigger(session, predicted, { chatKey });
   }
 
   scheduleWake(chatKey, delay = null) {
@@ -692,18 +738,31 @@ export class Orchestrator {
 
     // 把“等待中”会话原地转成运行中；没有等待会话（主动/手动唤醒）才新建
     let session = waitingSessionId ? this.sessions.get(waitingSessionId) : null;
+    let createdSession = false;
     if (session && session.status === 'waiting') {
       this.sessions.current.get(waitingSessionId).status = 'running';
       this.sessions.current.get(waitingSessionId).waitUntil = null;
       this.sessions.current.get(waitingSessionId).trigger = triggerEntries;
       this.sessions.current.get(waitingSessionId).triggerSummary = triggerSummary;
       this.sessions.current.get(waitingSessionId).triggerText = triggerEntries.map((m) => `${m.senderName || m.senderId}: ${String(m.text || '').slice(0, 80)}`).join(' | ').slice(0, 500);
-      this.sessions.update(waitingSessionId);
-      this.emit('session-update', waitingSessionId);
       session = this.sessions.current.get(waitingSessionId);
     } else {
       session = this.sessions.create({ chatKey, trigger: triggerEntries, triggerSummary });
-      this.emit('session-start', { sessionId: session.id, chatKey, triggerSummary });
+      createdSession = true;
+    }
+    this.#applyWaitingConversation(session, tierResult, chatKey);
+    this.#applySessionTrigger(session, tierResult, { manual, proactive, chatKey });
+    this.sessions.update(session.id);
+    if (createdSession) {
+      this.emit('session-start', {
+        sessionId: session.id,
+        chatKey,
+        triggerSummary,
+        triggerKind: session.triggerKind,
+        triggerReason: session.triggerReason
+      });
+    } else {
+      this.emit('session-update', session.id);
     }
     this.activeRuns.set(chatKey, session.id);
     session.leaseId = lease?.id || session.id;
@@ -868,7 +927,8 @@ export class Orchestrator {
       } else {
         this.store.closeConversationThread?.(chatKey, 'mode-changed');
       }
-      session.threadState = 'closed';
+      this.#applyThreadSnapshot(session, null, 'closed');
+      session.threadCloseReason = 'mode-changed';
       return;
     }
     if (mode === 'legacy') return;
@@ -929,7 +989,8 @@ export class Orchestrator {
         rolloverArmedMs: conversation?.rolloverArmedMs
       });
       session.threadId = result.thread?.threadId || session.threadId || null;
-      session.threadState = result.thread?.state || (closeReason ? 'closed' : null);
+      this.#applyThreadSnapshot(session, result.thread, closeReason ? 'closed' : null);
+      if (closeReason) session.threadCloseReason = closeReason;
       session.threadTranscriptChars = result.transcriptChars;
       // #region debug-point A-C-E:lifecycle-context-committed
       if (chatKey === 'group:1044877051' && !process.env.NODE_TEST_CONTEXT) (() => { try { const body = JSON.stringify({ sessionId: 'group-context-overflow', runId: process.env.QQ_CONTEXT_DEBUG_RUN || 'post-fix', hypothesisId: 'A,C,E', location: 'src/orchestrator.js:#commitConversationThread', msg: '[DEBUG] Lifecycle context committed', data: { sessionId: session.id, threadId: result.thread?.threadId || null, threadState: result.thread?.state || null, disposition: result.thread?.disposition || null, deltaMessageCount: runResult?.providerTranscriptDelta?.length || 0, deltaChars: JSON.stringify(runResult?.providerTranscriptDelta || []).length, transcriptChars: result.transcriptChars, maxTranscriptChars: Number(conversation?.maxTranscriptChars) || 0, promptTokensLastCall: session.callUsage?.at(-1)?.promptTokens || 0, cumulativeRunTokens: session.usage.totalTokens, forceRollover: runResult?.forceThreadRollover || '' }, ts: Date.now() }); const req = process.getBuiltinModule('node:http').request(process.env.QQ_CONTEXT_DEBUG_URL || 'http://192.168.31.10:7781/event', { method: 'POST', signal: AbortSignal.timeout(500), headers: { 'content-type': 'application/json' } }, (res) => res.resume()); req.on('error', () => {}); req.on('socket', (socket) => socket.unref()); req.end(body); } catch {} })();
