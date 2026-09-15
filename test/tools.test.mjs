@@ -127,6 +127,26 @@ test('malformed tool JSON returns actionable correction guidance without executi
     }
   }], context().ctx, 'send_message', '{"messages": hello}');
   assert.equal(result.isError, true);
+  assert.equal(result.errorCode, 'INVALID_TOOL_ARGUMENTS');
+  assert.equal(result.reportIncident, false);
   assert.match(result.content, /字符串值必须放在双引号内/);
   assert.equal(executed, false);
+});
+
+test('finish conservatively repairs unescaped quotes inside string values', async () => {
+  const f = context();
+  const raw = `{"summary":"等待对方解释 uw","topic":"uw 是什么","openQuestions":["长路口中的"uw"指哪款游戏（未确认）"],"threadDisposition":"listening"}`;
+  const result = await executeTool(
+    buildToolDefs(),
+    f.ctx,
+    'finish',
+    raw
+  );
+
+  assert.equal(result.isError, undefined);
+  assert.equal(result.argumentsRepaired, true);
+  assert.equal(result.parsedArgs.openQuestions[0], '长路口中的"uw"指哪款游戏（未确认）');
+  assert.equal(f.ctx.session.finishReason, '等待对方解释 uw');
+  assert.equal(f.ctx.session.handoffDraft.openQuestions[0], '长路口中的"uw"指哪款游戏（未确认）');
+  assert.equal(f.ctx.session.threadDisposition, 'listening');
 });

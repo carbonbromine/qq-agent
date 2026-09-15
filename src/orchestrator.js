@@ -1407,6 +1407,7 @@ export class Orchestrator {
         if (
           result.isError
           && result.incidentCaptured !== true
+          && result.reportIncident !== false
         ) {
           this.getIncidentPilot()?.capture(new Error(String(result.content || '工具执行失败')), {
             source: `tool:${name}`,
@@ -1429,7 +1430,16 @@ export class Orchestrator {
           contentStr = String(result.content);
         }
         toolResults.push({ role: 'tool', tool_call_id: call.id, name, content: contentStr, isError: !!result.isError });
-        session.messages.push({ toolCall: { name, args: safeParse(argsRaw), result: contentStr.slice(0, 2000), isError: !!result.isError } });
+        session.messages.push({
+          toolCall: {
+            name,
+            args: result.parsedArgs ?? safeParse(argsRaw),
+            result: contentStr.slice(0, 2000),
+            isError: !!result.isError,
+            ...(result.errorCode ? { errorCode: result.errorCode } : {}),
+            ...(result.argumentsRepaired ? { argumentsRepaired: true } : {})
+          }
+        });
         if (images.length) {
           imageUserMessages.push({
             role: 'user',

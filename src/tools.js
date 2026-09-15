@@ -45,6 +45,71 @@ function err(message, metadata = {}) {
   return { content: `错误：${message}`, isError: true, ...metadata };
 }
 
+const REPAIRABLE_ARGUMENT_TOOLS = new Set(['finish']);
+
+function repairUnescapedStringQuotes(value) {
+  const text = String(value ?? '');
+  let output = '';
+  let inString = false;
+  let escaped = false;
+  let changed = false;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (!inString) {
+      output += char;
+      if (char === '"') inString = true;
+      continue;
+    }
+    if (escaped) {
+      output += char;
+      escaped = false;
+      continue;
+    }
+    if (char === '\\') {
+      output += char;
+      escaped = true;
+      continue;
+    }
+    if (char !== '"') {
+      output += char;
+      continue;
+    }
+
+    let nextIndex = index + 1;
+    while (nextIndex < text.length && /\s/.test(text[nextIndex])) nextIndex += 1;
+    const next = text[nextIndex];
+    if (next === undefined || [',', ':', '}', ']'].includes(next)) {
+      output += char;
+      inString = false;
+    } else {
+      output += '\\"';
+      changed = true;
+    }
+  }
+
+  return changed && !inString ? output : null;
+}
+
+function parseToolArguments(name, raw) {
+  if (typeof raw !== 'string') return { args: raw, repaired: false };
+  try {
+    return { args: JSON.parse(raw), repaired: false };
+  } catch (error) {
+    if (REPAIRABLE_ARGUMENT_TOOLS.has(name)) {
+      const repaired = repairUnescapedStringQuotes(raw);
+      if (repaired) {
+        try {
+          return { args: JSON.parse(repaired), repaired: true };
+        } catch {
+          // Ambiguous malformed arguments must still go back to the model.
+        }
+      }
+    }
+    return { error };
+  }
+}
+
 // 找不到消息 id 时，把当前会话真实可见的 id 告诉模型，避免它继续瞎猜。
 function midHint(ctx) {
   const mids = ctx.store.recent(ctx.chatKey, { limit: 60 })
@@ -786,27 +851,35 @@ export function toOpenAiTools(defs) {
 export async function executeTool(defs, ctx, name, argsJson) {
   const def = defs.find((d) => d.name === name);
   if (!def) return { content: `错误：未知工具 ${name}`, isError: true };
-  let args = {};
   const raw = argsJson ?? '{}';
-  try {
-    args = typeof raw === 'string' ? JSON.parse(raw) : raw;
-  } catch {
+  const parsed = parseToolArguments(name, raw);
+  if (parsed.error) {
     return {
       content: `错误：工具 ${name} 的参数不是合法 JSON：${String(raw).slice(0, 200)}`
         + '。请重新调用：字符串值必须放在双引号内，字符串里的双引号必须转义；不要重复已经成功的外部操作。',
-      isError: true
+      isError: true,
+      errorCode: 'INVALID_TOOL_ARGUMENTS',
+      reportIncident: false
     };
   }
+  const args = parsed.args ?? {};
   try {
     ctx.signal?.throwIfAborted();
     const task = def.execute(ctx, args ?? {});
-    if (!ctx.signal) return await task;
-    return await new Promise((resolve, reject) => {
-      const abort = () => reject(ctx.signal.reason || new Error('Run cancelled'));
-      ctx.signal.addEventListener('abort', abort, { once: true });
-      if (ctx.signal.aborted) abort();
-      Promise.resolve(task).then(resolve, reject).finally(() => ctx.signal.removeEventListener('abort', abort));
-    });
+    const result = !ctx.signal
+      ? await task
+      : await new Promise((resolve, reject) => {
+          const abort = () => reject(ctx.signal.reason || new Error('Run cancelled'));
+          ctx.signal.addEventListener('abort', abort, { once: true });
+          if (ctx.signal.aborted) abort();
+          Promise.resolve(task).then(resolve, reject)
+            .finally(() => ctx.signal.removeEventListener('abort', abort));
+        });
+    return {
+      ...(result || {}),
+      parsedArgs: args,
+      ...(parsed.repaired ? { argumentsRepaired: true } : {})
+    };
   } catch (error) {
     return { content: `错误：${error?.message ?? error}`, isError: true };
   }

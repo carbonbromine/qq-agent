@@ -155,6 +155,50 @@ describe('Orchestrator', () => {
     assert.equal(session.usage.totalTokens, 50);
   });
 
+  it('does not escalate model-correctable malformed tool arguments to incidents', async (t) => {
+    const { runner, append } = fixture(t);
+    const incidents = [];
+    runner.getIncidentPilot = () => ({
+      capture: (...args) => incidents.push(args)
+    });
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls += 1;
+      if (calls === 1) {
+        return Response.json({
+          choices: [{
+            message: {
+              tool_calls: [{
+                id: 'bad-json',
+                type: 'function',
+                function: {
+                  name: 'send_message',
+                  arguments: '{"messages": hello}'
+                }
+              }]
+            }
+          }],
+          usage: { prompt_tokens: 50, total_tokens: 60 }
+        });
+      }
+      return Response.json({
+        choices: [{ message: { content: 'done' } }],
+        usage: { prompt_tokens: 70, total_tokens: 80 }
+      });
+    };
+
+    append(1, '测试格式纠正');
+    await runner.wake('group:1');
+
+    assert.equal(calls, 2);
+    assert.equal(incidents.length, 0);
+    const session = runner.sessions.get(runner.sessions.listSummaries(1)[0].id);
+    const toolCall = session.messages.find((message) =>
+      message.toolCall?.name === 'send_message');
+    assert.equal(toolCall.toolCall.isError, true);
+    assert.equal(toolCall.toolCall.errorCode, 'INVALID_TOOL_ARGUMENTS');
+  });
+
   it('does not start a model call in observe mode or in an unapproved chat', async (t) => {
     const { cfg, runner, append } = fixture(t);
     cfg.runtime.mode = 'observe';
