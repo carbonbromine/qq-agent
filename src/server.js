@@ -1,5 +1,6 @@
 // Linux 服务入口：node src/server.js
 import { createApp } from './app.js';
+import { installManualFriendReviewRoute } from './manual-friend-review-route.js';
 
 let app = null;
 process.on('unhandledRejection', (error) => {
@@ -23,6 +24,7 @@ process.on('uncaughtException', (error) => {
 });
 
 app = createApp();
+installManualFriendReviewRoute(app);
 app.start().catch((error) => {
   console.error('[启动失败]', error);
   process.exit(1);
