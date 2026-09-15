@@ -42,3 +42,90 @@ refreshStatus = async function refreshStatus() {
     renderBanner();
   } catch (e) { /* 忽略瞬时错误 */ }
 };
+
+// 生命周期线程可能在某次模型 Session 已经结束之后，才由恢复循环因为空闲/硬上限
+// 真正关闭。旧 Session 因此不一定有 threadCloseReason；会话详情仍保留了当时的
+// idleDeadline / hardDeadline / resumeArmedUntil，可据此恢复一个可解释的结束原因。
+const LIFECYCLE_CLOSE_REASON_LABELS = Object.freeze({
+  'model-close': '模型主动结束生命周期',
+  'mode-changed': '会话模式发生变化',
+  'silent-idle': '监听状态空闲超时',
+  'active-idle': '活跃状态空闲超时',
+  'hard-lifetime': '达到生命周期硬上限，进入待续接窗口',
+  'hard-lifetime-silent': '达到生命周期硬上限',
+  'rollover-expired': '硬上限后的待续接窗口到期',
+  'context-budget': '上下文预算达到上限，进入待续接窗口',
+  expired: '续接窗口到期',
+  closed: '生命周期已关闭'
+});
+
+function lifecycleEndReasonMeta(s) {
+  if (s?.conversationMode !== 'lifecycle') return null;
+  const aggregate = lifecycleAggregate(s);
+  const lifecycle = aggregate?.lifecycle || {};
+  const lifecycleState = lifecycle.state || lifecycleStateOf(s);
+  if (lifecycleState !== 'closed') return null;
+
+  const explicit = String(lifecycle.closeReason || s.threadCloseReason || '').trim();
+  if (explicit) {
+    return {
+      text: LIFECYCLE_CLOSE_REASON_LABELS[explicit] || explicit,
+      detail: `系统记录：${explicit}`
+    };
+  }
+
+  const now = Date.now();
+  const idleDeadline = Number(lifecycle.idleDeadline || s.threadIdleDeadline) || 0;
+  const hardDeadline = Number(lifecycle.hardDeadline || s.threadHardDeadline) || 0;
+  const resumeArmedUntil = Number(lifecycle.resumeArmedUntil || s.threadResumeArmedUntil) || 0;
+  const lastState = String(s.threadState || '');
+
+  // 生命周期曾处于活跃态且硬上限后的续接窗口也已经过去：最终结束点是 rollover expiry。
+  if (lastState === 'active' && hardDeadline > 0 && hardDeadline <= now
+      && resumeArmedUntil > 0 && resumeArmedUntil <= now
+      && (!idleDeadline || hardDeadline <= idleDeadline)) {
+    return {
+      text: '硬上限后的待续接窗口到期',
+      detail: '根据历史截止时间推断'
+    };
+  }
+
+  if (idleDeadline > 0 && idleDeadline <= now
+      && (!hardDeadline || idleDeadline < hardDeadline)) {
+    return {
+      text: lastState === 'listening' ? '监听状态空闲超时' : '活跃状态空闲超时',
+      detail: '根据历史截止时间推断'
+    };
+  }
+
+  if (hardDeadline > 0 && hardDeadline <= now) {
+    return {
+      text: '达到生命周期硬上限',
+      detail: '根据历史截止时间推断'
+    };
+  }
+
+  if (resumeArmedUntil > 0 && resumeArmedUntil <= now) {
+    return {
+      text: '待续接窗口到期',
+      detail: '根据历史截止时间推断'
+    };
+  }
+
+  return { text: '生命周期已关闭', detail: '未记录具体关闭原因' };
+}
+
+// 不复制 app.js 的大段渲染逻辑，只在原生命周期摘要尾部追加“结束原因”。
+const renderLifecycleOverviewBase = renderLifecycleOverview;
+renderLifecycleOverview = function renderLifecycleOverviewWithEndReason(s) {
+  const html = renderLifecycleOverviewBase(s);
+  const reason = lifecycleEndReasonMeta(s);
+  if (!html || !reason) return html;
+  const item = `
+      <div class="lifecycle-end-reason">
+        <span>结束原因</span>
+        <strong>${esc(reason.text)}</strong>
+        <small>${esc(reason.detail)}</small>
+      </div>`;
+  return html.replace(/<\/section>\s*$/, `${item}\n    </section>`);
+};
