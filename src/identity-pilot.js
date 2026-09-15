@@ -281,6 +281,7 @@ export class IdentityPilotManager extends CoreIdentityPilotManager {
       sessions: wrapSessions(options.sessions, takeAudit)
     });
     this.manualFriendReviewComplete = originalComplete;
+    this.manualFriendReviewSessions = options.sessions || null;
   }
 
   async manualFriendReview({
@@ -393,7 +394,8 @@ export class IdentityPilotManager extends CoreIdentityPilotManager {
       { role: 'user', content: userPrompt }
     ];
     const tools = [FRIEND_REVIEW_TOOL];
-    const reviewSession = this.sessions?.create({
+    const reviewSessions = this.manualFriendReviewSessions;
+    const reviewSession = reviewSessions?.create({
       chatKey: sourceChatKey,
       trigger: [],
       triggerSummary: `手动好友评估：${person?.primaryName || targetUin}`
@@ -420,7 +422,7 @@ export class IdentityPilotManager extends CoreIdentityPilotManager {
       reviewSession.inputPayloadChars = JSON.stringify({ messages, tools }).length;
       reviewSession.triggerKind = 'manual';
       reviewSession.triggerReason = '管理员手动好友评估';
-      this.sessions.update(reviewSession.id);
+      reviewSessions.update(reviewSession.id);
       this.emit('session-start', {
         sessionId: reviewSession.id,
         chatKey: sourceChatKey,
@@ -461,7 +463,7 @@ export class IdentityPilotManager extends CoreIdentityPilotManager {
             : {}),
           raw: response.raw ?? null
         });
-        this.sessions.update(reviewSession.id);
+        reviewSessions.update(reviewSession.id);
       }
 
       const desiredStatus = review.qualified ? 'proposed' : 'skipped';
@@ -515,7 +517,7 @@ export class IdentityPilotManager extends CoreIdentityPilotManager {
       }
 
       if (reviewSession) {
-        this.sessions.finish(reviewSession.id, 'done');
+        reviewSessions.finish(reviewSession.id, 'done');
         this.emit('session-end', {
           sessionId: reviewSession.id,
           chatKey: sourceChatKey,
@@ -553,7 +555,7 @@ export class IdentityPilotManager extends CoreIdentityPilotManager {
       } catch { /* record may already be closed */ }
       if (reviewSession) {
         reviewSession.error = String(error?.message ?? error);
-        this.sessions.finish(reviewSession.id, 'error');
+        reviewSessions.finish(reviewSession.id, 'error');
         this.emit('session-end', {
           sessionId: reviewSession.id,
           chatKey: sourceChatKey,
