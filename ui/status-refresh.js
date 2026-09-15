@@ -129,3 +129,128 @@ renderLifecycleOverview = function renderLifecycleOverviewWithEndReason(s) {
       </div>`;
   return html.replace(/<\/section>\s*$/, `${item}\n    </section>`);
 };
+
+function installManualFriendReviewButton() {
+  const refresh = $('#friend-feature-refresh');
+  if (!refresh || $('#friend-manual-review')) return;
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'btn btn-small';
+  button.id = 'friend-manual-review';
+  button.textContent = '手动触发评分';
+  button.title = '忽略自动触发条件，直接对指定 QQ 进行好友评分';
+  button.disabled = state.config?.identityPilot?.friendProposal?.enabled !== true;
+  refresh.parentNode.insertBefore(button, refresh);
+  button.addEventListener('click', () => {
+    openManualFriendReviewDialog().catch((error) => alert(`手动好友评分失败：${error.message}`));
+  });
+}
+
+async function openManualFriendReviewDialog() {
+  const data = await api('/api/identity-pilot/people?limit=500');
+  const people = Array.isArray(data.people) ? data.people : [];
+  const options = people.map((person) => {
+    const name = person.primaryName || person.userId;
+    const suffix = person.isFriend ? ' · 已是好友' : '';
+    return `<option value="${esc(person.userId)}" data-chat="${esc(person.sourceChatKey || '')}">${esc(name)} · ${esc(person.userId)}${suffix}</option>`;
+  }).join('');
+
+  const overlay = modelModalShell({
+    head: '手动触发好友评分',
+    body: `
+      <div class="hint" style="margin-bottom:12px">
+        手动触发不检查概率、最低消息数、活跃天数、直接互动次数、抽签冷却或每日评估额度。
+        如果对方已经是好友，仍会完整评分并生成 Session 审计，但不会生成或发送好友申请。
+      </div>
+      <div class="field">
+        <label>从身份库选择（可选）</label>
+        <select id="manual-friend-person">
+          <option value="">手动输入 QQ 号</option>
+          ${options}
+        </select>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label>QQ 号</label>
+          <input type="text" id="manual-friend-uin" inputmode="numeric" placeholder="123456789" />
+        </div>
+        <div class="field">
+          <label>来源会话（可选）</label>
+          <input type="text" id="manual-friend-chat" placeholder="group:群号 或 private:QQ号" />
+        </div>
+      </div>
+      <div class="hint">来源会话留空时优先使用身份库最近来源；仍没有来源时按 private:&lt;QQ号&gt; 评分。</div>
+      <div id="manual-friend-result" class="control-result muted" style="margin-top:12px" role="status"></div>`,
+    foot: '<button type="button" class="btn" id="manual-friend-cancel">关闭</button>'
+      + '<button type="button" class="btn btn-primary" id="manual-friend-run">开始评分</button>'
+  });
+
+  const select = overlay.querySelector('#manual-friend-person');
+  const uinInput = overlay.querySelector('#manual-friend-uin');
+  const chatInput = overlay.querySelector('#manual-friend-chat');
+  const result = overlay.querySelector('#manual-friend-result');
+  const runButton = overlay.querySelector('#manual-friend-run');
+
+  overlay.querySelector('#manual-friend-cancel').addEventListener('click', () => closeModelModal(overlay));
+  select.addEventListener('change', () => {
+    const option = select.selectedOptions?.[0];
+    if (!option?.value) return;
+    uinInput.value = option.value;
+    chatInput.value = option.dataset.chat || '';
+  });
+
+  runButton.addEventListener('click', async () => {
+    const userId = uinInput.value.trim();
+    const chatKey = chatInput.value.trim();
+    if (!/^\d{1,15}$/.test(userId) || Number(userId) <= 0) {
+      result.textContent = 'QQ 号必须是正整数。';
+      result.className = 'control-result error';
+      return;
+    }
+    if (chatKey && !/^(group|private):\d+$/.test(chatKey)) {
+      result.textContent = '来源会话格式必须为 group:<群号> 或 private:<QQ号>。';
+      result.className = 'control-result error';
+      return;
+    }
+
+    runButton.disabled = true;
+    result.textContent = '正在读取聊天证据并调用模型评分…';
+    result.className = 'control-result muted';
+    try {
+      const response = await api('/api/identity-pilot/friend-review/manual', {
+        method: 'POST',
+        body: JSON.stringify({ userId, chatKey })
+      });
+      const review = response.review || {};
+      const ratings = review.ratings || {};
+      result.className = 'control-result success';
+      result.innerHTML = `
+        <strong>${esc(response.note || '评分完成')}</strong><br>
+        总分：${esc(review.score ?? '-')} / 100 · 模型决定：${esc(review.decision || '-')}<br>
+        质量 ${esc(ratings.quality ?? '-')} / 4 · 兴趣 ${esc(ratings.interest ?? '-')} / 4 ·
+        互惠 ${esc(ratings.reciprocity ?? '-')} / 4 · 稳定 ${esc(ratings.stability ?? '-')} / 4<br>
+        ${response.alreadyFriend
+          ? '对象当前已经是好友：仅评分，不生成/发送好友申请。'
+          : response.proposal
+            ? '已生成好友候选；仍需管理员批准后才会发送好友请求。'
+            : '未生成新的好友候选。'}
+        ${response.friendSnapshotFresh === false
+          ? `<br><span class="muted">注意：好友列表刷新失败，本次“是否已是好友”使用本地快照：${esc(response.friendSnapshotError || '')}</span>`
+          : ''}`;
+      await loadFriendFeaturePage();
+    } catch (error) {
+      result.textContent = `评分失败：${error.message}`;
+      result.className = 'control-result error';
+    } finally {
+      runButton.disabled = false;
+    }
+  });
+}
+
+// 好友页原渲染完成后补一个手动入口，不改动 app.js 的大块页面实现。
+const loadFriendFeaturePageBase = loadFriendFeaturePage;
+loadFriendFeaturePage = async function loadFriendFeaturePageWithManualReview(...args) {
+  const value = await loadFriendFeaturePageBase(...args);
+  installManualFriendReviewButton();
+  return value;
+};
