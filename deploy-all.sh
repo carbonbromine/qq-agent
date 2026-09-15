@@ -19,6 +19,7 @@ SERVICE_SET=false
 IMAGE="${SNOWLUMA_IMAGE:-motricseven7/snowluma:v1.14.15}"
 IMAGE_SET=false
 ASSUME_YES=false
+CHECK_ONLY=false
 ROTATE_CREDENTIALS=false
 INSTALL_DOCKER=true
 AGENT_TOKEN=""
@@ -64,11 +65,14 @@ Options:
   --skip-model-config         Leave model settings for the management console
   --rotate-credentials        Replace stored credentials during an update
   --no-install-docker         Fail instead of installing Docker when missing
+  --check-only                Inspect ownership and ports without changing anything
   -y, --yes                   Accept defaults; suitable for non-interactive use
   -h, --help                  Show this help
 
 The installer never asks for a LAN IP. Services bind locally and the script
 detects addresses to print after deployment. OneBot ports bind to 127.0.0.1.
+Existing installations not owned by this installer are never adopted.
+Use deploy.sh with the existing data directory and endpoints to update Agent only.
 EOF
 }
 
@@ -100,6 +104,7 @@ while (($#)); do
     --skip-model-config) SKIP_MODEL_CONFIG=true; shift ;;
     --rotate-credentials) ROTATE_CREDENTIALS=true; shift ;;
     --no-install-docker) INSTALL_DOCKER=false; shift ;;
+    --check-only) CHECK_ONLY=true; ASSUME_YES=true; shift ;;
     -y|--yes) ASSUME_YES=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) printf 'Unknown option: %s\n\n' "$1" >&2; usage >&2; exit 2 ;;
@@ -242,6 +247,134 @@ onebot_ready() {
     | grep -Eq '"retcode"[[:space:]]*:[[:space:]]*0'
 }
 
+refuse_existing() {
+  printf 'Existing or incomplete installation detected: %s\n' "$1" >&2
+  die 'No deployment changes made. Use deploy.sh for the existing Agent; preserve its data directory, bind address and OneBot settings. Automatic takeover is not supported.'
+}
+
+check_local_ownership() {
+  local file directory contents
+  if [[ -e "$ENV_FILE" ]]; then
+    for file in "$ENV_FILE" "$COMPOSE_FILE" "$APP_DIR/.deployment.json" \
+      "$APP_DIR/.deployment-node" "$AGENT_DATA_DIR/config.json"; do
+      [[ -f "$file" && -r "$file" && ! -L "$file" ]] \
+        || refuse_existing "incomplete managed stack ($file)"
+    done
+    EXISTING_STACK=true
+    IFS= read -r PREFLIGHT_NODE <"$APP_DIR/.deployment-node" || true
+    [[ -n "$PREFLIGHT_NODE" && -x "$PREFLIGHT_NODE" ]] \
+      || refuse_existing 'the recorded Node runtime is unavailable'
+  else
+    for file in "$APP_DIR/.deployment.json" "$APP_DIR/.deployment-node" \
+      "$APP_DIR/config.json" "$ACCESS_FILE"; do
+      [[ ! -e "$file" && ! -L "$file" ]] \
+        || refuse_existing "$file exists without managed stack metadata"
+    done
+    for directory in "$AGENT_DATA_DIR" "$APP_DIR/data" "$SNOWLUMA_DIR"; do
+      [[ ! -L "$directory" ]] || refuse_existing "unmanaged data symlink $directory"
+      [[ -e "$directory" ]] || continue
+      [[ -d "$directory" && -r "$directory" && -x "$directory" ]] \
+        || refuse_existing "cannot inspect $directory"
+      contents="$(find "$directory" -mindepth 1 -maxdepth 1 -print -quit)" \
+        || refuse_existing "cannot inspect $directory"
+      [[ -z "$contents" ]] || refuse_existing "$directory contains data without managed stack metadata"
+    done
+  fi
+}
+
+check_host_ownership() {
+  local load_state working_dir inventory id name image own_id="" docker_ports=""
+  local listeners port agent_running=false old_agent_port=""
+  local docker_command=()
+  command -v systemctl >/dev/null || die 'systemctl is required'
+  systemctl --user show-environment >/dev/null \
+    || die 'The systemd user manager is unavailable; no deployment changes made'
+  if ! load_state="$(systemctl --user show "$SERVICE.service" --property=LoadState --value)"; then
+    [[ "$load_state" == not-found ]] \
+      || die 'Cannot inspect the selected systemd service; no deployment changes made'
+  fi
+  case "$load_state" in
+    not-found) ;;
+    loaded)
+      [[ "$EXISTING_STACK" == true ]] || refuse_existing "$SERVICE.service already exists"
+      working_dir="$(systemctl --user show "$SERVICE.service" --property=WorkingDirectory --value)" \
+        || refuse_existing "cannot inspect $SERVICE.service"
+      [[ -n "$working_dir" && "$(realpath -m -- "$working_dir")" == "$APP_DIR" ]] \
+        || refuse_existing "$SERVICE.service belongs to another application directory"
+      if systemctl --user is-active --quiet "$SERVICE.service"; then agent_running=true; fi
+      ;;
+    *) refuse_existing "cannot establish ownership of $SERVICE.service" ;;
+  esac
+
+  if [[ "$EXISTING_STACK" == true ]]; then
+    "$PREFLIGHT_NODE" "$SOURCE_DIR/scripts/check-stack-update.mjs" \
+      --root-dir "$ROOT_DIR" --service "$SERVICE" \
+      || refuse_existing 'managed Agent configuration does not match the saved stack'
+    old_agent_port="$(env_value "$ENV_FILE" AGENT_PORT)"
+  fi
+
+  if command -v docker >/dev/null 2>&1; then
+    if docker_ready; then
+      docker_command=(docker)
+    elif command -v sudo >/dev/null 2>&1; then
+      if sudo -n docker info >/dev/null 2>&1; then
+        docker_command=(sudo -n docker)
+      elif [[ "$CHECK_ONLY" != true && "$ASSUME_YES" != true ]] \
+        && sudo docker info >/dev/null; then
+        docker_command=(sudo docker)
+      fi
+    fi
+    ((${#docker_command[@]} > 0)) \
+      || refuse_existing 'Docker exists but its containers cannot be inspected (check daemon access or sudo)'
+    inventory="$("${docker_command[@]}" ps -a --format '{{.ID}}|{{.Names}}|{{.Image}}')" \
+      || refuse_existing 'Docker container inventory is unavailable'
+    while IFS='|' read -r id name image; do
+      [[ -n "$id" ]] || continue
+      image="$(printf '%s' "$image" | tr '[:upper:]' '[:lower:]')"
+      case "$name:$image" in
+        qq-agent-snowluma:*|*[Ss][Nn][Oo][Ww][Ll][Uu][Mm][Aa]*|*[Nn][Aa][Pp][Cc][Aa][Tt]*|*[Ll][Aa][Gg][Rr][Aa][Nn][Gg][Ee]*)
+          [[ "$EXISTING_STACK" == true && "$name" == qq-agent-snowluma ]] \
+            || refuse_existing "external QQ gateway container $name"
+          own_id="$id"
+          "${docker_command[@]}" inspect "$id" \
+            | "$PREFLIGHT_NODE" "$SOURCE_DIR/scripts/check-stack-update.mjs" \
+                --root-dir "$ROOT_DIR" --service "$SERVICE" --input container \
+            || refuse_existing "container $name does not belong to this stack"
+          ;;
+      esac
+    done <<<"$inventory"
+    if [[ "$EXISTING_STACK" == true ]]; then
+      "${docker_command[@]}" compose --project-directory "$SNOWLUMA_DIR" \
+        --env-file "$ENV_FILE" -f "$COMPOSE_FILE" config --format json \
+        | "$PREFLIGHT_NODE" "$SOURCE_DIR/scripts/check-stack-update.mjs" \
+            --root-dir "$ROOT_DIR" --service "$SERVICE" --input compose \
+        || refuse_existing 'Compose configuration does not match this stack'
+    fi
+    if [[ -n "$own_id" ]]; then
+      docker_ports="$("${docker_command[@]}" inspect --format \
+        '{{if .State.Running}}{{range .NetworkSettings.Ports}}{{range .}}{{.HostPort}}{{"\n"}}{{end}}{{end}}{{end}}' "$own_id")" \
+        || refuse_existing 'cannot inspect managed container ports'
+    fi
+  elif [[ "$EXISTING_STACK" == true ]]; then
+    refuse_existing 'Docker is missing for the existing managed stack'
+  fi
+
+  command -v ss >/dev/null || die 'ss (iproute2) is required for port checks'
+  listeners="$(ss -H -ltn)" || die 'Cannot inspect listening ports; no deployment changes made'
+  listeners="$(printf '%s\n' "$listeners" | awk '{n=split($4,a,":"); print a[n]}')"
+  for port in "${ports[@]}"; do
+    if printf '%s\n' "$listeners" | grep -Fxq "$port"; then
+      if [[ "$port" == "$AGENT_PORT" && "$port" == "$old_agent_port" && "$agent_running" == true ]]; then
+        continue
+      fi
+      if [[ "$port" != "$AGENT_PORT" ]] && printf '%s\n' "$docker_ports" | grep -Fxq "$port"; then
+        continue
+      fi
+      refuse_existing "selected port $port is already in use outside the managed services"
+    fi
+  done
+}
+
 [[ "$(uname -s)" == Linux ]] || die 'Full-stack deployment is supported on Linux only'
 ((EUID != 0)) || die 'Run as the service user, not root; sudo is used only for host dependencies'
 command -v curl >/dev/null 2>&1 || die 'curl is required'
@@ -252,6 +385,10 @@ if [[ "$ASSUME_YES" != true ]]; then
   ROOT_DIR="$(prompt_value 'Deployment root' "$ROOT_DIR")"
 fi
 [[ "$ROOT_DIR" = /* ]] || die '--root-dir must be an absolute path'
+[[ "$ROOT_DIR" != *[[:space:]%\"]* ]] || die 'Deployment root contains unsupported characters'
+command -v realpath >/dev/null || die 'realpath is required'
+ROOT_DIR="$(realpath -m -- "$ROOT_DIR")"
+[[ "$ROOT_DIR" != / ]] || die 'The filesystem root cannot be used as the deployment root'
 
 APP_DIR="$ROOT_DIR/app"
 AGENT_DATA_DIR="$ROOT_DIR/data"
@@ -262,7 +399,8 @@ COMPOSE_FILE="$SNOWLUMA_DIR/docker-compose.yml"
 ACCESS_FILE="$ROOT_DIR/deployment-access.txt"
 
 EXISTING_STACK=false
-[[ -f "$ENV_FILE" ]] && EXISTING_STACK=true
+PREFLIGHT_NODE=""
+check_local_ownership
 if [[ "$EXISTING_STACK" == true ]]; then
   if [[ "$SERVICE_SET" != true ]]; then
     SERVICE="$(env_value "$ENV_FILE" QQ_AGENT_SERVICE)"; SERVICE="${SERVICE:-qq-agent-linux}"
@@ -305,8 +443,17 @@ ports=("$AGENT_PORT" "$SNOWLUMA_PORT" "$NOVNC_PORT" "$ONEBOT_HTTP_PORT" "$ONEBOT
 [[ "$(printf '%s\n' "${ports[@]}" | sort -u | wc -l | tr -d ' ')" == 5 ]] \
   || die 'All five host ports must be different'
 
-if [[ "$SOURCE_DIR" != "$APP_DIR" && "$APP_DIR" == "$SOURCE_DIR/"* ]]; then
-  die 'The application directory cannot be nested inside the source checkout; choose another --root-dir'
+if [[ "$SOURCE_DIR" != "$APP_DIR" && ( "$APP_DIR" == "$SOURCE_DIR/"* || "$SOURCE_DIR" == "$APP_DIR/"* ) ]]; then
+  die 'Source and application directories cannot contain each other; choose another --root-dir'
+fi
+check_host_ownership
+if [[ "$CHECK_ONLY" == true ]]; then
+  if [[ "$EXISTING_STACK" == true ]]; then
+    printf 'Environment: managed stack. Ownership and port checks passed; no deployment changes made.\n'
+  else
+    printf 'Environment: fresh installation. Ownership and port checks passed; no deployment changes made.\n'
+  fi
+  exit 0
 fi
 
 OLD_AGENT_TOKEN="$(env_value "$ENV_FILE" QQ_AGENT_CONSOLE_TOKEN)"
@@ -504,7 +651,7 @@ wait_http "http://127.0.0.1:$SNOWLUMA_PORT/api/ui/public" 90 \
   || die "SnowLuma WebUI did not become ready; run: cd $SNOWLUMA_DIR && docker compose logs"
 wait_http "http://127.0.0.1:$NOVNC_PORT/" 30 \
   || die "noVNC did not become ready; run: cd $SNOWLUMA_DIR && docker compose logs"
-if [[ "$EXISTING_STACK" == true \
+if [[ "$EXISTING_STACK" == true && "$SNOWLUMA_PASSWORD" != "$OLD_SNOWLUMA_PASSWORD" \
   && "$SNOWLUMA_CURRENT_PASSWORD" != "$SNOWLUMA_PASSWORD" ]]; then
   rotate_args=(
     --url "http://127.0.0.1:$SNOWLUMA_PORT"

@@ -61,6 +61,40 @@ One shared OneBot token is written to SnowLuma's global template, every existing
 per-account config and QQ Agent's configuration. Existing installations retain
 their credentials unless `--rotate-credentials` is selected.
 
+### Existing Environment Protection
+
+Before generating credentials, writing files, downloading dependencies, or
+changing services, the installer distinguishes a fresh host from a managed
+stack. A `.env` alone is not proof of ownership: an update requires matching
+Agent deployment records, live configuration, Compose configuration and, when
+present, container project labels, bind mounts and port mappings. Changed live
+credentials or endpoints cause a refusal rather than being reset from `.env`.
+
+Legacy installations, including an existing Agent using an external
+`qq-bridge-snowluma` container, are not automatically adopted. Agent data or
+deployment records without managed-stack metadata cause an immediate exit.
+Partial/failed installations also require operator inspection, not automatic
+credential regeneration. Do not delete data or manufacture metadata to bypass
+these checks. Use `deploy.sh` to update an existing Agent while retaining its
+actual data directory, bind address and OneBot configuration.
+
+```bash
+bash deploy-all.sh --check-only --root-dir /mnt/data/qq-agent
+```
+
+`--check-only` is non-interactive and read-only; it does not request model keys
+or install missing software. It exits nonzero for unowned, inconsistent or
+uninspectable environments. `--yes` and `--rotate-credentials` do not override
+ownership checks. Full-stack preflight requires `realpath`, `ss` (iproute2),
+and access to the systemd user manager. When Docker is installed, its complete
+container inventory (including stopped containers) must be readable; a daemon
+or permission error is not treated as an empty host. Interactive deployment
+can request sudo; check-only/non-interactive runs require Docker access or
+already-authorized non-interactive sudo.
+
+These checks prevent unintended takeover, not failures after deployment has
+started. They do not provide a full-stack transaction or data rollback.
+
 On a fresh interactive install, the script also asks for the model endpoint,
 API key, model name and QQ allowlists. After the infrastructure checks pass,
 open the printed noVNC URL and scan the QQ login QR code, then return to the

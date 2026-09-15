@@ -70,7 +70,22 @@ bash deploy-all.sh --yes --root-dir /mnt/data/qq-agent \
 无人值守模式必须提供模型配置，或者显式增加 `--skip-model-config`，部署后再从控制台
 填写。白名单可以留空，但机器人在配置允许的会话前不会响应。
 
-重新运行脚本会保留 SnowLuma 数据、QQ 登录态和现有凭据。如需同步轮换 Agent、
+仅本脚本管理且配置一致的安装允许重跑。开始写入前会核对 Agent 配置与部署记录、
+systemd 服务目录、SnowLuma 容器的 Compose 归属/数据卷，以及端口占用。发现已有
+非受管安装、残留不完整状态或后台修改过的凭据时，会报错退出，不覆盖配置或重启服务；
+`--yes` 和 `--rotate-credentials` 都不能绕过这一保护。
+
+可先进行只读检查（不创建目录、下载依赖或修改服务）：
+
+```bash
+bash deploy-all.sh --check-only --root-dir /mnt/data/qq-agent
+```
+
+旧 Bridge/SnowLuma 生产环境应使用 `deploy.sh` 更新 Agent，保留实际数据目录、
+监听地址和 OneBot 配置；不要删除已有数据或伪造 `.env` 来绕过检查。全栈检查还需要
+`realpath`、`ss`（iproute2）；已有 Docker 但无法读取容器时会安全退出。
+
+受管安装重跑会保留 SnowLuma 数据、QQ 登录态和现有凭据。如需同步轮换 Agent、
 OneBot、SnowLuma WebUI 与 noVNC 凭据，增加 `--rotate-credentials`；启用
 SnowLuma 2FA 后还需提供 `--snowluma-totp`。完整参数见：
 
