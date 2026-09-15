@@ -45,7 +45,7 @@ test('scheduled updater uses the persistent Git cache and records no-update', (t
   const fakeGit = path.join(binDir, 'git');
   fs.writeFileSync(fakeGit, `#!/bin/sh
 case "$*" in
-  *"remote get-url origin"*) printf '%s\\n' 'https://github.com/carbonbromine/qq-agent.git' ;;
+  *" remote") printf '%s\\n' 'origin' ;;
   *"remote set-url origin"*) ;;
   *" fetch "*) ;;
   *" rev-parse "*) printf '%s\\n' '${revision}' ;;
@@ -134,7 +134,7 @@ printf '%s\\n' "$QQ_AGENT_SOURCE_REVISION" > "$FAKE_DEPLOY_MARKER"
   const fakeGit = path.join(binDir, 'git');
   fs.writeFileSync(fakeGit, `#!/bin/sh
 case "$*" in
-  *"remote get-url origin"*) printf '%s\\n' 'https://github.com/carbonbromine/qq-agent.git' ;;
+  *" remote") printf '%s\\n' 'origin' ;;
   *"remote set-url origin"*) ;;
   *" fetch "*) ;;
   *" rev-parse "*) printf '%s\\n' '${targetRevision}' ;;

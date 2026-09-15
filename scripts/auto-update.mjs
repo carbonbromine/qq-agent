@@ -177,11 +177,11 @@ function ensureRepository(cache, repository) {
   if (!fs.existsSync(cache)) {
     git(['init', '--bare', cache]);
   }
-  const remote = git(
-    ['--git-dir', cache, 'remote', 'get-url', 'origin'],
-    { allowFailure: true }
-  );
-  if (remote.status === 0) {
+  const remotes = git(['--git-dir', cache, 'remote']).stdout
+    .split(/\r?\n/)
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (remotes.includes('origin')) {
     git(['--git-dir', cache, 'remote', 'set-url', 'origin', repository]);
   } else {
     git(['--git-dir', cache, 'remote', 'add', 'origin', repository]);
