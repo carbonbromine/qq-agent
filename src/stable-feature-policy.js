@@ -33,14 +33,31 @@ export function globalAdminUin(config = {}) {
   return normalizedAdminUin(config?.admin?.ownerUin);
 }
 
+function adminAccessState(config = {}, ownerUin = '') {
+  const privateAllow = Array.isArray(config?.allow?.private)
+    ? config.allow.private.map(String)
+    : [];
+  const privateDeny = Array.isArray(config?.deny?.private)
+    ? config.deny.private.map(String)
+    : [];
+  return {
+    allowed: !ownerUin || config.allowAllWhenEmpty === true || privateAllow.includes(ownerUin),
+    denied: Boolean(ownerUin && privateDeny.includes(ownerUin))
+  };
+}
+
 export function stableFeatureFingerprint(config = {}) {
+  const ownerUin = normalizedAdminUin(config?.admin?.ownerUin);
+  const access = adminAccessState(config, ownerUin);
   return JSON.stringify({
     adminPresent: Boolean(
       config?.admin
       && typeof config.admin === 'object'
       && !Array.isArray(config.admin)
     ),
-    adminOwnerUin: normalizedAdminUin(config?.admin?.ownerUin),
+    adminOwnerUin: ownerUin,
+    adminAllowed: access.allowed,
+    adminDenied: access.denied,
     identityOwnerUin: normalizedAdminUin(config?.identityPilot?.friendProposal?.ownerUin),
     incidentOwnerUin: normalizedAdminUin(config?.incidentPilot?.ownerUin),
     updateOwnerUin: normalizedAdminUin(config?.autoUpdate?.ownerUin),
@@ -66,7 +83,9 @@ export function stableFeatureFingerprint(config = {}) {
  *   intentionally empty ownerUin;
  * - old installs without config.admin migrate the first valid historical owner
  *   in this order: Identity/Friends -> Incident -> Auto Update -> Slang;
- * - historical ownerUin fields remain synchronized compatibility mirrors only.
+ * - historical ownerUin fields remain synchronized compatibility mirrors only;
+ * - a configured administrator is automatically allowed to private-message the
+ *   bot and removed from the private deny list, so QQ approval commands work.
  */
 export function applyStableFeaturePolicy(config = {}) {
   if (!config || typeof config !== 'object' || Array.isArray(config)) return config;
@@ -84,6 +103,16 @@ export function applyStableFeaturePolicy(config = {}) {
       .find(Boolean) || '';
   }
   admin.ownerUin = ownerUin;
+
+  if (ownerUin) {
+    const allow = objectSection(config, 'allow');
+    const privateAllow = Array.isArray(allow.private) ? allow.private.map(String) : [];
+    allow.private = [...new Set([...privateAllow, ownerUin])];
+
+    const deny = objectSection(config, 'deny');
+    const privateDeny = Array.isArray(deny.private) ? deny.private.map(String) : [];
+    deny.private = privateDeny.filter((uin) => uin !== ownerUin);
+  }
 
   const identity = objectSection(config, 'identityPilot');
   identity.enabled = true;
