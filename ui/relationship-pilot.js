@@ -7,6 +7,8 @@
   let rendering = false;
   let timer = null;
   let refreshTimer = null;
+  let saveQueue = Promise.resolve();
+  let saveVersion = 0;
 
   async function api(path, options = {}) {
     const response = await fetch(path, {
@@ -129,33 +131,55 @@
     return { config, status, people: peopleResult.people || [] };
   }
 
-  async function save(row) {
-    const { config } = await readState(row);
-    if (config?.identityPilot?.enabled !== true) {
-      fill(row, config, null, []);
-      return;
-    }
-    const state = row.querySelector('#experiment-relationship-state');
-    if (state) state.textContent = '保存中…';
-    const patch = {
-      relationshipPilot: {
-        ...(config.relationshipPilot || {}),
-        enabled: row.querySelector('#cfg-relationship-pilot-enabled')?.checked === true,
-        minNewMessages: Math.round(clamp(row.querySelector('#cfg-relationship-min-new')?.value, 4, 50, 8)),
-        minBatchMessages: Math.round(clamp(row.querySelector('#cfg-relationship-min-batch')?.value, 2, 20, 3)),
-        minBatchAgeMinutes: Math.round(clamp(row.querySelector('#cfg-relationship-batch-age')?.value, 30, 1440, 360)),
-        maxEvaluationsPerDay: Math.round(clamp(row.querySelector('#cfg-relationship-daily-budget')?.value, 1, 200, 20)),
-        frictionHalfLifeHours: clamp(row.querySelector('#cfg-relationship-friction-half-life')?.value, 6, 720, 48)
-      }
+  function draftOf(row) {
+    return {
+      enabled: row.querySelector('#cfg-relationship-pilot-enabled')?.checked === true,
+      minNewMessages: Math.round(clamp(row.querySelector('#cfg-relationship-min-new')?.value, 4, 50, 8)),
+      minBatchMessages: Math.round(clamp(row.querySelector('#cfg-relationship-min-batch')?.value, 2, 20, 3)),
+      minBatchAgeMinutes: Math.round(clamp(row.querySelector('#cfg-relationship-batch-age')?.value, 30, 1440, 360)),
+      maxEvaluationsPerDay: Math.round(clamp(row.querySelector('#cfg-relationship-daily-budget')?.value, 1, 200, 20)),
+      frictionHalfLifeHours: clamp(row.querySelector('#cfg-relationship-friction-half-life')?.value, 6, 720, 48)
     };
+  }
+
+  async function persistDraft(row, draft, version) {
+    const state = row.querySelector('#experiment-relationship-state');
+    if (state && version === saveVersion) state.textContent = '保存中…';
     try {
+      // 这里只读取配置，不调用 readState()/fill()：保存前刷新 UI 会把用户刚修改的
+      // checkbox/value 用旧配置覆盖，导致“勾上 → 保存中 → 自动关闭”。
+      const config = await api('/api/config');
+      if (config?.identityPilot?.enabled !== true) {
+        if (version === saveVersion && document.body.contains(row)) fill(row, config, null, []);
+        return;
+      }
+      const patch = {
+        relationshipPilot: {
+          ...(config.relationshipPilot || {}),
+          ...draft
+        }
+      };
       await api('/api/config', { method: 'POST', body: JSON.stringify(patch) });
       // relationshipPilot 是独立配置；后端 status/observe 钩子会按最新配置即时同步启停。
-      await new Promise((resolve) => setTimeout(resolve, 120));
-      await readState(row);
+      if (version === saveVersion) {
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        await readState(row);
+      }
     } catch (error) {
-      if (state) state.textContent = `保存失败：${error?.message || error}`;
+      if (state && version === saveVersion) state.textContent = `保存失败：${error?.message || error}`;
     }
+  }
+
+  function save(row) {
+    // 必须在任何 await / 配置刷新之前同步快照用户输入。
+    const draft = draftOf(row);
+    const version = ++saveVersion;
+    // 串行保存，避免快速连续修改时较慢的旧请求最后落盘覆盖新请求。
+    saveQueue = saveQueue.then(
+      () => persistDraft(row, draft, version),
+      () => persistDraft(row, draft, version)
+    );
+    return saveQueue;
   }
 
   async function ensureRow() {
