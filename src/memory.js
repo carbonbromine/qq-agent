@@ -1,6 +1,7 @@
 // 统一记忆入口：人物长期记忆全局化；会话 handoff 仍按 chatKey 隔离。
 import { MemoryStore as BaseMemoryStore } from './memory-global.js';
 import { bindGlobalMemoryStore } from './memory-runtime-integration.js';
+import './relationship-runtime-integration.js';
 
 export class MemoryStore extends BaseMemoryStore {
   constructor(...args) {
