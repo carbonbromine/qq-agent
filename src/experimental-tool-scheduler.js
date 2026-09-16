@@ -1,9 +1,9 @@
 // 实验功能：依赖感知工具调度。
 //
-// 目标：
-// - 关闭时由 orchestrator 完全走旧串行路径，本模块不参与执行。
-// - 开启时只并行明确标记为只读、互不依赖的工具；写入/发送仍严格串行。
-// - finish 是 terminal barrier：前置工具失败时不提交 finish；finish 之后不再产生副作用。
+// 这个模块故意不改 Orchestrator 的主循环：宿主仍按原顺序逐个调用 executeTool。
+// 开关开启时，tools.js 包装器只会提前并行启动“连续且明确只读”的调用，
+// 随后仍按原始 tool_call 顺序把结果交还宿主；发送/写入始终由宿主逐个触发。
+// 这样关闭开关时可以完整回退到原来的 tools-core.js 路径。
 
 export const EXPERIMENTAL_READ_ONLY_TOOLS = new Set([
   'get_recent_messages',
@@ -47,6 +47,12 @@ export function experimentalToolEffect(name) {
   return 'ordered';
 }
 
+/**
+ * 只在实验开启时改工具描述，引导模型：
+ * - 独立只读调用可以同轮给出；
+ * - 已经确定动作后，可以把 finish 放在同轮最后。
+ * 关闭时直接返回原数组引用，确保工具 schema 与当前版本无差异。
+ */
 export function annotateExperimentalToolSchemas(tools, cfg = {}) {
   if (!experimentalToolSchedulerEnabled(cfg)) return tools;
   return (Array.isArray(tools) ? tools : []).map((tool) => {
@@ -65,7 +71,7 @@ export function annotateExperimentalToolSchemas(tools, cfg = {}) {
   });
 }
 
-function skippedResult(message, errorCode) {
+export function experimentalSkippedResult(message, errorCode) {
   return {
     content: `错误：${message}`,
     isError: true,
@@ -75,123 +81,155 @@ function skippedResult(message, errorCode) {
   };
 }
 
-async function executeReadWave(calls, { execute, maxParallelReads, signal, canContinue }) {
-  const results = new Array(calls.length);
-  let cursor = 0;
-  const worker = async () => {
-    while (cursor < calls.length) {
-      signal?.throwIfAborted?.();
-      if (canContinue && !canContinue()) throw new Error('Run cancelled');
-      const index = cursor++;
-      results[index] = await execute(calls[index]);
-    }
-  };
-  const count = Math.min(maxParallelReads, calls.length);
-  await Promise.all(Array.from({ length: count }, () => worker()));
-  return results;
+function callSignature(call, index = 0) {
+  const fn = call?.function || {};
+  return `${call?.id || index}:${String(fn.name || '')}:${String(fn.arguments ?? '{}')}`;
+}
+
+export function experimentalBatchKey(calls, round = 0) {
+  return `${Number(round) || 0}|${(Array.isArray(calls) ? calls : [])
+    .map((call, index) => callSignature(call, index)).join('|')}`;
+}
+
+function sameHostCall(call, name, argsRaw) {
+  if (!call) return false;
+  return String(call?.function?.name || '') === String(name || '')
+    && String(call?.function?.arguments ?? '{}') === String(argsRaw ?? '{}');
 }
 
 /**
- * 执行一轮模型产生的 tool_calls。
- *
- * execute(call): 真正执行工具，返回 executeTool 的 result。
- * consume(call, result): 立即把结果写入 Session / provider messages，并执行宿主安全检查。
- * beforeWave(info): 仅用于 UI activity，不参与语义。
- *
- * 返回 { finished, parallelWaves, parallelCalls }。
+ * 一个 assistant tool_calls 批次对应一个协调器。
+ * 宿主仍然按 index=0,1,2... 逐个来取结果；协调器只会把连续 read wave
+ * 提前并行启动，绝不会提前执行发送或写入。
  */
-export async function executeExperimentalToolCalls(calls, {
-  execute,
-  consume,
-  beforeWave = null,
-  signal = null,
-  canContinue = null,
-  maxParallelReads = 4
-} = {}) {
-  if (typeof execute !== 'function' || typeof consume !== 'function') {
-    throw new TypeError('experimental scheduler requires execute and consume callbacks');
+export class ExperimentalToolBatch {
+  constructor(calls, {
+    execute,
+    maxParallelReads = 4,
+    onParallelWave = null
+  } = {}) {
+    if (typeof execute !== 'function') throw new TypeError('execute callback is required');
+    this.calls = Array.isArray(calls) ? calls : [];
+    this.execute = execute;
+    this.maxParallelReads = Math.min(8, Math.max(2, Number(maxParallelReads) || 4));
+    this.onParallelWave = typeof onParallelWave === 'function' ? onParallelWave : null;
+    this.cursor = 0;
+    this.pending = new Map();
+    this.priorFailure = false;
+    this.terminalSeen = false;
+    this.invalid = false;
+    this.parallelWaves = 0;
+    this.parallelCalls = 0;
+    this.finishBarrierBlocks = 0;
+    this.trailingSkipped = 0;
   }
-  const queue = Array.isArray(calls) ? calls : [];
-  const parallelLimit = Math.min(8, Math.max(2, Number(maxParallelReads) || 4));
-  let index = 0;
-  let priorFailure = false;
-  let finished = false;
-  let parallelWaves = 0;
-  let parallelCalls = 0;
 
-  const assertRunnable = () => {
-    signal?.throwIfAborted?.();
-    if (canContinue && !canContinue()) throw new Error('Run cancelled');
-  };
+  #startReadWave(startIndex) {
+    if (this.pending.has(startIndex)) return;
+    const indexes = [];
+    for (let i = startIndex; i < this.calls.length; i += 1) {
+      if (experimentalToolEffect(this.calls[i]?.function?.name) !== 'read') break;
+      indexes.push(i);
+    }
+    if (!indexes.length) return;
 
-  while (index < queue.length) {
-    assertRunnable();
-    const call = queue[index];
-    const name = String(call?.function?.name || '');
-    const effect = experimentalToolEffect(name);
+    const deferred = new Map();
+    for (const index of indexes) {
+      let resolve;
+      let reject;
+      const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+      deferred.set(index, { resolve, reject });
+      this.pending.set(index, promise);
+    }
 
-    if (effect === 'read') {
-      const wave = [];
-      while (index < queue.length) {
-        const candidate = queue[index];
-        if (experimentalToolEffect(candidate?.function?.name) !== 'read') break;
-        wave.push(candidate);
-        index += 1;
-      }
-      beforeWave?.({ type: 'parallel-read', calls: wave });
-      const waveResults = await executeReadWave(wave, {
-        execute,
-        maxParallelReads: parallelLimit,
-        signal,
-        canContinue
+    if (indexes.length > 1) {
+      this.parallelWaves += 1;
+      this.parallelCalls += indexes.length;
+      this.onParallelWave?.({
+        size: indexes.length,
+        names: indexes.map((index) => String(this.calls[index]?.function?.name || ''))
       });
-      if (wave.length > 1) {
-        parallelWaves += 1;
-        parallelCalls += wave.length;
+    }
+
+    let next = 0;
+    const worker = async () => {
+      while (next < indexes.length) {
+        const local = next++;
+        const index = indexes[local];
+        try {
+          deferred.get(index).resolve(await this.execute(this.calls[index], index));
+        } catch (error) {
+          deferred.get(index).reject(error);
+        }
       }
-      // 并发执行、按原始顺序消费，保证 Session/tool result 顺序稳定。
-      for (let i = 0; i < wave.length; i += 1) {
-        await consume(wave[i], waveResults[i]);
-        priorFailure ||= waveResults[i]?.isError === true;
-      }
-      continue;
+    };
+    const workers = Math.min(this.maxParallelReads, indexes.length);
+    // Fire-and-cache：当前宿主调用会 await 自己对应的 promise；后面的结果先缓存。
+    Promise.allSettled(Array.from({ length: workers }, () => worker())).catch(() => {});
+  }
+
+  /**
+   * 宿主每次调用 executeTool 时调用一次。
+   * 返回 { handled, result }。handled=false 表示批次追踪与宿主不一致，调用方应退回原串行执行。
+   */
+  async next(name, argsRaw) {
+    if (this.invalid) return { handled: false, result: null };
+    const index = this.cursor;
+    const call = this.calls[index];
+    if (!sameHostCall(call, name, argsRaw)) {
+      this.invalid = true;
+      return { handled: false, result: null };
+    }
+    this.cursor += 1;
+
+    if (this.terminalSeen) {
+      this.trailingSkipped += 1;
+      return {
+        handled: true,
+        result: experimentalSkippedResult(
+          '未执行：finish 已形成本轮终止边界，之后的工具不能再产生副作用。',
+          'SKIPPED_AFTER_FINISH_BARRIER'
+        )
+      };
+    }
+
+    const effect = experimentalToolEffect(name);
+    if (effect === 'read') {
+      this.#startReadWave(index);
+      const result = await this.pending.get(index);
+      this.priorFailure ||= result?.isError === true;
+      return { handled: true, result };
     }
 
     if (effect === 'terminal') {
-      beforeWave?.({ type: 'terminal', calls: [call] });
-      let result;
-      if (priorFailure) {
-        result = skippedResult(
-          'finish 未执行：本轮前置工具有失败项，需要先让模型看到错误并重新决定。',
-          'FINISH_BARRIER_BLOCKED'
-        );
-      } else {
-        result = await execute(call);
+      this.terminalSeen = true;
+      if (this.priorFailure) {
+        this.finishBarrierBlocks += 1;
+        return {
+          handled: true,
+          result: experimentalSkippedResult(
+            'finish 未执行：本轮前置工具有失败项，需要先查看错误并重新决定。',
+            'FINISH_BARRIER_BLOCKED'
+          )
+        };
       }
-      await consume(call, result);
-      finished = result?.isError !== true;
-      index += 1;
-
-      // finish 无论成功还是被 barrier 阻止，都成为本轮终止边界。
-      // 为剩余 tool_call 生成协议完整的结果，但绝不执行其副作用。
-      while (index < queue.length) {
-        const trailing = queue[index++];
-        await consume(trailing, skippedResult(
-          finished
-            ? '未执行：finish 已结束本轮，终止工具之后不能再执行其他动作。'
-            : '未执行：finish 是本轮终止边界；请在下一轮根据前置错误重新决定。',
-          'SKIPPED_AFTER_FINISH_BARRIER'
-        ));
-      }
-      break;
+      const result = await this.execute(call, index);
+      this.priorFailure ||= result?.isError === true;
+      return { handled: true, result };
     }
 
-    beforeWave?.({ type: 'ordered', calls: [call] });
-    const result = await execute(call);
-    await consume(call, result);
-    priorFailure ||= result?.isError === true;
-    index += 1;
+    // ordered 工具绝不提前执行；只有宿主真正遍历到这里时才执行。
+    const result = await this.execute(call, index);
+    this.priorFailure ||= result?.isError === true;
+    return { handled: true, result };
   }
 
-  return { finished, parallelWaves, parallelCalls };
+  metrics() {
+    return {
+      parallelWaves: this.parallelWaves,
+      parallelCalls: this.parallelCalls,
+      finishBarrierBlocks: this.finishBarrierBlocks,
+      trailingSkipped: this.trailingSkipped
+    };
+  }
 }
