@@ -18,7 +18,7 @@ async function freePort() {
   return port;
 }
 
-test('incident pilot API preserves logs while disabled and versions chat controls', async (t) => {
+test('incident infrastructure stays active and versions chat controls', async (t) => {
   const port = await freePort();
   const cfg = structuredClone(DEFAULT_CONFIG);
   cfg.server = { ...cfg.server, host: '127.0.0.1', port, token: '' };
@@ -29,8 +29,6 @@ test('incident pilot API preserves logs while disabled and versions chat control
   cfg.onebot.httpUrl = 'http://127.0.0.1:1';
   cfg.incidentPilot = {
     ...cfg.incidentPilot,
-    enabled: true,
-    graduated: true,
     ownerUin: '2948771712'
   };
   updateConfig(cfg);
@@ -102,18 +100,22 @@ test('incident pilot API preserves logs while disabled and versions chat control
   });
   assert.equal(deleted.status, 200);
 
-  const disabled = await request('/api/config', {
+  // Old clients may still submit the removed switch. The stable config facade
+  // must canonicalize it back to enabled, and the API must stay operational.
+  const attemptedDisable = await request('/api/config', {
     method: 'POST',
     body: { incidentPilot: { enabled: false } }
   });
-  assert.equal(disabled.status, 200);
-  assert.equal(disabled.body.config.incidentPilot.enabled, false);
-  const disabledList = await request('/api/incidents');
-  assert.equal(disabledList.status, 200);
-  assert.equal(disabledList.body.status.active, false);
-  const disabledControl = await request('/api/chats/group_1/runtime-control', {
+  assert.equal(attemptedDisable.status, 200);
+  assert.equal(attemptedDisable.body.config.incidentPilot.enabled, true);
+
+  const stillActive = await request('/api/incidents');
+  assert.equal(stillActive.status, 200);
+  assert.equal(stillActive.body.status.active, true);
+  const restoredControl = await request('/api/chats/group_1/runtime-control', {
     method: 'PUT',
     body: { mode: 'auto', expectedVersion: 1, backlogAction: 'keep' }
   });
-  assert.equal(disabledControl.status, 409);
+  assert.equal(restoredControl.status, 200);
+  assert.equal(restoredControl.body.control.mode, 'auto');
 });
