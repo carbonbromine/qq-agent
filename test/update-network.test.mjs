@@ -70,6 +70,7 @@ test('non-transient branch/auth errors fail without retry', async () => {
   );
   assert.equal(calls, 1);
   assert.equal(isRetryableUpdateNetworkError(new Error('GnuTLS recv error (-110)')), true);
+  assert.equal(isRetryableUpdateNetworkError(new Error('fatal: the requested URL returned error: 502')), true);
   assert.equal(isRetryableUpdateNetworkError(new Error('Authentication failed')), false);
 });
 
