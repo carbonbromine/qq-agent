@@ -2,6 +2,7 @@ import { IdentityPilotManager } from './identity-pilot.js';
 import {
   inactiveRelationshipPilotStatus,
   RelationshipPilotManager,
+  relationshipPilotConfig,
   relationshipPilotEnabled
 } from './relationship-pilot.js';
 
@@ -59,6 +60,24 @@ function startIfNeeded(manager) {
   const pilot = getPilot(manager, true);
   pilot?.start();
   return pilot;
+}
+
+function adminRelationshipView(pilot, person) {
+  if (!pilot?.relationshipStore || !person?.userId) return null;
+  const settings = relationshipPilotConfig(pilot.config());
+  let state = pilot.relationshipStore.getState(person.userId, {
+    halfLifeHours: settings.frictionHalfLifeHours
+  });
+  // 第一次打开观察面板时，为已有身份做一次 familiarity bootstrap；
+  // 之后页面刷新只读状态，真正的 familiarity 更新由入站消息钩子负责。
+  if (!state) state = pilot.relationshipFor(person.userId);
+  if (!state) return null;
+  return {
+    ...state,
+    shadowMode: true,
+    openFlags: pilot.relationshipStore.openFlags(person.userId),
+    recentEvents: pilot.relationshipStore.recentEvents(person.userId, 12)
+  };
 }
 
 function patch() {
@@ -146,7 +165,10 @@ function patch() {
       stopIfDisabled(this);
       const pilot = startIfNeeded(this);
       if (!pilot || !Array.isArray(people)) return people;
-      return people.map((person) => pilot.augmentPerson(person));
+      return people.map((person) => ({
+        ...person,
+        relationship: adminRelationshipView(pilot, person)
+      }));
     };
   }
 
