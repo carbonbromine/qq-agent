@@ -226,13 +226,35 @@ export class GlobalPersonMemoryStore {
     const old = map.get(uid) || emptyMember(uid, name);
     const finalName = clean(name, 60) || old.name || uid;
     const now = Date.now();
-    const sources = sourceKeys([...old.sourceChatKeys, ...old.impressions.flatMap((x) => x.sourceChatKeys || []), chatKey]);
-    const member = {
-      version: 2, userId: uid, name: finalName, sourceChatKeys: sources,
-      updatedAt: now, lastConsolidatedAt: old.lastConsolidatedAt || 0,
-      impressions: (Array.isArray(contents) ? contents : [contents]).map((x) => clean(x)).filter(Boolean).slice(0, 20)
-        .map((content) => ({ content, createdAt: now, lastObservedAt: now, sourceChatKeys: [...sources] }))
-    };
+    const incoming = (Array.isArray(contents) ? contents : [contents])
+      .map((x) => clean(x)).filter(Boolean).slice(0, 20);
+    const hadSource = old.sourceChatKeys.includes(String(chatKey || '').trim());
+    let member;
+    if (old.impressions.length && !hadSource) {
+      // A globally known person can appear in a new chat before that chat has ever written memory.
+      // Consolidation treats such a person as "new" for the chat. Merge the newly extracted
+      // impressions instead of replacing the person's existing global memory.
+      member = structuredClone(old);
+      member.userId = uid;
+      member.name = finalName;
+      member.updatedAt = now;
+      member.sourceChatKeys = sourceKeys([...member.sourceChatKeys, chatKey]);
+      for (const content of incoming) {
+        mergeEntry(member, {
+          content,
+          createdAt: now,
+          lastObservedAt: now,
+          sourceChatKeys: sourceKeys([chatKey])
+        });
+      }
+    } else {
+      const sources = sourceKeys([...old.sourceChatKeys, ...old.impressions.flatMap((x) => x.sourceChatKeys || []), chatKey]);
+      member = {
+        version: 2, userId: uid, name: finalName, sourceChatKeys: sources,
+        updatedAt: now, lastConsolidatedAt: old.lastConsolidatedAt || 0,
+        impressions: incoming.map((content) => ({ content, createdAt: now, lastObservedAt: now, sourceChatKeys: [...sources] }))
+      };
+    }
     for (const [key, candidate] of [...map.entries()]) {
       if (key === uid || candidate.userId || candidate.name !== finalName) continue;
       member.sourceChatKeys = sourceKeys([...member.sourceChatKeys, ...candidate.sourceChatKeys]);
