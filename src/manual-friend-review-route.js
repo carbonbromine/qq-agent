@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { getConfig } from './config.js';
 
 const MANUAL_FRIEND_REVIEW_PATH = '/api/identity-pilot/friend-review/manual';
+const MANUAL_ARGUMENT_NORMALIZER = Symbol('manualFriendReviewArgumentNormalizer');
 
 function sameSecret(leftValue, rightValue) {
   const left = Buffer.from(String(leftValue ?? ''));
@@ -55,6 +56,84 @@ function json(res, status, value) {
   res.end(JSON.stringify(value));
 }
 
+/**
+ * OpenAI-compatible 网关并不都严格遵循 function.arguments:string：
+ * 有些会直接返回已经解码的对象；另一些模型偶尔会把 JSON 包在代码块中，
+ * 或输出一个 harmless trailing comma。好友评估的下游校验仍要求标准 JSON，
+ * 所以这里只做保守的“转成标准 JSON 字符串”，绝不 eval 任意文本。
+ */
+export function normalizeManualToolArguments(raw) {
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    return JSON.stringify(raw);
+  }
+  if (typeof raw !== 'string') return raw;
+
+  const original = raw.trim();
+  const unfenced = original
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+  const firstBrace = unfenced.indexOf('{');
+  const lastBrace = unfenced.lastIndexOf('}');
+  const extracted = firstBrace >= 0 && lastBrace > firstBrace
+    ? unfenced.slice(firstBrace, lastBrace + 1)
+    : unfenced;
+  const candidates = [...new Set([original, unfenced, extracted])].filter(Boolean);
+
+  for (const candidate of candidates) {
+    try {
+      const value = JSON.parse(candidate);
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        return JSON.stringify(value);
+      }
+    } catch { /* try the next conservative repair */ }
+
+    const withoutTrailingComma = candidate.replace(/,\s*([}\]])/g, '$1');
+    if (withoutTrailingComma === candidate) continue;
+    try {
+      const value = JSON.parse(withoutTrailingComma);
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        return JSON.stringify(value);
+      }
+    } catch { /* leave the original value for the strict downstream validator */ }
+  }
+  return raw;
+}
+
+function normalizeManualReviewResponse(response) {
+  const message = response?.message;
+  if (!message || !Array.isArray(message.tool_calls)) return response;
+  return {
+    ...response,
+    message: {
+      ...message,
+      tool_calls: message.tool_calls.map((call) => {
+        if (!call?.function) return call;
+        return {
+          ...call,
+          function: {
+            ...call.function,
+            arguments: normalizeManualToolArguments(call.function.arguments)
+          }
+        };
+      })
+    }
+  };
+}
+
+function ensureManualArgumentNormalizer(manager) {
+  if (!manager || manager[MANUAL_ARGUMENT_NORMALIZER]) return;
+  const complete = manager.manualFriendReviewComplete;
+  if (typeof complete !== 'function') return;
+  manager.manualFriendReviewComplete = async (...args) =>
+    normalizeManualReviewResponse(await complete(...args));
+  Object.defineProperty(manager, MANUAL_ARGUMENT_NORMALIZER, {
+    value: true,
+    enumerable: false,
+    configurable: false
+  });
+}
+
 async function handleManualFriendReview(app, req, res) {
   if (!authorize(req)) {
     json(res, 401, { error: '未授权' });
@@ -65,6 +144,7 @@ async function handleManualFriendReview(app, req, res) {
     json(res, 409, { error: '主动好友候选功能未启用' });
     return;
   }
+  ensureManualArgumentNormalizer(manager);
   try {
     const body = await readJsonBody(req);
     const result = await manager.manualFriendReview({
