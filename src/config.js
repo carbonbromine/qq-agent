@@ -1,9 +1,10 @@
-// Stable configuration facade.
+// Production configuration adapter.
 //
-// The historical implementation remains in config-legacy.js so all existing
-// migrations, normalization and persistence code keeps working. This facade
-// owns production feature invariants that are no longer user-switchable and
-// the one global administrator QQ used by every subsystem.
+// The historical normalizer/persistence implementation remains in
+// config-legacy.js for data-format compatibility. This module owns the current
+// production invariants: promoted capabilities are not user-switchable,
+// automated slang research is retired, and admin.ownerUin is the sole
+// administrator configuration source.
 import * as legacy from './config-legacy.js';
 import {
   applyStableFeaturePolicy,
@@ -38,6 +39,9 @@ function normalizedRequestedAdmin(patch, current) {
 }
 
 function mirrorAdminIntoLegacyPatch(patch, ownerUin) {
+  // These mirrors exist only until the remaining runtime modules stop reading
+  // their historical paths. The retired slang worker intentionally has no
+  // mirror at all: its old owner/tuning fields are removed by the policy.
   patch.identityPilot = {
     ...(patch.identityPilot || {}),
     friendProposal: {
@@ -47,10 +51,6 @@ function mirrorAdminIntoLegacyPatch(patch, ownerUin) {
   };
   patch.incidentPilot = {
     ...(patch.incidentPilot || {}),
-    ownerUin
-  };
-  patch.slangPilot = {
-    ...(patch.slangPilot || {}),
     ownerUin
   };
   patch.autoUpdate = {
@@ -94,11 +94,13 @@ export function getConfig() {
   return stabilize(legacy.getConfig(), { persist: true });
 }
 
-/** The only administrator QQ configuration read by production code. */
+/** The only administrator QQ configuration read/written by current code. */
 export function adminOwnerUin(cfg = getConfig()) {
   return globalAdminUin(cfg);
 }
 
+// Compatibility helpers retained because current runtime modules still import
+// the old names. They are constants now, not feature gates.
 export function identityPilotEnabled() {
   return true;
 }
@@ -123,6 +125,7 @@ export function friendRequestDispatchEnabled() {
   return true;
 }
 
+/** Compatibility tombstone: automated slang research cannot be reactivated. */
 export function slangPilotEnabled() {
   return false;
 }
@@ -141,16 +144,15 @@ export function updateConfig(patch) {
     ? rawPatch.autoUpdate.enabled === true
     : current.autoUpdate?.enabled === true;
 
-  // Auto update still has a real notification/approval dependency. Prevent an
-  // impossible state instead of allowing the old validator to poison later,
-  // unrelated config saves.
+  // Auto update has a real notification dependency. Promoted Identity/Incident
+  // infrastructure does not: it remains active with no administrator and only
+  // skips QQ notification/approval edges.
   if (!requestedAdmin.ownerUin && autoUpdateEnabled) {
     throw new Error('自动更新已启用，不能清空全局管理员 QQ');
   }
 
-  // Reuse the mature legacy normalizer without allowing obsolete per-feature
-  // owner switches to become independent configuration sources. All legacy
-  // owner fields receive the global administrator only as compatibility mirrors.
+  // Reuse the mature legacy normalizer without allowing obsolete experimental
+  // gates or per-feature owner fields to become configuration sources again.
   suspendLegacyExperimentalGates(current);
   const compatiblePatch = suspendLegacyExperimentalGates(rawPatch);
   mirrorAdminIntoLegacyPatch(compatiblePatch, requestedAdmin.ownerUin);
@@ -160,8 +162,8 @@ export function updateConfig(patch) {
     const updated = legacy.updateConfig(compatiblePatch);
     return stabilize(updated);
   } finally {
-    // The finally block is essential so an unrelated validation error can never
-    // leave a production capability accidentally gated off in memory.
+    // An unrelated validation error must never leave promoted infrastructure
+    // gated off in the in-memory legacy object.
     applyStableFeaturePolicy(legacy.getConfig());
     legacy.scheduleConfigSave();
   }
