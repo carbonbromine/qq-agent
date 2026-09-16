@@ -111,9 +111,14 @@ function patch() {
   if (typeof originalStatus === 'function') {
     proto.status = function relationshipAwareStatus(...args) {
       const status = originalStatus.apply(this, args);
-      // /api/config 只改 relationshipPilot 时不会触发 identityPilot.reconfigure。
-      // 因此 status 本身承担轻量同步：开启后在人物库 active 时启动；关闭后停止新任务。
-      stopIfDisabled(this);
+      // 实验关闭时严格保持原 status 响应，不增加字段；若之前曾开启，则只做清理。
+      // UI 可以从 /api/config 自身判断 enabled=false，不需要靠 status 注入占位对象。
+      if (!relationshipPilotEnabled(this?.config?.())) {
+        stopIfDisabled(this);
+        return status;
+      }
+      // /api/config 只改 relationshipPilot 时不会触发 identityPilot.reconfigure，
+      // 所以开启状态下由 status 轻量确保试点已启动。
       const pilot = startIfNeeded(this) || getPilot(this, false);
       return {
         ...status,
