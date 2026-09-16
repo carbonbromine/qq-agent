@@ -1,10 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { normalizeUpdateNetworkSettings } from './update-network.js';
 
 const STATE_FILE = 'auto-update.json';
 const REQUEST_FILE = 'auto-update-request.json';
 const ACTIVE_STATES = new Set(['queued', 'checking', 'testing', 'deploying']);
+const REQUEST_MODES = new Set(['manual', 'scheduled', 'probe']);
 
 function cleanText(value, max = 1200) {
   return String(value ?? '')
@@ -63,6 +65,17 @@ export function readAutoUpdateState(dataDir) {
     currentRevision: '',
     targetRevision: '',
     error: '',
+    autoDisabled: false,
+    connectivity: {
+      status: 'unknown',
+      checkedAt: 0,
+      attempts: 0,
+      latencyMs: 0,
+      repository: '',
+      branch: '',
+      revision: '',
+      error: ''
+    },
     notification: {
       pending: false,
       ownerUin: '',
@@ -79,6 +92,10 @@ export function writeAutoUpdateState(dataDir, patch) {
     ...patch,
     version: 1,
     updatedAt: Date.now(),
+    connectivity: {
+      ...(current.connectivity || {}),
+      ...(patch.connectivity || {})
+    },
     notification: {
       ...(current.notification || {}),
       ...(patch.notification || {})
@@ -89,9 +106,10 @@ export function writeAutoUpdateState(dataDir, patch) {
 }
 
 export function writeAutoUpdateRequest(dataDir, mode = 'manual') {
+  const normalizedMode = REQUEST_MODES.has(mode) ? mode : 'scheduled';
   const request = {
     version: 1,
-    mode: mode === 'manual' ? 'manual' : 'scheduled',
+    mode: normalizedMode,
     requestedAt: Date.now()
   };
   writeObject(autoUpdatePaths(dataDir).request, request);
@@ -104,7 +122,7 @@ export function consumeAutoUpdateRequest(dataDir) {
   try { fs.unlinkSync(file); } catch { /* no request */ }
   if (
     !request
-    || !['manual', 'scheduled'].includes(request.mode)
+    || !REQUEST_MODES.has(request.mode)
     || Date.now() - Number(request.requestedAt || 0) > 60 * 60 * 1000
   ) {
     return null;
@@ -186,6 +204,7 @@ export class AutoUpdateManager {
   status() {
     const cfg = this.config();
     const settings = cfg.autoUpdate || {};
+    const network = normalizeUpdateNetworkSettings(settings);
     const state = readAutoUpdateState(this.dataDir);
     const intervalMs = Math.max(1, Number(settings.intervalHours) || 6) * 60 * 60 * 1000;
     const busy = this.serviceActive()
@@ -206,6 +225,7 @@ export class AutoUpdateManager {
       repository: String(settings.repository || ''),
       branch: String(settings.branch || 'main'),
       intervalHours: Number(settings.intervalHours) || 6,
+      ...network,
       nextCheckAt: settings.enabled === true
         ? Math.max(Date.now(), Number(state.lastCheckAt || 0) + intervalMs)
         : 0,
@@ -214,14 +234,27 @@ export class AutoUpdateManager {
     };
   }
 
-  configure({ ownerUin = '', intervalHours = 6 } = {}) {
-    const cfg = this.updateConfig({
-      autoUpdate: {
-        ...(this.config().autoUpdate || {}),
-        ownerUin: String(ownerUin || '').trim(),
-        intervalHours
-      }
-    });
+  configure(options = {}) {
+    const current = this.config();
+    const autoUpdate = current.autoUpdate || {};
+    const next = {
+      ...autoUpdate,
+      ownerUin: String(options.ownerUin ?? autoUpdate.ownerUin ?? '').trim(),
+      intervalHours: options.intervalHours ?? autoUpdate.intervalHours ?? 6
+    };
+    for (const key of [
+      'branch',
+      'networkRetries',
+      'retryBaseMs',
+      'retryMaxMs',
+      'connectivityTimeoutSeconds',
+      'fetchTimeoutSeconds',
+      'forceHttp11',
+      'disableOnFailure'
+    ]) {
+      if (options[key] !== undefined) next[key] = options[key];
+    }
+    const cfg = this.updateConfig({ autoUpdate: next });
     this.emit('auto-update', this.status());
     return cfg.autoUpdate;
   }
@@ -271,28 +304,52 @@ export class AutoUpdateManager {
     if (!this.installed()) {
       throw updateError('自动更新服务尚未安装，请先用 deploy.sh 部署当前版本');
     }
-    const cfg = this.config();
-    const ownerUin = autoUpdateOwner(cfg);
-    if (!/^\d{5,15}$/.test(ownerUin)) {
-      throw updateError('请先配置自动更新告警管理员 QQ', 400);
+    let cfg = this.config();
+    const probeOnly = cfg.autoUpdate?.nextAction === 'probe';
+    if (probeOnly) {
+      cfg = this.updateConfig({
+        autoUpdate: {
+          ...(cfg.autoUpdate || {}),
+          nextAction: ''
+        }
+      });
     }
-    if (
-      cfg.allowAllWhenEmpty !== true
-      && !(cfg.allow?.private || []).map(String).includes(ownerUin)
-    ) {
-      throw updateError('自动更新管理员 QQ 必须同时加入私聊白名单', 400);
+    const ownerUin = autoUpdateOwner(cfg);
+    if (!probeOnly) {
+      if (!/^\d{5,15}$/.test(ownerUin)) {
+        throw updateError('请先配置自动更新告警管理员 QQ', 400);
+      }
+      if (
+        cfg.allowAllWhenEmpty !== true
+        && !(cfg.allow?.private || []).map(String).includes(ownerUin)
+      ) {
+        throw updateError('自动更新管理员 QQ 必须同时加入私聊白名单', 400);
+      }
     }
     const current = this.status();
     if (current.busy) throw updateError('已有更新任务正在运行');
 
-    writeAutoUpdateRequest(this.dataDir, 'manual');
+    const mode = probeOnly ? 'probe' : 'manual';
+    writeAutoUpdateRequest(this.dataDir, mode);
     writeAutoUpdateState(this.dataDir, {
       status: 'queued',
-      mode: 'manual',
-      phase: 'queued',
+      mode,
+      phase: probeOnly ? 'connectivity' : 'queued',
       startedAt: Date.now(),
       completedAt: 0,
-      error: ''
+      error: '',
+      ...(probeOnly ? {
+        connectivity: {
+          status: 'queued',
+          checkedAt: 0,
+          attempts: 0,
+          latencyMs: 0,
+          repository: String(cfg.autoUpdate?.repository || ''),
+          branch: String(cfg.autoUpdate?.branch || 'main'),
+          revision: '',
+          error: ''
+        }
+      } : {})
     });
     const result = this.runSystemctl([
       '--no-block',
@@ -301,18 +358,40 @@ export class AutoUpdateManager {
     ]);
     if (result?.status !== 0) {
       const message = cleanText(result?.stderr || '无法启动自动更新服务');
-      this.updateConfig({
-        autoUpdate: {
-          ...(this.config().autoUpdate || {}),
-          enabled: false
-        }
-      });
+      if (probeOnly) {
+        writeAutoUpdateState(this.dataDir, {
+          status: 'idle',
+          mode: 'probe',
+          phase: 'complete',
+          completedAt: Date.now(),
+          error: '',
+          autoDisabled: false,
+          connectivity: {
+            status: 'failed',
+            checkedAt: Date.now(),
+            attempts: 0,
+            latencyMs: 0,
+            error: message
+          },
+          notification: { pending: false }
+        });
+        throw updateError(message);
+      }
+      const policy = normalizeUpdateNetworkSettings(cfg.autoUpdate || {});
+      if (policy.disableOnFailure) {
+        this.updateConfig({
+          autoUpdate: {
+            ...(this.config().autoUpdate || {}),
+            enabled: false
+          }
+        });
+      }
       writeAutoUpdateState(this.dataDir, {
         status: 'failed',
         phase: 'launch',
         completedAt: Date.now(),
         error: message,
-        autoDisabled: true,
+        autoDisabled: policy.disableOnFailure,
         notification: {
           pending: true,
           ownerUin,
@@ -357,7 +436,13 @@ export class AutoUpdateManager {
 
   async handlePendingFailure() {
     const state = readAutoUpdateState(this.dataDir);
-    if (state.status === 'failed' && this.config().autoUpdate?.enabled === true) {
+    const policy = normalizeUpdateNetworkSettings(this.config().autoUpdate || {});
+    if (
+      state.status === 'failed'
+      && state.autoDisabled === true
+      && policy.disableOnFailure
+      && this.config().autoUpdate?.enabled === true
+    ) {
       this.updateConfig({
         autoUpdate: {
           ...(this.config().autoUpdate || {}),
@@ -384,6 +469,12 @@ export class AutoUpdateManager {
       });
     }
     const mode = state.mode === 'manual' ? '手动更新' : '定时更新';
+    const currentEnabled = this.config().autoUpdate?.enabled === true;
+    const action = state.autoDisabled === true
+      ? '自动更新已停止。'
+      : currentEnabled
+        ? '自动更新保持启用，将在后续检查周期继续重试。'
+        : '自动更新原本处于暂停状态，本次失败未改变开关。';
     const text = [
       '【QQ Agent 更新部署失败】',
       `方式：${mode}`,
@@ -393,7 +484,7 @@ export class AutoUpdateManager {
         : []),
       `结果：${cleanText(state.error || '未知错误', 600)}`,
       '',
-      '自动更新已停止。',
+      action,
       '处理入口：控制台 → 控制 → 更新部署'
     ].join('\n');
     try {
