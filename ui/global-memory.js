@@ -49,7 +49,7 @@
       .gm-person-title strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
       .gm-count { margin-left:auto; font-size:12px; opacity:.7; }
       .gm-sub { margin-top:4px; font-size:12px; opacity:.65; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-      .gm-toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+      .gm-toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:8px; }
       .gm-chip { display:inline-block; padding:2px 7px; margin:2px 4px 2px 0; border-radius:999px; font-size:12px; background:rgba(127,127,127,.12); }
       .gm-memory { margin:10px 0; padding:12px; border:1px solid var(--border-color, rgba(128,128,128,.2)); border-radius:10px; }
       .gm-memory-content { white-space:pre-wrap; line-height:1.55; }
@@ -58,6 +58,7 @@
       .gm-section h3 { margin:0 0 8px; }
       .gm-note { padding:10px 12px; margin:0 0 12px; border-radius:8px; background:rgba(127,127,127,.08); font-size:13px; line-height:1.5; }
       .gm-empty { padding:24px 14px; opacity:.6; }
+      .gm-status { font-size:12px; opacity:.75; }
     `;
     document.head.appendChild(style);
   }
@@ -193,6 +194,28 @@
     });
   }
 
+  function sourceFor(person) {
+    return (person?.sourceChatKeys || []).find((key) => /^(group|private):\d+$/.test(String(key))) || '';
+  }
+
+  async function consolidatePerson(person) {
+    const chatKey = sourceFor(person);
+    const userId = String(person?.userId || '').trim();
+    if (!chatKey || !/^\d{1,15}$/.test(userId)) throw new Error('缺少可用于整理的来源会话或 QQ 号');
+    await api('/api/memory-files/consolidate', {
+      method: 'POST',
+      body: JSON.stringify({ chatKey, userIds: [userId], force: true })
+    });
+  }
+
+  async function deletePerson(person) {
+    const chatKey = sourceFor(person);
+    const userId = String(person?.userId || '').trim();
+    if (!chatKey || !/^\d{1,15}$/.test(userId)) throw new Error('缺少可删除的来源会话或 QQ 号');
+    const path = chatKey.replace(':', '_');
+    await api(`/api/memory-files/${path}/members/${userId}`, { method: 'DELETE' });
+  }
+
   function renderDetail() {
     const box = document.getElementById('global-memory-detail');
     if (!box) return;
@@ -217,11 +240,17 @@
           </div>`;
         }).join('')
       : '<div class="gm-empty">这个人目前没有长期印象</div>';
+    const manageable = /^\d{1,15}$/.test(String(person.userId || '')) && Boolean(sourceFor(person));
 
     box.innerHTML = `
       <div class="detail-header">
         <h2>${esc(person.name || person.userId || '未知人物')}</h2>
         <div class="sub">${person.userId ? `QQ ${esc(person.userId)} · ` : ''}${memories.length} 条全局长期印象</div>
+        <div class="gm-toolbar">
+          <button class="btn btn-small" type="button" id="gm-consolidate" ${manageable ? '' : 'disabled'}>整理人物记忆</button>
+          <button class="btn btn-small btn-danger" type="button" id="gm-delete" ${manageable ? '' : 'disabled'}>删除全部人物记忆</button>
+          <span class="gm-status" id="gm-action-status"></span>
+        </div>
       </div>
       <div class="gm-note">
         人物长期记忆现在按 QQ 全局统一；下面的来源只用于追溯证据，不再限制记忆在哪个群可见。<br>
@@ -229,6 +258,36 @@
       </div>
       <div class="gm-section"><h3>来源会话</h3><div>${sourceHtml}</div></div>
       <div class="gm-section"><h3>长期印象</h3>${memoryHtml}</div>`;
+
+    const status = box.querySelector('#gm-action-status');
+    box.querySelector('#gm-consolidate')?.addEventListener('click', async (event) => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      if (status) status.textContent = '已提交整理任务…';
+      try {
+        await consolidatePerson(person);
+        if (status) status.textContent = '整理中，完成后会自动刷新';
+        setTimeout(() => loadGlobalMemory(true), 2500);
+        setTimeout(() => loadGlobalMemory(true), 7000);
+      } catch (error) {
+        if (status) status.textContent = `整理失败：${error?.message || error}`;
+        button.disabled = false;
+      }
+    });
+    box.querySelector('#gm-delete')?.addEventListener('click', async (event) => {
+      if (!window.confirm(`确定删除 ${person.name || person.userId} 的全部全局人物记忆？此操作不会删除聊天记录。`)) return;
+      const button = event.currentTarget;
+      button.disabled = true;
+      if (status) status.textContent = '正在删除…';
+      try {
+        await deletePerson(person);
+        selectedKey = '';
+        await loadGlobalMemory(true);
+      } catch (error) {
+        if (status) status.textContent = `删除失败：${error?.message || error}`;
+        button.disabled = false;
+      }
+    });
   }
 
   async function loadGlobalMemory(force = false) {
