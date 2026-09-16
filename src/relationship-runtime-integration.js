@@ -17,7 +17,9 @@ function getPilot(manager, create = false) {
       sessions: manager.sessions,
       dataDir: manager.dataDir,
       config: manager.config,
-      complete: manager.complete,
+      // identity-pilot.js 会用 manager.complete 捕获好友评估审计；关系评估必须绕开
+      // 那个包装层，否则并发时会把 relationship-review 的请求串到 friend-review。
+      complete: manager.manualFriendReviewComplete || manager.complete,
       emit: manager.emit,
       log: manager.log
     });
