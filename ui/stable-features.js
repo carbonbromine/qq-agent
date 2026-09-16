@@ -1,8 +1,8 @@
 'use strict';
 
 // Production feature UI invariants. app.js is intentionally kept backwards
-// compatible with older consoles; this post-render layer removes controls for
-// capabilities that are no longer experimental/user-switchable.
+// compatible with older consoles; this post-render layer removes only controls
+// for capabilities that are no longer experimental/user-switchable.
 (function installStableFeatureUi() {
   const replacements = [
     ['启停由“设置 → 实验功能”统一控制', '正式功能，随服务恒定启动'],
@@ -11,6 +11,13 @@
     ['异常处理试点', '异常处理基础设施'],
     ['主动发送实验开关已关闭', '主动好友申请为正式功能'],
     ['统一身份库总开关已关闭', '人物统一印象为正式功能']
+  ];
+
+  const retiredExperimentControls = [
+    '#cfg-identity-pilot-enabled',
+    '#cfg-auto-friend-enabled',
+    '#cfg-slang-pilot-enabled',
+    '#cfg-incident-pilot-enabled'
   ];
 
   function replaceText(root) {
@@ -24,17 +31,23 @@
     }
   }
 
-  function prune() {
-    // The entire experimental settings entry is obsolete: all former entries
-    // are either production invariants or retired.
-    const experiment = document.querySelector('.settings-menu-item[data-section="experiments"]');
-    if (experiment) {
-      const wasActive = experiment.classList.contains('active');
-      experiment.remove();
-      if (wasActive) {
-        document.querySelector('.settings-menu-item[data-section="api"]')?.click();
-      }
+  function prunePromotedRows() {
+    for (const selector of retiredExperimentControls) {
+      const control = document.querySelector(selector);
+      const row = control?.closest('.control-key-row');
+      if (row) row.remove();
     }
+    const result = document.querySelector('#experiment-launch-result');
+    if (result && !result.closest('.experimental-settings')?.querySelector('.control-key-row')) {
+      result.remove();
+    }
+  }
+
+  function prune() {
+    // Keep the Experimental Features page itself: unrelated pilots (for example
+    // multimodal/tool-scheduler/relationship experiments) still live there.
+    // Only the four promoted/retired rows disappear.
+    prunePromotedRows();
 
     document.querySelectorAll('[data-feature-nav="identity"]').forEach((el) => {
       el.classList.remove('hidden');
