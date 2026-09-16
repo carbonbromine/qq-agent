@@ -1,6 +1,7 @@
 // 统一记忆入口：人物长期记忆全局化；会话 handoff 仍按 chatKey 隔离。
 import { MemoryStore as BaseMemoryStore } from './memory-global.js';
 import { bindGlobalMemoryStore } from './memory-runtime-integration.js';
+import { backupPersonBeforeConsolidation } from './memory-consolidation-backup.js';
 import './relationship-runtime-integration.js';
 
 export class MemoryStore extends BaseMemoryStore {
@@ -40,5 +41,21 @@ export class MemoryStore extends BaseMemoryStore {
       (Number(b.lastObservedAt) || Number(b.createdAt) || 0)
       - (Number(a.lastObservedAt) || Number(a.createdAt) || 0));
     return { memberImpression };
+  }
+
+  /**
+   * consolidation 会把一个人的多条全局印象压成少量摘要；这是破坏性写入。
+   * 在交给基础实现覆写前，按人物保存完整快照，避免全局化后丢失旧的会话级备份保护。
+   */
+  replaceConsolidated(chatKey, next) {
+    const userIds = [...new Set((Array.isArray(next?.memberImpression) ? next.memberImpression : [])
+      .map((item) => String(item?.userId || '').trim())
+      .filter((userId) => /^\d{1,15}$/.test(userId)))];
+    const at = Date.now();
+    for (const userId of userIds) {
+      const person = this.getMember('', userId);
+      backupPersonBeforeConsolidation(person, { sourceChatKey: chatKey, at });
+    }
+    return super.replaceConsolidated(chatKey, next);
   }
 }
