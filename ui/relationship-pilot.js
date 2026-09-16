@@ -27,6 +27,16 @@
     Math.max(min, Number.isFinite(Number(value)) ? Number(value) : fallback)
   );
 
+  const pct = (value, signed = false) => {
+    const n = Number(value) || 0;
+    const scaled = Math.round(n * 100);
+    return signed && scaled > 0 ? `+${scaled}` : String(scaled);
+  };
+
+  const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+
   function settingsOf(config = {}) {
     const raw = config.relationshipPilot || {};
     return {
@@ -46,10 +56,42 @@
     const rel = status?.relationshipPilot || {};
     if (!rel.active) return `已启用 · Shadow Mode · ${rel.error ? `启动异常：${rel.error}` : '等待人物库启动'}`;
     const counts = rel.counts || {};
-    return `Shadow Mode · 人物 ${Number(counts.states) || 0} · 事件 ${Number(counts.events) || 0} · 未解决边界 ${Number(counts.openFlags) || 0}`;
+    const queue = Number(rel.queuedEvaluations) + Number(rel.runningEvaluations);
+    return `Shadow Mode · 人物 ${Number(counts.states) || 0} · 事件 ${Number(counts.events) || 0} · 未解决边界 ${Number(counts.openFlags) || 0}${queue ? ` · 队列 ${queue}` : ''}`;
   }
 
-  function fill(row, config, status = null) {
+  function renderPreview(row, people = []) {
+    const box = row.querySelector('#relationship-shadow-preview');
+    if (!box) return;
+    const withState = (Array.isArray(people) ? people : [])
+      .filter((person) => person?.relationship)
+      .sort((a, b) => Number(b.relationship?.updatedAt) - Number(a.relationship?.updatedAt))
+      .slice(0, 8);
+    if (!withState.length) {
+      box.innerHTML = '<div class="muted" style="margin-top:8px">尚无关系状态；产生足够的新互动后才会进行影子评估。</div>';
+      return;
+    }
+    box.innerHTML = `<div class="table-wrap" style="margin-top:8px"><table class="usage-table">
+      <thead><tr><th>人物</th><th>熟悉</th><th>亲近倾向</th><th>近期摩擦</th><th>最近事件</th></tr></thead>
+      <tbody>${withState.map((person) => {
+        const rel = person.relationship || {};
+        const event = rel.recentEvents?.[0];
+        const who = person.primaryName || person.userId;
+        const eventText = event
+          ? `${event.type} ${pct(event.deltaAffinity, true)} / ${pct(event.deltaFriction, true)}`
+          : '—';
+        return `<tr>
+          <td><strong>${esc(who)}</strong><small><code>${esc(person.userId)}</code></small></td>
+          <td>${pct(rel.familiarity)}</td>
+          <td>${pct(rel.affinity, true)}</td>
+          <td>${pct(rel.friction)}</td>
+          <td title="${esc(event?.summary || '')}">${esc(eventText)}</td>
+        </tr>`;
+      }).join('')}</tbody>
+    </table></div>`;
+  }
+
+  function fill(row, config, status = null, people = []) {
     const settings = settingsOf(config);
     const enabled = row.querySelector('#cfg-relationship-pilot-enabled');
     if (enabled) {
@@ -72,21 +114,25 @@
     }
     const state = row.querySelector('#experiment-relationship-state');
     if (state) state.textContent = statusText(config, status);
+    renderPreview(row, settings.enabled ? people : []);
   }
 
   async function readState(row) {
-    const [config, status] = await Promise.all([
-      api('/api/config'),
-      api('/api/identity-pilot/status').catch(() => ({}))
+    const config = await api('/api/config');
+    const [status, peopleResult] = await Promise.all([
+      api('/api/identity-pilot/status').catch(() => ({})),
+      config?.identityPilot?.enabled && config?.relationshipPilot?.enabled
+        ? api('/api/identity-pilot/people?limit=12').catch(() => ({ people: [] }))
+        : Promise.resolve({ people: [] })
     ]);
-    if (document.body.contains(row)) fill(row, config, status);
-    return { config, status };
+    if (document.body.contains(row)) fill(row, config, status, peopleResult.people || []);
+    return { config, status, people: peopleResult.people || [] };
   }
 
   async function save(row) {
     const { config } = await readState(row);
     if (config?.identityPilot?.enabled !== true) {
-      fill(row, config, null);
+      fill(row, config, null, []);
       return;
     }
     const state = row.querySelector('#experiment-relationship-state');
@@ -104,7 +150,7 @@
     };
     try {
       await api('/api/config', { method: 'POST', body: JSON.stringify(patch) });
-      // identity pilot 的 reconfigure 会在后端把关系试点同步启动/停止。
+      // relationshipPilot 是独立配置；后端 status/observe 钩子会按最新配置即时同步启停。
       await new Promise((resolve) => setTimeout(resolve, 120));
       await readState(row);
     } catch (error) {
@@ -124,10 +170,10 @@
       row.className = 'control-key-row';
       row.id = 'experiment-relationship-row';
       row.innerHTML = `
-        <span style="min-width:300px">
+        <span style="min-width:300px;flex:1">
           <strong>关系状态 / 好感度</strong>
           <small id="experiment-relationship-state">读取中…</small>
-          <small>V1 固定 Shadow Mode：只记录 familiarity / affinity / friction 与事件账本，不影响聊天回复。</small>
+          <small>V1 固定 Shadow Mode：只记录 familiarity / affinity / friction 与事件账本，不影响聊天回复。数值仅用于实验观察。</small>
           <details style="margin-top:6px">
             <summary class="muted" style="cursor:pointer">评估参数</summary>
             <div class="field-row" style="margin-top:8px">
@@ -137,6 +183,10 @@
               <label class="field"><span>每日评估上限</span><input id="cfg-relationship-daily-budget" type="number" min="1" max="200" /></label>
               <label class="field"><span>摩擦半衰期 / 小时</span><input id="cfg-relationship-friction-half-life" type="number" min="6" max="720" /></label>
             </div>
+          </details>
+          <details style="margin-top:6px">
+            <summary class="muted" style="cursor:pointer">观察样本（最近更新）</summary>
+            <div id="relationship-shadow-preview"></div>
           </details>
         </span>
         <span class="settings-actions" style="margin:0;align-items:center">
