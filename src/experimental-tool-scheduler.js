@@ -5,6 +5,7 @@
 // 随后仍按原始 tool_call 顺序把结果交还宿主；发送/写入始终由宿主逐个触发。
 // 这样关闭开关时可以完整回退到原来的 tools-core.js 路径。
 
+// 可以安全预启动的纯读取工具：彼此独立时允许同一个 assistant tool_calls 批次并发。
 export const EXPERIMENTAL_READ_ONLY_TOOLS = new Set([
   'get_recent_messages',
   'get_message_detail',
@@ -15,8 +16,23 @@ export const EXPERIMENTAL_READ_ONLY_TOOLS = new Set([
   'web_fetch'
 ]);
 
-const TERMINAL_TOOL = 'finish';
-const SAME_ROUND_ACTION_TOOLS = new Set([
+// 这些也是“读取/观察”类工具，但当前不做并发预启动：
+// - get_*_image 会产生多模态注入；
+// - read_forward 会把展开结果写回存档；
+// - list_stickers / get_sticker_image 与后续表情选择通常存在直接依赖。
+// 显式列出来，避免未来误以为“所有读工具都应该并发”。
+export const EXPERIMENTAL_ORDERED_READ_TOOLS = new Set([
+  'list_stickers',
+  'get_sticker_image',
+  'read_forward',
+  'get_message_images'
+]);
+
+export const EXPERIMENTAL_TERMINAL_TOOL = 'finish';
+
+// 这些工具的副作用必须保持宿主原有顺序，但当动作在模型调用前就已经全部确定时，
+// 可以与 finish 放在同一个 assistant tool_calls 批次里；finish 的失败屏障保证前置失败时不提交。
+export const EXPERIMENTAL_SAME_ROUND_ACTION_TOOLS = new Set([
   'send_message',
   'send_sticker',
   'send_poke',
@@ -42,16 +58,60 @@ export function experimentalToolSchedulerEnabled(cfg = {}) {
 
 export function experimentalToolEffect(name) {
   const tool = String(name || '');
-  if (tool === TERMINAL_TOOL) return 'terminal';
+  if (tool === EXPERIMENTAL_TERMINAL_TOOL) return 'terminal';
   if (EXPERIMENTAL_READ_ONLY_TOOLS.has(tool)) return 'read';
   return 'ordered';
 }
 
 /**
+ * 给当前基础工具集一个显式分类，主要用于测试/审计。
+ * 新增工具如果没有被分类，测试会提醒维护者先决定它能否并发、能否同轮 finish，
+ * 而不是默认把未知工具当成“可优化”。
+ */
+export function experimentalToolClass(name) {
+  const tool = String(name || '');
+  if (tool === EXPERIMENTAL_TERMINAL_TOOL) return 'terminal';
+  if (EXPERIMENTAL_READ_ONLY_TOOLS.has(tool)) return 'parallel-read';
+  if (EXPERIMENTAL_ORDERED_READ_TOOLS.has(tool)) return 'ordered-read';
+  if (EXPERIMENTAL_SAME_ROUND_ACTION_TOOLS.has(tool)) return 'ordered-action';
+  return 'unclassified';
+}
+
+const FINISH_STRONG_RULE = [
+  '【实验调度·强规则】',
+  '如果本轮所有要做的动作在看到工具结果前已经完全确定，必须在同一个 assistant 响应里一次性给出这些 tool_calls，并把 finish 放在最后。',
+  '不要为了“确认发送成功”专门再开一轮只调用 finish；finish 有失败屏障，任一前置工具失败时系统会阻止 finish 提交并把错误交回你重新决定。',
+  '只有某个工具结果会决定后续要不要做、做什么或说什么时，才保留下一轮模型调用。'
+].join('');
+
+const ACTION_STRONG_RULE = [
+  '【实验调度·强规则】',
+  '如果这个动作以及本轮其它动作在执行前都已确定，且不需要观察任何工具结果再决策，必须在本次响应中把这些动作一次性列出，并把 finish 作为最后一个 tool_call。',
+  '不要先执行本工具、等成功结果回来后，再额外开一轮只调用 finish。',
+  '如果后续动作确实依赖本工具返回值，则保持正常多轮。'
+].join('');
+
+const READ_PARALLEL_RULE = [
+  '【实验调度·强规则】',
+  '如果同一决策需要多个互不依赖的只读结果，必须在同一个 assistant 响应里一次性列出这些读取 tool_calls；不要等第一个返回后再调用第二个。',
+  '只有后一个查询的参数、是否调用或后续动作确实依赖前一个结果时才串行。',
+  '如果需要看完读取结果才能决定回复，不要提前调用 finish。'
+].join('');
+
+const ORDERED_READ_RULE = [
+  '【实验调度】',
+  '该读取工具当前保持宿主原有串行语义（可能注入图片、更新本地存档，或其结果通常直接影响下一步选择）。',
+  '正常等待结果后再决定后续动作；不要为了凑并发而提前 finish。'
+].join('');
+
+/**
  * 只在实验开启时改工具描述，引导模型：
- * - 独立只读调用可以同轮给出；
- * - 已经确定动作后，可以把 finish 放在同轮最后。
- * 关闭时直接返回原数组引用，确保工具 schema 与当前版本无差异。
+ * - 互不依赖的纯读取必须同轮给出，宿主会并发预启动；
+ * - 已经完全确定的动作必须同轮把 finish 放在最后；
+ * - 结果依赖型读取继续维持原串行决策链。
+ *
+ * 这里只改变模型看到的 schema 文案，不改变 Orchestrator 主循环、工具执行顺序、
+ * handoff/生命周期提交方式。关闭实验时直接返回原数组引用，prompt hash 也回到旧版本。
  */
 export function annotateExperimentalToolSchemas(tools, cfg = {}) {
   if (!experimentalToolSchedulerEnabled(cfg)) return tools;
@@ -60,12 +120,14 @@ export function annotateExperimentalToolSchemas(tools, cfg = {}) {
     const fn = next?.function;
     const name = String(fn?.name || '');
     if (!fn) return next;
-    if (name === TERMINAL_TOOL) {
-      fn.description = `${fn.description || ''} 【实验调度】如果本轮动作已经确定，且无需先读取工具结果再决定，可以在同一轮把 finish 作为最后一个工具一起调用；系统只会在前置工具全部成功后提交 finish。`;
+    if (name === EXPERIMENTAL_TERMINAL_TOOL) {
+      fn.description = `${fn.description || ''} ${FINISH_STRONG_RULE}`;
     } else if (EXPERIMENTAL_READ_ONLY_TOOLS.has(name)) {
-      fn.description = `${fn.description || ''} 【实验调度】与其他互不依赖的只读工具可以在同一轮一起调用，宿主可能并行执行。`;
-    } else if (SAME_ROUND_ACTION_TOOLS.has(name)) {
-      fn.description = `${fn.description || ''} 【实验调度】如果这个动作就是本轮最后一步且无需观察结果再决策，可同轮再调用 finish，并把 finish 放在最后。`;
+      fn.description = `${fn.description || ''} ${READ_PARALLEL_RULE}`;
+    } else if (EXPERIMENTAL_ORDERED_READ_TOOLS.has(name)) {
+      fn.description = `${fn.description || ''} ${ORDERED_READ_RULE}`;
+    } else if (EXPERIMENTAL_SAME_ROUND_ACTION_TOOLS.has(name)) {
+      fn.description = `${fn.description || ''} ${ACTION_STRONG_RULE}`;
     }
     return next;
   });
