@@ -29,6 +29,27 @@ function getPilot(manager, create = false) {
   return pilot;
 }
 
+function ensureRelationshipStoreInvariants(pilot) {
+  const db = pilot?.relationshipStore?.db;
+  if (!db) return;
+  // 多次 boundary_cross 仍然各自保留 event 并继续影响 affinity/friction，
+  // 但 unresolved 状态是“存在未解决边界问题”而不是计数器。忽略重复 flag，
+  // 这样一次明确 repair 就能恢复到没有遗留边界标记的状态。
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS relationship_boundary_flag_singleton
+    BEFORE INSERT ON relationship_flags
+    WHEN NEW.status='open'
+      AND NEW.type='boundary_violation'
+      AND EXISTS (
+        SELECT 1 FROM relationship_flags
+        WHERE uin=NEW.uin AND type=NEW.type AND status='open'
+      )
+    BEGIN
+      SELECT RAISE(IGNORE);
+    END;
+  `);
+}
+
 function shutdownPilot(pilot) {
   if (!pilot) return;
   // 阻止队列中尚未开始的任务。已进入 LLM 请求的单个任务允许完成审计，
@@ -59,6 +80,7 @@ function startIfNeeded(manager) {
   if (!relationshipPilotEnabled(manager?.config?.()) || !manager?.active) return null;
   const pilot = getPilot(manager, true);
   pilot?.start();
+  ensureRelationshipStoreInvariants(pilot);
   return pilot;
 }
 
