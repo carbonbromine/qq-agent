@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
+import { buildToolDefs } from '../src/tools-core.js';
 import {
   annotateExperimentalToolSchemas,
+  experimentalToolClass,
   experimentalToolSchedulerConfig,
   ExperimentalToolBatch
 } from '../src/experimental-tool-scheduler.js';
@@ -26,10 +28,33 @@ test('disabled experiment preserves tool schema object and defaults to old path'
   assert.equal(tools[0].function.description, 'old');
 });
 
-test('enabled experiment annotates a clone without mutating base schemas', () => {
+test('current base tool inventory has an explicit scheduler classification', () => {
+  const classes = new Map(buildToolDefs().map((tool) => [tool.name, experimentalToolClass(tool.name)]));
+  const unclassified = [...classes.entries()].filter(([, kind]) => kind === 'unclassified');
+  assert.deepEqual(unclassified, []);
+
+  // 聊天最终动作：保持宿主顺序，但可在动作已确定时与 finish 同轮提交。
+  assert.equal(classes.get('send_message'), 'ordered-action');
+  assert.equal(classes.get('send_sticker'), 'ordered-action');
+  assert.equal(classes.get('send_poke'), 'ordered-action');
+
+  // 多模态/带本地副作用的读取保持串行，不误当成并发纯读。
+  assert.equal(classes.get('get_message_images'), 'ordered-read');
+  assert.equal(classes.get('get_sticker_image'), 'ordered-read');
+  assert.equal(classes.get('read_forward'), 'ordered-read');
+  assert.equal(classes.get('list_stickers'), 'ordered-read');
+
+  assert.equal(classes.get('web_search'), 'parallel-read');
+  assert.equal(classes.get('get_message_detail'), 'parallel-read');
+  assert.equal(classes.get('finish'), 'terminal');
+});
+
+test('enabled experiment strongly guides same-round finish without mutating base schemas', () => {
   const tools = [
     { type: 'function', function: { name: 'web_search', description: 'read', parameters: {} } },
     { type: 'function', function: { name: 'send_message', description: 'send', parameters: {} } },
+    { type: 'function', function: { name: 'send_sticker', description: 'sticker', parameters: {} } },
+    { type: 'function', function: { name: 'get_message_images', description: 'image', parameters: {} } },
     { type: 'function', function: { name: 'finish', description: 'finish', parameters: {} } }
   ];
   const next = annotateExperimentalToolSchemas(tools, {
@@ -37,9 +62,13 @@ test('enabled experiment annotates a clone without mutating base schemas', () =>
   });
   assert.notEqual(next, tools);
   assert.equal(tools[0].function.description, 'read');
-  assert.match(next[0].function.description, /并行执行/);
-  assert.match(next[1].function.description, /同轮再调用 finish/);
-  assert.match(next[2].function.description, /前置工具全部成功/);
+
+  assert.match(next[0].function.description, /必须在同一个 assistant 响应里一次性列出/);
+  assert.match(next[1].function.description, /必须在本次响应中.*finish/);
+  assert.match(next[2].function.description, /必须在本次响应中.*finish/);
+  assert.match(next[3].function.description, /保持宿主原有串行语义/);
+  assert.match(next[4].function.description, /不要为了“确认发送成功”专门再开一轮只调用 finish/);
+  assert.match(next[4].function.description, /前置工具失败时系统会阻止 finish/);
 });
 
 test('consecutive read tools execute concurrently but are returned in host order', async () => {
@@ -89,6 +118,27 @@ test('consecutive read tools execute concurrently but are returned in host order
     finishBarrierBlocks: 0,
     trailingSkipped: 0
   });
+});
+
+test('ordered image reads stay serial and are never prestarted as a read wave', async () => {
+  const calls = [
+    call('a', 'get_message_images', { messageId: 1 }),
+    call('b', 'get_message_detail', { messageId: 2 })
+  ];
+  const starts = [];
+  const batch = new ExperimentalToolBatch(calls, {
+    execute: async (item) => {
+      starts.push(item.function.name);
+      await delay(5);
+      return { content: item.function.name };
+    }
+  });
+
+  await batch.next('get_message_images', calls[0].function.arguments);
+  assert.deepEqual(starts, ['get_message_images']);
+  await batch.next('get_message_detail', calls[1].function.arguments);
+  assert.deepEqual(starts, ['get_message_images', 'get_message_detail']);
+  assert.equal(batch.metrics().parallelWaves, 0);
 });
 
 test('parallel read concurrency respects configured limit', async () => {
