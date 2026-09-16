@@ -31,6 +31,10 @@
     }
   }
 
+  function setLabel(el, label) {
+    if (el && el.textContent !== label) el.textContent = label;
+  }
+
   function prunePromotedRows() {
     for (const selector of retiredExperimentControls) {
       const control = document.querySelector(selector);
@@ -51,14 +55,14 @@
 
     document.querySelectorAll('[data-feature-nav="identity"]').forEach((el) => {
       el.classList.remove('hidden');
-      el.textContent = '人物印象';
+      setLabel(el, '人物印象');
     });
     document.querySelectorAll('[data-feature-nav="auto-friend"]').forEach((el) => {
       el.classList.remove('hidden');
     });
     document.querySelectorAll('[data-feature-nav="incidents"]').forEach((el) => {
       el.classList.remove('hidden');
-      el.textContent = '异常处理';
+      setLabel(el, '异常处理');
     });
     document.querySelectorAll('[data-feature-nav="slang"], #view-slang').forEach((el) => el.remove());
 
