@@ -1,0 +1,29 @@
+name: Stable feature validation
+
+on:
+  push:
+    branches:
+      - chore/promote-stable-features
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.23.0'
+          cache: npm
+      - run: npm ci
+      - name: Syntax checks
+        run: |
+          node --check src/config.js
+          node --check src/stable-feature-policy.js
+          node --check src/slang-pilot.js
+          node --check ui/stable-features.js
+      - name: Full regression suite
+        run: npm test
