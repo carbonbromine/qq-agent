@@ -132,11 +132,25 @@ export function consumeAutoUpdateRequest(dataDir) {
 
 /**
  * Auto update shares the application's one global administrator.
- * Historical per-feature ownerUin fields are compatibility mirrors only and
- * must never become an independent source of truth again.
+ *
+ * The updater runner can execute directly against config.json before the main
+ * process has had a chance to migrate an old install. Therefore legacy owner
+ * paths are read only when the file has no admin section at all. Once admin
+ * exists—even with an intentionally empty ownerUin—it is the sole truth.
  */
 export function autoUpdateOwner(config = {}) {
-  return String(config.admin?.ownerUin || '').trim();
+  const hasAdmin = Boolean(
+    config.admin
+    && typeof config.admin === 'object'
+    && !Array.isArray(config.admin)
+  );
+  if (hasAdmin) return String(config.admin.ownerUin || '').trim();
+  return String(
+    config.autoUpdate?.ownerUin
+    || config.incidentPilot?.ownerUin
+    || config.identityPilot?.friendProposal?.ownerUin
+    || ''
+  ).trim();
 }
 
 export function sanitizeUpdateError(error) {
