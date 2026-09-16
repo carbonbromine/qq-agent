@@ -14,8 +14,37 @@ function objectSection(parent, key) {
   return parent[key];
 }
 
+function normalizedAdminUin(value) {
+  const uin = String(value || '').trim();
+  return /^\d{5,15}$/.test(uin) ? uin : '';
+}
+
+function legacyAdminCandidates(config = {}) {
+  return [
+    config?.identityPilot?.friendProposal?.ownerUin,
+    config?.incidentPilot?.ownerUin,
+    config?.autoUpdate?.ownerUin,
+    config?.slangPilot?.ownerUin
+  ];
+}
+
+/** Return the one global administrator QQ used by every subsystem. */
+export function globalAdminUin(config = {}) {
+  return normalizedAdminUin(config?.admin?.ownerUin);
+}
+
 export function stableFeatureFingerprint(config = {}) {
   return JSON.stringify({
+    adminPresent: Boolean(
+      config?.admin
+      && typeof config.admin === 'object'
+      && !Array.isArray(config.admin)
+    ),
+    adminOwnerUin: normalizedAdminUin(config?.admin?.ownerUin),
+    identityOwnerUin: normalizedAdminUin(config?.identityPilot?.friendProposal?.ownerUin),
+    incidentOwnerUin: normalizedAdminUin(config?.incidentPilot?.ownerUin),
+    updateOwnerUin: normalizedAdminUin(config?.autoUpdate?.ownerUin),
+    slangOwnerUin: normalizedAdminUin(config?.slangPilot?.ownerUin),
     identity: config?.identityPilot?.enabled === true,
     identityGraduated: config?.identityPilot?.graduated === true,
     incomingFriend: config?.identityPilot?.incomingFriendRequest?.enabled === true,
@@ -30,11 +59,31 @@ export function stableFeatureFingerprint(config = {}) {
 }
 
 /**
- * Apply the production feature invariants in-place while preserving all
- * operational tuning fields (owners, thresholds, retention policy, etc.).
+ * Apply production invariants in-place while preserving operational tuning.
+ *
+ * Administrator migration:
+ * - once config.admin exists it is the sole source of truth, including an
+ *   intentionally empty ownerUin;
+ * - old installs without config.admin migrate the first valid historical owner
+ *   in this order: Identity/Friends -> Incident -> Auto Update -> Slang;
+ * - historical ownerUin fields remain synchronized compatibility mirrors only.
  */
 export function applyStableFeaturePolicy(config = {}) {
   if (!config || typeof config !== 'object' || Array.isArray(config)) return config;
+
+  const hadAdminSection = Boolean(
+    config.admin
+    && typeof config.admin === 'object'
+    && !Array.isArray(config.admin)
+  );
+  const admin = objectSection(config, 'admin');
+  let ownerUin = normalizedAdminUin(admin.ownerUin);
+  if (!hadAdminSection) {
+    ownerUin = legacyAdminCandidates(config)
+      .map(normalizedAdminUin)
+      .find(Boolean) || '';
+  }
+  admin.ownerUin = ownerUin;
 
   const identity = objectSection(config, 'identityPilot');
   identity.enabled = true;
@@ -47,16 +96,23 @@ export function applyStableFeaturePolicy(config = {}) {
   friend.enabled = true;
   friend.graduated = true;
   friend.activeDispatchEnabled = true;
+  friend.ownerUin = ownerUin;
 
   // Keep the old object as a compatibility tombstone so older callers can
   // still read it, but make it impossible to reactivate the retired worker.
   const slang = objectSection(config, 'slangPilot');
   slang.enabled = false;
   slang.graduated = false;
+  slang.ownerUin = ownerUin;
 
   const incident = objectSection(config, 'incidentPilot');
   incident.enabled = true;
   incident.graduated = true;
+  incident.ownerUin = ownerUin;
+
+  // Auto update is not forced on, but its administrator is global as well.
+  const autoUpdate = objectSection(config, 'autoUpdate');
+  autoUpdate.ownerUin = ownerUin;
 
   return config;
 }
