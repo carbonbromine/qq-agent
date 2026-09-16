@@ -44,9 +44,30 @@ export class MemoryStore extends BaseMemoryStore {
   }
 
   /**
-   * 真实的逐人物 consolidation 写路径。
-   * Orchestrator 整理完一个人的印象后必须走这里：先保存完整全局人物快照，
-   * 再执行破坏性 replace。普通手动编辑/身份回写仍走 replaceMember，不产生整理备份。
+   * 全局人物记忆的 replace 是潜在破坏性写入。
+   * 当该人物已经拥有当前 chatKey 的来源记录时，BaseMemoryStore.replace 会用新摘要替换
+   * 现有全局印象；因此在写入前保存完整人物快照。若人物只是第一次出现在一个新 chat，
+   * 基础实现会做 merge 而不是覆盖，此时不制造无意义备份。
+   */
+  replaceMember(chatKey, userId, name, contents) {
+    const source = String(chatKey || '').trim();
+    const person = this.getMember('', userId);
+    const destructive = Array.isArray(person?.impressions)
+      && person.impressions.length > 0
+      && Array.isArray(person?.sourceChatKeys)
+      && person.sourceChatKeys.includes(source);
+    if (destructive) {
+      backupPersonBeforeConsolidation(person, {
+        sourceChatKey: source,
+        at: Date.now()
+      });
+    }
+    return super.replaceMember(chatKey, userId, name, contents);
+  }
+
+  /**
+   * 显式 consolidation 入口，供后续调用方使用；避免通过普通 replace 语义猜测意图。
+   * 当前 Orchestrator 的历史实现仍直接调用 replaceMember，因此上面的写前保护是必要兜底。
    */
   replaceMemberForConsolidation(chatKey, userId, name, contents) {
     const person = this.getMember('', userId);
@@ -59,7 +80,7 @@ export class MemoryStore extends BaseMemoryStore {
 
   /**
    * 兼容批量 replaceConsolidated 调用：同样保证每个人在破坏性写入前有快照。
-   * 当前 Orchestrator 的逐人物整理主要走 replaceMemberForConsolidation。
+   * 这里调用 super，避免再次经过 replaceMember 兜底而重复保存同一轮快照。
    */
   replaceConsolidated(chatKey, next) {
     const userIds = [...new Set((Array.isArray(next?.memberImpression) ? next.memberImpression : [])
