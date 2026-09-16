@@ -69,14 +69,19 @@ export function incidentPilotEnabled() {
 export function updateConfig(patch) {
   // Reuse the mature legacy normalizer without allowing its obsolete
   // experimental owner validation to make unrelated settings unsaveable.
+  // The legacy object is changed in-place only for the duration of validation;
+  // the finally block is essential so an unrelated validation error can never
+  // leave a production capability accidentally gated off in memory.
   suspendLegacyExperimentalGates(legacy.getConfig());
   const compatiblePatch = suspendLegacyExperimentalGates(
     structuredClone(patch && typeof patch === 'object' ? patch : {})
   );
-  const updated = legacy.updateConfig(compatiblePatch);
-  applyStableFeaturePolicy(updated);
-  legacy.scheduleConfigSave();
-  return updated;
+  try {
+    return legacy.updateConfig(compatiblePatch);
+  } finally {
+    applyStableFeaturePolicy(legacy.getConfig());
+    legacy.scheduleConfigSave();
+  }
 }
 
 export function setRuntimeConfig(config) {
