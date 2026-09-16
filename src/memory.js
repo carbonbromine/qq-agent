@@ -44,8 +44,22 @@ export class MemoryStore extends BaseMemoryStore {
   }
 
   /**
-   * consolidation 会把一个人的多条全局印象压成少量摘要；这是破坏性写入。
-   * 在交给基础实现覆写前，按人物保存完整快照，避免全局化后丢失旧的会话级备份保护。
+   * 真实的逐人物 consolidation 写路径。
+   * Orchestrator 整理完一个人的印象后必须走这里：先保存完整全局人物快照，
+   * 再执行破坏性 replace。普通手动编辑/身份回写仍走 replaceMember，不产生整理备份。
+   */
+  replaceMemberForConsolidation(chatKey, userId, name, contents) {
+    const person = this.getMember('', userId);
+    backupPersonBeforeConsolidation(person, {
+      sourceChatKey: chatKey,
+      at: Date.now()
+    });
+    return super.replaceMember(chatKey, userId, name, contents);
+  }
+
+  /**
+   * 兼容批量 replaceConsolidated 调用：同样保证每个人在破坏性写入前有快照。
+   * 当前 Orchestrator 的逐人物整理主要走 replaceMemberForConsolidation。
    */
   replaceConsolidated(chatKey, next) {
     const userIds = [...new Set((Array.isArray(next?.memberImpression) ? next.memberImpression : [])
