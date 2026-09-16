@@ -24,7 +24,8 @@ test('manual friend review keeps normal JSON string arguments', () => {
 });
 
 test('manual friend review unwraps fenced JSON arguments', () => {
-  assert.deepEqual(parsed(````json\n${JSON.stringify(payload, null, 2)}\n````), payload);
+  const fenced = '```json\n' + JSON.stringify(payload, null, 2) + '\n```';
+  assert.deepEqual(parsed(fenced), payload);
 });
 
 test('manual friend review repairs harmless trailing commas', () => {
