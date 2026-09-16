@@ -62,6 +62,21 @@ test('global person memory migration and isolation rules', async (t) => {
     assert.match(memory.formatForPrompt('group:100', { userIds: ['12345'] }), /爱玩烂梗/);
   });
 
+  await t.test('does not erase old global memories when a known person is first consolidated in a new chat', () => {
+    memory.append('group:400', 'memberImpression', '旧群里形成的长期印象', {
+      userId: '24680',
+      target: 'Carol'
+    });
+    memory.replaceMember('group:500', '24680', 'Carol', ['新群里新提炼的印象']);
+
+    const member = memory.getMember('group:500', '24680');
+    assert.deepEqual(
+      member.impressions.map((x) => x.content),
+      ['旧群里形成的长期印象', '新群里新提炼的印象']
+    );
+    assert.deepEqual(new Set(member.sourceChatKeys), new Set(['group:400', 'group:500']));
+  });
+
   await t.test('keeps handoff state isolated by chatKey', () => {
     memory.setHandoff('group:100', { summary: '群里正在聊 A' });
     memory.setHandoff('private:12345', { summary: '私聊正在聊 B' });
