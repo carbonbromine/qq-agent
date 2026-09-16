@@ -28,11 +28,28 @@ function getPilot(manager, create = false) {
   return pilot;
 }
 
+function shutdownPilot(pilot) {
+  if (!pilot) return;
+  // 阻止队列中尚未开始的任务。已进入 LLM 请求的单个任务允许完成审计，
+  // 然后再关闭 SQLite；否则 mid-flight close 会让 evaluation/session 留在半截状态。
+  pilot.generation += 1;
+  const store = pilot.relationshipStore;
+  pilot.queued = 0;
+  pilot.lastFamiliarityRefresh?.clear?.();
+  if (!store) return;
+  const close = () => {
+    if (pilot.relationshipStore === store) pilot.relationshipStore = null;
+    try { store.close(); } catch { /* ignore */ }
+  };
+  if (pilot.running > 0) Promise.resolve(pilot.queue).finally(close);
+  else close();
+}
+
 function stopIfDisabled(manager) {
   if (relationshipPilotEnabled(manager?.config?.())) return false;
   const pilot = getPilot(manager, false);
   if (!pilot) return false;
-  pilot.stop();
+  shutdownPilot(pilot);
   instances.delete(manager);
   return true;
 }
@@ -54,7 +71,7 @@ function patch() {
     proto.status = function relationshipAwareStatus(...args) {
       const status = originalStatus.apply(this, args);
       // /api/config 只改 relationshipPilot 时不会触发 identityPilot.reconfigure。
-      // 因此 status 本身承担轻量同步：开启后在人物库 active 时启动；关闭后立刻关库。
+      // 因此 status 本身承担轻量同步：开启后在人物库 active 时启动；关闭后停止新任务。
       stopIfDisabled(this);
       const pilot = startIfNeeded(this) || getPilot(this, false);
       return {
@@ -77,7 +94,7 @@ function patch() {
   if (typeof originalStop === 'function') {
     proto.stop = function stopWithRelationshipPilot(...args) {
       const pilot = getPilot(this, false);
-      pilot?.stop();
+      shutdownPilot(pilot);
       instances.delete(this);
       return originalStop.apply(this, args);
     };
