@@ -1,6 +1,6 @@
 'use strict';
 
-(function globalMemoryConsole() {
+(function globalPersonMemoryConsole() {
   const MARKER = 'qq-agent-console';
   let people = [];
   let selectedKey = '';
@@ -37,8 +37,7 @@
     const style = document.createElement('style');
     style.id = 'global-memory-style';
     style.textContent = `
-      #view-memory[data-global-memory="1"] > #memory-list,
-      #view-memory[data-global-memory="1"] > #memory-detail { display:none !important; }
+      #view-people-memory { min-width:0; }
       #global-memory-list { display:flex; flex-direction:column; }
       #global-memory-items { overflow:auto; min-height:0; }
       .gm-head { display:flex; gap:8px; align-items:center; padding:10px 12px; border-bottom:1px solid var(--border-color, rgba(128,128,128,.2)); }
@@ -63,38 +62,17 @@
     document.head.appendChild(style);
   }
 
-  function ensureView() {
-    const view = document.getElementById('view-memory');
-    if (!view) return null;
+  function viewParts() {
     ensureStyle();
-    view.dataset.globalMemory = '1';
-
-    let list = document.getElementById('global-memory-list');
-    let detail = document.getElementById('global-memory-detail');
-    if (!list) {
-      list = document.createElement('aside');
-      list.id = 'global-memory-list';
-      list.className = 'list-pane';
-      list.innerHTML = `
-        <div class="gm-head">
-          <strong>全局人物记忆</strong>
-          <button class="btn btn-small" type="button" id="gm-refresh">刷新</button>
-        </div>
-        <div id="global-memory-items"></div>`;
-      view.appendChild(list);
-      list.querySelector('#gm-refresh')?.addEventListener('click', () => loadGlobalMemory(true));
-    }
-    if (!detail) {
-      detail = document.createElement('div');
-      detail.id = 'global-memory-detail';
-      detail.className = 'detail-pane';
-      detail.innerHTML = '<div class="empty-hint">← 选择人物查看全局记忆</div>';
-      view.appendChild(detail);
-    }
-    return { view, list, detail };
+    const view = document.getElementById('view-people-memory');
+    const list = document.getElementById('global-memory-list');
+    const detail = document.getElementById('global-memory-detail');
+    const items = document.getElementById('global-memory-items');
+    return view && list && detail && items ? { view, list, detail, items } : null;
   }
 
   async function mapLimit(items, limit, worker) {
+    if (!items.length) return [];
     const output = new Array(items.length);
     let cursor = 0;
     async function run() {
@@ -146,10 +124,12 @@
   }
 
   async function fetchPeople() {
+    // /api/memory-files 仍是兼容入口；每个 detail 返回的是 GlobalPersonMemoryStore
+    // 在该 sourceChatKey 可见的人物。这里只按 QQ 合并，sourceChatKeys 仅保留来源。
     const summary = await api('/api/memory-files');
     const files = Array.isArray(summary.files) ? summary.files : [];
-    const activeFiles = files.filter((file) => Number(file.impressionCount) > 0);
-    const details = await mapLimit(activeFiles, 6, async (file) => {
+    const sourceFiles = files.filter((file) => Number(file.impressionCount) > 0);
+    const details = await mapLimit(sourceFiles, 6, async (file) => {
       const path = String(file.chatKey || '').replace(':', '_');
       if (!/^(group|private)_\d+$/.test(path)) return null;
       return api(`/api/memory-files/${path}`);
@@ -158,12 +138,14 @@
     const map = new Map();
     for (const detail of details) {
       for (const member of Array.isArray(detail?.members) ? detail.members : []) {
-        const key = String(member.userId || '').trim() || `name:${String(member.name || '')}`;
+        const userId = String(member.userId || '').trim();
+        const key = userId || `name:${String(member.name || '')}`;
         if (!key || key === 'name:') continue;
         map.set(key, mergePerson(map.get(key), member));
       }
     }
-    return [...map.entries()].map(([key, member]) => ({ key, ...member }))
+    return [...map.entries()]
+      .map(([key, member]) => ({ key, ...member }))
       .sort((a, b) => (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0));
   }
 
@@ -195,13 +177,16 @@
   }
 
   function sourceFor(person) {
-    return (person?.sourceChatKeys || []).find((key) => /^(group|private):\d+$/.test(String(key))) || '';
+    return (person?.sourceChatKeys || [])
+      .find((key) => /^(group|private):\d+$/.test(String(key))) || '';
   }
 
   async function consolidatePerson(person) {
     const chatKey = sourceFor(person);
     const userId = String(person?.userId || '').trim();
-    if (!chatKey || !/^\d{1,15}$/.test(userId)) throw new Error('缺少可用于整理的来源会话或 QQ 号');
+    if (!chatKey || !/^\d{1,15}$/.test(userId)) {
+      throw new Error('缺少可用于整理的来源会话或 QQ 号');
+    }
     await api('/api/memory-files/consolidate', {
       method: 'POST',
       body: JSON.stringify({ chatKey, userIds: [userId], force: true })
@@ -211,9 +196,14 @@
   async function deletePerson(person) {
     const chatKey = sourceFor(person);
     const userId = String(person?.userId || '').trim();
-    if (!chatKey || !/^\d{1,15}$/.test(userId)) throw new Error('缺少可删除的来源会话或 QQ 号');
-    const path = chatKey.replace(':', '_');
-    await api(`/api/memory-files/${path}/members/${userId}`, { method: 'DELETE' });
+    if (!chatKey || !/^\d{1,15}$/.test(userId)) {
+      throw new Error('缺少可删除的来源会话或 QQ 号');
+    }
+    // 当前 MemoryStore.removeMember() 的语义是按 QQ 删除全局人物，不按 chatKey 局部删除；
+    // chatKey 这里只用于兼容旧 HTTP 路由形状。
+    await api(`/api/memory-files/${chatKey.replace(':', '_')}/members/${userId}`, {
+      method: 'DELETE'
+    });
   }
 
   function renderDetail() {
@@ -221,7 +211,7 @@
     if (!box) return;
     const person = people.find((item) => item.key === selectedKey);
     if (!person) {
-      box.innerHTML = '<div class="empty-hint">← 选择人物查看全局记忆</div>';
+      box.innerHTML = '<div class="empty-hint">← 选择人物查看全局长期记忆</div>';
       return;
     }
 
@@ -231,7 +221,8 @@
     const memories = person.impressions || [];
     const memoryHtml = memories.length
       ? memories.map((item) => {
-          const sources = (item.sourceChatKeys || []).map((key) => `<span class="gm-chip">${esc(key)}</span>`).join('');
+          const sources = (item.sourceChatKeys || [])
+            .map((key) => `<span class="gm-chip">${esc(key)}</span>`).join('');
           const at = Number(item.lastObservedAt) || Number(item.createdAt) || 0;
           return `<div class="gm-memory">
             <div class="gm-memory-content">${esc(item.content)}</div>
@@ -240,21 +231,22 @@
           </div>`;
         }).join('')
       : '<div class="gm-empty">这个人目前没有长期印象</div>';
-    const manageable = /^\d{1,15}$/.test(String(person.userId || '')) && Boolean(sourceFor(person));
+    const manageable = /^\d{1,15}$/.test(String(person.userId || ''))
+      && Boolean(sourceFor(person));
 
     box.innerHTML = `
       <div class="detail-header">
         <h2>${esc(person.name || person.userId || '未知人物')}</h2>
         <div class="sub">${person.userId ? `QQ ${esc(person.userId)} · ` : ''}${memories.length} 条全局长期印象</div>
         <div class="gm-toolbar">
-          <button class="btn btn-small" type="button" id="gm-consolidate" ${manageable ? '' : 'disabled'}>整理人物记忆</button>
+          <button class="btn btn-small" type="button" id="gm-consolidate" ${manageable ? '' : 'disabled'}>重新整理人物记忆</button>
           <button class="btn btn-small btn-danger" type="button" id="gm-delete" ${manageable ? '' : 'disabled'}>删除全部人物记忆</button>
           <span class="gm-status" id="gm-action-status"></span>
         </div>
       </div>
       <div class="gm-note">
-        人物长期记忆现在按 QQ 全局统一；下面的来源只用于追溯证据，不再限制记忆在哪个群可见。<br>
-        会话 handoff 仍然按 chatKey 隔离，不会把一个群正在讨论的工作状态带到另一个群。
+        人物长期记忆按 QQ 全局统一；来源会话只用于证据追溯，不限制这条记忆在哪个群可见。<br>
+        群聊/私聊自己的 handoff 已独立到“会话记忆”页，并继续严格按 chatKey 隔离。
       </div>
       <div class="gm-section"><h3>来源会话</h3><div>${sourceHtml}</div></div>
       <div class="gm-section"><h3>长期印象</h3>${memoryHtml}</div>`;
@@ -291,11 +283,12 @@
   }
 
   async function loadGlobalMemory(force = false) {
-    const ui = ensureView();
+    const ui = viewParts();
     if (!ui) return;
     const seq = ++loadSeq;
-    const items = document.getElementById('global-memory-items');
-    if (force || !people.length) items.innerHTML = '<div class="gm-empty">正在读取全局人物记忆…</div>';
+    if (force || !people.length) {
+      ui.items.innerHTML = '<div class="gm-empty">正在读取全局人物记忆…</div>';
+    }
     try {
       const next = await fetchPeople();
       if (seq !== loadSeq) return;
@@ -305,25 +298,25 @@
       renderDetail();
     } catch (error) {
       if (seq !== loadSeq) return;
-      items.innerHTML = `<div class="gm-empty">加载失败：${esc(error?.message || error)}</div>`;
+      ui.items.innerHTML = `<div class="gm-empty">加载失败：${esc(error?.message || error)}</div>`;
     }
   }
 
   function activateIfNeeded() {
-    const view = document.getElementById('view-memory');
+    const view = document.getElementById('view-people-memory');
     if (!view?.classList.contains('active')) return;
-    ensureView();
     loadGlobalMemory(false);
   }
 
-  document.querySelector('[data-tab="memory"]')?.addEventListener('click', () => {
-    // app.js 会先更新旧的按会话记忆视图；稍后切换为全局人物视图，两套逻辑互不抢 DOM。
-    setTimeout(() => loadGlobalMemory(true), 80);
+  document.getElementById('gm-refresh')?.addEventListener('click', () => loadGlobalMemory(true));
+  document.querySelector('[data-tab="people-memory"]')?.addEventListener('click', () => {
+    // app.js 的通用 tab handler 先完成视图切换；随后刷新人物全局视图。
+    setTimeout(() => loadGlobalMemory(true), 0);
   });
 
   window.addEventListener('focus', activateIfNeeded);
   setInterval(() => {
-    const view = document.getElementById('view-memory');
+    const view = document.getElementById('view-people-memory');
     if (view?.classList.contains('active')) loadGlobalMemory(false);
   }, 15000);
 })();
