@@ -63,10 +63,9 @@
     <button class="tab" data-tab="chats" data-page-node-id="AdXD0D2NiWH5UBfpPQqzQ2">存档</button>
     <button class="tab" data-tab="memory" data-page-node-id="vXS9OY6wG4MkJlzQ2aLADZ">会话记忆</button>
     <button class="tab" data-tab="people-memory" data-page-node-id="qpeoplememorynav">人物记忆</button>
-    <button class="tab hidden" data-tab="identity" data-feature-nav="identity">旧印象</button>
-    <button class="tab hidden" data-tab="friends" data-feature-nav="auto-friend">好友管理</button>
-    <button class="tab hidden" data-tab="slang" data-feature-nav="slang">黑话研究</button>
-    <button class="tab hidden" data-tab="incidents" data-feature-nav="incidents">异常</button>
+    <button class="tab" data-tab="identity" data-feature-nav="identity">人物印象</button>
+    <button class="tab" data-tab="friends" data-feature-nav="auto-friend">好友管理</button>
+    <button class="tab" data-tab="incidents" data-feature-nav="incidents">异常处理</button>
     <button class="tab" data-tab="assets" data-page-node-id="qassetobserve">观测</button>
     <button class="tab" data-tab="usage" data-page-node-id="hcZzcXuMojNoiE7UcRVYfR">用量</button>
     <button class="tab" data-tab="settings" data-page-node-id="4cXbRBtGmcpcL272eKvHPV">设置</button>
@@ -126,17 +125,13 @@
       </div>
     </section>
 
-    <!-- 固化后的实验功能拥有独立页面；导航可见性由配置中的 graduated 控制 -->
+    <!-- 正式功能：固定随服务启动，不再由实验功能开关控制 -->
     <section id="view-identity" class="view">
       <div id="identity-page" class="asset-pane"></div>
     </section>
 
     <section id="view-friends" class="view">
       <div id="friend-page" class="asset-pane"></div>
-    </section>
-
-    <section id="view-slang" class="view">
-      <div id="slang-page" class="asset-pane"></div>
     </section>
 
     <section id="view-incidents" class="view">
@@ -170,6 +165,7 @@
     </form>
   </dialog>
   <script src="/app.js"></script>
+  <script src="/stable-features.js"></script>
   <script src="/status-refresh.js"></script>
   <script src="/session-memory-view.js"></script>
   <script src="/global-memory.js"></script>
