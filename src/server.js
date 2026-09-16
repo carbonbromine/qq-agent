@@ -1,6 +1,7 @@
 // Linux 服务入口：node src/server.js
 import { createApp } from './app.js';
 import { installManualFriendReviewRoute } from './manual-friend-review-route.js';
+import { installExperimentalMultimodalContextPilot } from './experimental-multimodal-context.js';
 
 let app = null;
 process.on('unhandledRejection', (error) => {
@@ -22,6 +23,9 @@ process.on('uncaughtException', (error) => {
   console.error('[未捕获异常]', error);
   process.exit(1);
 });
+
+// 仅安装一次薄包装；开关关闭时 multimodal-context commit 原样委托旧实现。
+installExperimentalMultimodalContextPilot();
 
 app = createApp();
 installManualFriendReviewRoute(app);

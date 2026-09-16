@@ -2,6 +2,9 @@
 // 本文件只提供“实验工具调度器”的薄包装：关闭时直接委托原实现，保持现有行为。
 import { getConfig } from './config.js';
 import {
+  recordMultimodalToolResult
+} from './experimental-multimodal-context-core.js';
+import {
   annotateExperimentalToolSchemas,
   experimentalBatchKey,
   experimentalToolSchedulerConfig,
@@ -79,24 +82,46 @@ function runtimeBatch(defs, ctx, settings) {
   return batch;
 }
 
+function safeToolArgs(raw) {
+  if (raw && typeof raw === 'object') return raw;
+  try { return JSON.parse(String(raw ?? '{}')); } catch { return {}; }
+}
+
+function observeMultimodalResult(ctx, name, argsJson, result, cfg) {
+  if (cfg?.multimodalContextPilot?.enabled !== true) return result;
+  return recordMultimodalToolResult(
+    ctx?.session,
+    name,
+    safeToolArgs(argsJson),
+    result,
+    cfg
+  );
+}
+
 /**
  * 实验关闭：直接进入旧 executeTool，连批次解析都不做。
  * 实验开启：宿主依旧逐个 await 本函数；仅连续只读工具会被后台并行预启动。
  */
 export async function executeTool(defs, ctx, name, argsJson) {
-  const settings = experimentalToolSchedulerConfig(getConfig());
+  const cfg = getConfig();
+  const settings = experimentalToolSchedulerConfig(cfg);
   if (!settings.enabled) {
-    return coreExecuteTool(defs, ctx, name, argsJson);
+    const result = await coreExecuteTool(defs, ctx, name, argsJson);
+    return observeMultimodalResult(ctx, name, argsJson, result, cfg);
   }
 
   const batch = runtimeBatch(defs, ctx, settings);
-  if (!batch) return coreExecuteTool(defs, ctx, name, argsJson);
+  if (!batch) {
+    const result = await coreExecuteTool(defs, ctx, name, argsJson);
+    return observeMultimodalResult(ctx, name, argsJson, result, cfg);
+  }
 
   const scheduled = await batch.next(name, argsJson);
   if (!scheduled.handled) {
     // Session 审计结构与宿主调用顺序出现任何不一致时，宁可退回旧串行路径。
-    return coreExecuteTool(defs, ctx, name, argsJson);
+    const result = await coreExecuteTool(defs, ctx, name, argsJson);
+    return observeMultimodalResult(ctx, name, argsJson, result, cfg);
   }
   schedulerMetrics(ctx?.session, batch, settings);
-  return scheduled.result;
+  return observeMultimodalResult(ctx, name, argsJson, scheduled.result, cfg);
 }
