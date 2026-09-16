@@ -1,19 +1,11 @@
 'use strict';
 
-// Production feature UI invariants. app.js is intentionally kept backwards
-// compatible with older consoles; this post-render layer removes controls that
-// are no longer independently configurable and exposes one global admin QQ.
+// Current production UI integration for capabilities that graduated from the
+// experiment page. This file deliberately hooks existing render boundaries
+// instead of watching every DOM mutation: message/status refreshes must not
+// repeatedly delete and recreate controls.
 (function installStableFeatureUi() {
-  const replacements = [
-    ['启停由“设置 → 实验功能”统一控制', '正式功能，随服务恒定启动'],
-    ['启停由「设置 → 实验功能」统一控制', '正式功能，随服务恒定启动'],
-    ['异常处理试点运行中', '异常处理基础设施运行中'],
-    ['异常处理试点', '异常处理基础设施'],
-    ['主动发送实验开关已关闭', '主动好友申请为正式功能'],
-    ['统一身份库总开关已关闭', '人物统一印象为正式功能']
-  ];
-
-  const retiredExperimentControls = [
+  const promotedExperimentControls = [
     '#cfg-identity-pilot-enabled',
     '#cfg-auto-friend-enabled',
     '#cfg-slang-pilot-enabled',
@@ -27,23 +19,25 @@
     '#auto-update-owner'
   ];
 
+  const textReplacements = [
+    ['启停由“设置 → 实验功能”统一控制', '正式功能，随服务恒定启动'],
+    ['启停由「设置 → 实验功能」统一控制', '正式功能，随服务恒定启动'],
+    ['异常处理试点运行中', '异常处理基础设施运行中'],
+    ['异常处理试点', '异常处理基础设施'],
+    ['主动发送实验开关已关闭', '主动好友申请为正式功能'],
+    ['统一身份库总开关已关闭', '人物统一印象为正式功能']
+  ];
+
   let adminValue = '';
   let adminLoaded = false;
   let adminLoading = null;
 
-  function replaceText(root) {
-    if (!root) return;
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-    let node;
-    while ((node = walker.nextNode())) {
-      let next = node.nodeValue || '';
-      for (const [from, to] of replacements) next = next.replaceAll(from, to);
-      if (next !== node.nodeValue) node.nodeValue = next;
+  function currentAdminFromState() {
+    try {
+      return String(state?.config?.admin?.ownerUin || '').trim();
+    } catch {
+      return '';
     }
-  }
-
-  function setLabel(el, label) {
-    if (el && el.textContent !== label) el.textContent = label;
   }
 
   async function configRequest(method = 'GET', body = null) {
@@ -61,16 +55,26 @@
   }
 
   function syncAdminInputs() {
+    const stateValue = currentAdminFromState();
+    if (stateValue || !adminLoaded) adminValue = stateValue || adminValue;
+
     const globalInput = document.querySelector('#cfg-global-admin-owner');
-    if (globalInput && adminLoaded && document.activeElement !== globalInput) {
+    if (globalInput && document.activeElement !== globalInput) {
       globalInput.value = adminValue;
     }
     document.querySelectorAll('[data-global-admin-mirror="true"]').forEach((input) => {
-      if (input.value !== adminValue) input.value = adminValue;
+      input.value = adminValue;
     });
   }
 
   function loadAdmin() {
+    const fromState = currentAdminFromState();
+    if (fromState) {
+      adminValue = fromState;
+      adminLoaded = true;
+      syncAdminInputs();
+      return Promise.resolve(adminValue);
+    }
     if (adminLoaded) {
       syncAdminInputs();
       return Promise.resolve(adminValue);
@@ -88,6 +92,89 @@
     return adminLoading;
   }
 
+  function replaceText(root) {
+    if (!root) return;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let node;
+    while ((node = walker.nextNode())) {
+      let next = node.nodeValue || '';
+      for (const [from, to] of textReplacements) next = next.replaceAll(from, to);
+      if (next !== node.nodeValue) node.nodeValue = next;
+    }
+  }
+
+  function removeControlContainer(control) {
+    if (!control) return;
+    const container = control.closest('.control-key-row')
+      || control.closest('.checkbox-row')
+      || control.closest('.field')
+      || control.closest('label')
+      || control;
+    container.remove();
+  }
+
+  function stripPromotedExperimentHtml(html) {
+    const template = document.createElement('template');
+    template.innerHTML = String(html || '');
+    for (const selector of promotedExperimentControls) {
+      removeControlContainer(template.content.querySelector(selector));
+    }
+    // Automated slang research is retired completely. A manually maintained
+    // slang asset library is a different feature and remains available.
+    removeControlContainer(template.content.querySelector('#cfg-slang-owner'));
+    template.content.querySelectorAll('[data-asset-kind="slang-research"]')
+      .forEach((node) => node.remove());
+    const result = template.content.querySelector('#experiment-launch-result');
+    if (result && !template.content.querySelector('.control-key-row')) result.remove();
+    return template.innerHTML;
+  }
+
+  function replaceLegacyOwnerInput(selector) {
+    const input = document.querySelector(selector);
+    if (!input || input.dataset.globalAdminMirror === 'true') return;
+    const hidden = document.createElement('input');
+    hidden.type = 'hidden';
+    hidden.id = input.id;
+    hidden.dataset.globalAdminMirror = 'true';
+    hidden.value = adminValue || currentAdminFromState() || String(input.value || '').trim();
+    const wrapper = input.closest('.field') || input.closest('label') || input;
+    wrapper.replaceWith(hidden);
+  }
+
+  function normalizeFeaturePage(rootSelector) {
+    const root = document.querySelector(rootSelector);
+    if (!root) return;
+    replaceText(root);
+    for (const selector of legacyOwnerInputs) replaceLegacyOwnerInput(selector);
+
+    const dispatch = root.querySelector('#cfg-identity-friend-dispatch');
+    const dispatchRow = dispatch?.closest('.checkbox-row') || dispatch?.closest('.field');
+    if (dispatchRow) {
+      const note = document.createElement('div');
+      note.className = 'hint';
+      note.dataset.stableFriendDispatch = 'true';
+      note.textContent = '管理员批准后的好友申请发送为正式能力，恒定启用。';
+      dispatchRow.replaceWith(note);
+    }
+    syncAdminInputs();
+  }
+
+  function normalizeNavigation() {
+    document.querySelectorAll('[data-feature-nav="identity"]').forEach((el) => {
+      el.classList.remove('hidden');
+      el.textContent = '人物印象';
+    });
+    document.querySelectorAll('[data-feature-nav="auto-friend"]').forEach((el) => {
+      el.classList.remove('hidden');
+    });
+    document.querySelectorAll('[data-feature-nav="incidents"]').forEach((el) => {
+      el.classList.remove('hidden');
+      el.textContent = '异常处理';
+    });
+    document.querySelectorAll('[data-feature-nav="slang"], #view-slang')
+      .forEach((el) => el.remove());
+  }
+
   async function saveAdmin(panel) {
     const input = panel.querySelector('#cfg-global-admin-owner');
     const result = panel.querySelector('[data-global-admin-result]');
@@ -103,11 +190,12 @@
       const config = await configRequest('POST', { admin: { ownerUin } });
       adminValue = String(config?.admin?.ownerUin || '').trim();
       adminLoaded = true;
+      try { if (state?.config) state.config = config; } catch { /* legacy console */ }
       syncAdminInputs();
       if (result) {
         result.textContent = adminValue
           ? `已保存全局管理员 QQ：${adminValue}；已自动加入私聊白名单。`
-          : '已清空全局管理员 QQ；基础设施继续运行，但 QQ 通知/审批入口不可用。';
+          : '已清空全局管理员 QQ；人物/好友/异常基础设施继续运行，但 QQ 通知和私聊审批不可用。';
       }
     } catch (error) {
       if (result) result.textContent = `保存失败：${String(error?.message || error)}`;
@@ -146,77 +234,54 @@
       }
     });
     form.prepend(panel);
-    if (adminLoaded) syncAdminInputs();
-    else loadAdmin();
+    loadAdmin();
   }
 
-  function prunePromotedRows() {
-    for (const selector of retiredExperimentControls) {
-      const control = document.querySelector(selector);
-      const row = control?.closest('.control-key-row');
-      if (row) row.remove();
-    }
-    const result = document.querySelector('#experiment-launch-result');
-    if (result && !result.closest('.experimental-settings')?.querySelector('.control-key-row')) {
-      result.remove();
-    }
+  function wrapHtmlRenderer(name, transform) {
+    const original = window[name];
+    if (typeof original !== 'function' || original.__stableFeatureWrapped) return false;
+    const wrapped = function (...args) {
+      return transform(original.apply(this, args), args);
+    };
+    wrapped.__stableFeatureWrapped = true;
+    window[name] = wrapped;
+    return true;
   }
 
-  function replaceLegacyOwnerInputs() {
-    for (const selector of legacyOwnerInputs) {
-      const input = document.querySelector(selector);
-      if (!input || input.dataset.globalAdminMirror === 'true') continue;
-      const hidden = document.createElement('input');
-      hidden.type = 'hidden';
-      hidden.id = input.id;
-      hidden.dataset.globalAdminMirror = 'true';
-      hidden.value = adminLoaded ? adminValue : String(input.value || '').trim();
-      const wrapper = input.closest('.field') || input.closest('label') || input;
-      wrapper.replaceWith(hidden);
-    }
-    if (adminLoaded) syncAdminInputs();
+  function wrapDomRenderer(name, after) {
+    const original = window[name];
+    if (typeof original !== 'function' || original.__stableFeatureWrapped) return false;
+    const wrapped = function (...args) {
+      const result = original.apply(this, args);
+      after(args);
+      return result;
+    };
+    wrapped.__stableFeatureWrapped = true;
+    window[name] = wrapped;
+    return true;
   }
 
-  function prune() {
-    // Keep the Experimental Features page itself: unrelated pilots still live
-    // there. Only promoted/retired controls disappear.
-    prunePromotedRows();
+  // Remove promoted/retired controls before the experiment section reaches DOM.
+  wrapHtmlRenderer('renderExperimentalSettingsSection', stripPromotedExperimentHtml);
 
-    document.querySelectorAll('[data-feature-nav="identity"]').forEach((el) => {
-      el.classList.remove('hidden');
-      setLabel(el, '人物印象');
-    });
-    document.querySelectorAll('[data-feature-nav="auto-friend"]').forEach((el) => {
-      el.classList.remove('hidden');
-    });
-    document.querySelectorAll('[data-feature-nav="incidents"]').forEach((el) => {
-      el.classList.remove('hidden');
-      setLabel(el, '异常处理');
-    });
-    document.querySelectorAll('[data-feature-nav="slang"], #view-slang').forEach((el) => el.remove());
-
-    // "slang" is the manual asset library and remains supported. Only the
-    // automated slang-research surface is retired.
-    document.querySelectorAll('[data-asset-kind="slang-research"]').forEach((el) => el.remove());
-
-    const dispatch = document.querySelector('#cfg-identity-friend-dispatch');
-    const row = dispatch?.closest('.checkbox-row');
-    if (row) {
-      const note = document.createElement('div');
-      note.className = 'hint';
-      note.dataset.stableFriendDispatch = 'true';
-      note.textContent = '管理员批准后的好友申请发送已固化为正式能力，恒定启用。';
-      row.replaceWith(note);
-    }
-
-    replaceLegacyOwnerInputs();
+  // Settings pages are rebuilt on every section switch, so install the one
+  // global administrator entry exactly once per render.
+  wrapDomRenderer('renderSettings', () => {
     installGlobalAdminPanel();
-    replaceText(document.querySelector('#identity-page'));
-    replaceText(document.querySelector('#friend-page'));
-    replaceText(document.querySelector('#incident-page'));
-  }
+    for (const selector of legacyOwnerInputs) replaceLegacyOwnerInput(selector);
+    syncAdminInputs();
+  });
 
-  prune();
-  const observer = new MutationObserver(() => prune());
-  observer.observe(document.documentElement, { childList: true, subtree: true });
+  // Feature pages have their own render paths outside Settings.
+  wrapDomRenderer('renderIdentityFeaturePage', () => normalizeFeaturePage('#identity-page'));
+  wrapDomRenderer('renderFriendFeaturePage', () => normalizeFeaturePage('#friend-page'));
+  wrapDomRenderer('renderIncidentFeaturePage', () => normalizeFeaturePage('#incident-page'));
+
+  normalizeNavigation();
+  // Normalize any content that was rendered synchronously before this script
+  // loaded. No observer is installed; future updates go through wrapped renderers.
+  normalizeFeaturePage('#identity-page');
+  normalizeFeaturePage('#friend-page');
+  normalizeFeaturePage('#incident-page');
+  installGlobalAdminPanel();
 })();
