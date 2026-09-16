@@ -82,7 +82,7 @@ export function isRetryableUpdateNetworkError(error) {
   ) {
     return false;
   }
-  return /gnutls|tls|ssl|http\/2|http 429|http 5\d\d|timed? ?out|timeout|connection|network|could not resolve|temporary failure|early eof|rpc failed|remote end hung up|connection reset|connection closed|recv error|send error|broken pipe|failed to connect|unreachable/.test(text)
+  return /gnutls|tls|ssl|http\/2|http 429|http 5\d\d|returned error:\s*5\d\d|timed? ?out|timeout|connection|network|could not resolve|temporary failure|early eof|rpc failed|remote end hung up|connection reset|connection closed|recv error|send error|broken pipe|failed to connect|unreachable/.test(text)
     || error?.code === 'ETIMEDOUT'
     || error?.code === 'ECONNRESET'
     || error?.code === 'EAI_AGAIN';
