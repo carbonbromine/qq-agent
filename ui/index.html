@@ -52,7 +52,7 @@
     <div class="loading-card" data-page-node-id="boXG4AHTg9zdLRzAkPQU0d">
       <div class="loading-title" data-page-node-id="Jd8xjaha2bCfyriCNfs8Tn">QQ Agent 正在启动</div>
       <div class="loading-sub" id="loading-status" data-page-node-id="pnFkOCeJYMuEWqSGBEF5NX">正在连接 QQ Agent 服务，请稍候…</div>
-      <div class="loading-spinner" data-page-node-id="pVvSFcW7FhjA5K8LpxpM5o"></div>
+      <div class="loading-spinner" data-page-node-id="pVvSFcW7fHjA5K8LpxpM5o"></div>
       <pre class="loading-logs" id="loading-logs" data-page-node-id="qCOILAMT7FkCZFYCEKYo4o"></pre>
     </div>
   </div>
@@ -61,7 +61,8 @@
     <button class="tab" data-tab="control" data-page-node-id="qcontrolnav">控制</button>
     <button class="tab active" data-tab="sessions" data-page-node-id="QA2pcdHYdARJK2APBNKZmC">会话</button>
     <button class="tab" data-tab="chats" data-page-node-id="AdXD0D2NiWH5UBfpPQqzQ2">存档</button>
-    <button class="tab" data-tab="memory" data-page-node-id="vXS9OY6wG4MkJlzQ2aLADZ">记忆</button>
+    <button class="tab" data-tab="memory" data-page-node-id="vXS9OY6wG4MkJlzQ2aLADZ">会话记忆</button>
+    <button class="tab" data-tab="people-memory" data-page-node-id="qpeoplememorynav">人物记忆</button>
     <button class="tab hidden" data-tab="identity" data-feature-nav="identity">旧印象</button>
     <button class="tab hidden" data-tab="friends" data-feature-nav="auto-friend">好友管理</button>
     <button class="tab hidden" data-tab="slang" data-feature-nav="slang">黑话研究</button>
@@ -100,14 +101,28 @@
       </div>
     </section>
 
-    <!-- 记忆视图 -->
+    <!-- 会话记忆：只展示 chatKey 隔离的 handoff / 工作状态 -->
     <section id="view-memory" class="view" data-page-node-id="leNhwCaiL4AF1vB9JaXEQw">
       <aside id="memory-list" class="list-pane" data-page-node-id="bPnh3N5qAcbMSCpVxYthSd">
-        <div class="list-head muted" data-page-node-id="LVSsdebq14ic87yIdKe0k1">记忆</div>
+        <div class="list-head muted" data-page-node-id="LVSsdebq14ic87yIdKe0k1">会话记忆</div>
         <div id="memory-items" data-page-node-id="Nd0JwkZfmnInPLDO9AjVAD"></div>
       </aside>
       <div id="memory-detail" class="detail-pane" data-page-node-id="fXph3DU6yHzmzVZOtXuAii">
-        <div class="empty-hint" data-page-node-id="BSa8XGxI6gVbgsfrKC7QAq">← 选择会话查看记忆</div>
+        <div class="empty-hint" data-page-node-id="BSa8XGxI6gVbgsfrKC7QAq">← 选择会话查看 handoff</div>
+      </div>
+    </section>
+
+    <!-- 人物长期记忆：按 QQ 全局统一；群聊只作为 provenance -->
+    <section id="view-people-memory" class="view" data-page-node-id="qpeoplememoryview">
+      <aside id="global-memory-list" class="list-pane" data-page-node-id="qpeoplememorylist">
+        <div class="gm-head">
+          <strong>人物记忆</strong>
+          <button class="btn btn-small" type="button" id="gm-refresh">刷新</button>
+        </div>
+        <div id="global-memory-items"></div>
+      </aside>
+      <div id="global-memory-detail" class="detail-pane" data-page-node-id="qpeoplememorydetail">
+        <div class="empty-hint">← 选择人物查看全局长期记忆</div>
       </div>
     </section>
 
@@ -156,6 +171,7 @@
   </dialog>
   <script src="/app.js"></script>
   <script src="/status-refresh.js"></script>
+  <script src="/session-memory-view.js"></script>
   <script src="/global-memory.js"></script>
   <script src="/tool-scheduler-pilot.js"></script>
   <script src="/relationship-pilot.js"></script>
