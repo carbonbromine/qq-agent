@@ -7,6 +7,7 @@ import { after, test } from 'node:test';
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-memory-backup-'));
 process.env.QQ_AGENT_DATA_DIR = dataDir;
 const { backupPersonBeforeConsolidation } = await import('../src/memory-consolidation-backup.js');
+const { MemoryStore } = await import('../src/memory.js');
 
 after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
 
@@ -49,4 +50,40 @@ test('consolidation keeps append-only global history and legacy latest snapshot'
     'utf8'
   ));
   assert.deepEqual(legacy, person, 'legacy path keeps the latest pre-consolidation person snapshot');
+});
+
+test('real replaceMember path snapshots same-source destructive writes', () => {
+  const memory = new MemoryStore();
+  memory.append('group:456', 'memberImpression', '真实调用链里的旧印象', {
+    userId: '1919810',
+    target: '集成人物'
+  });
+  const before = memory.getMember('', '1919810');
+
+  memory.replaceMember('group:456', '1919810', '集成人物', ['整理后的摘要']);
+
+  const legacyPath = path.join(dataDir, 'memory', 'backups', 'group_456', '1919810.json');
+  assert.ok(fs.existsSync(legacyPath), 'replaceMember must protect the actual consolidation write path');
+  assert.deepEqual(JSON.parse(fs.readFileSync(legacyPath, 'utf8')), before);
+
+  const after = memory.getMember('', '1919810');
+  assert.deepEqual(after.impressions.map((entry) => entry.content), ['整理后的摘要']);
+});
+
+test('first appearance in a new chat merges without creating a destructive-write backup', () => {
+  const memory = new MemoryStore();
+  memory.append('private:23333', 'memberImpression', '跨会话已有印象', {
+    userId: '23333',
+    target: '跨会话人物'
+  });
+
+  memory.replaceMember('group:999', '23333', '跨会话人物', ['新群提炼印象']);
+
+  const legacyPath = path.join(dataDir, 'memory', 'backups', 'group_999', '23333.json');
+  assert.equal(fs.existsSync(legacyPath), false, 'non-destructive first-source merge should not create a backup');
+  const after = memory.getMember('', '23333');
+  assert.deepEqual(
+    new Set(after.impressions.map((entry) => entry.content)),
+    new Set(['跨会话已有印象', '新群提炼印象'])
+  );
 });
