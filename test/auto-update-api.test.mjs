@@ -19,7 +19,7 @@ async function freePort() {
   return port;
 }
 
-test('console configures, resumes, pauses and manually starts update deployment', async (t) => {
+test('console routes updater administrator aliases into global admin', async (t) => {
   const appDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-auto-update-app-'));
   fs.mkdirSync(path.join(appDir, 'scripts'), { recursive: true });
   fs.writeFileSync(path.join(appDir, 'scripts/auto-update.mjs'), '');
@@ -41,7 +41,7 @@ test('console configures, resumes, pauses and manually starts update deployment'
     token: 'auto-update-console-token'
   };
   cfg.onebot.wsUrl = 'ws://127.0.0.1:1';
-  cfg.allow.private = ['900001'];
+  cfg.allow.private = [];
   updateConfig(cfg);
 
   const systemctlCalls = [];
@@ -74,21 +74,30 @@ test('console configures, resumes, pauses and manually starts update deployment'
   assert.equal(initial.response.status, 200);
   assert.equal(initial.body.installed, true);
   assert.equal(initial.body.enabled, false);
+  assert.equal(initial.body.ownerUin, '');
 
+  // ownerUin is kept as a backwards-compatible endpoint argument, but its
+  // value must be persisted exclusively as config.admin.ownerUin.
   const settings = await request('/api/auto-update/settings', 'PUT', {
     ownerUin: '900001',
     intervalHours: 12
   });
   assert.equal(settings.response.status, 200);
   assert.equal(settings.body.status.intervalHours, 12);
+  assert.equal(settings.body.status.ownerUin, '900001');
+
+  const afterSettings = await request('/api/config');
+  assert.equal(afterSettings.body.admin.ownerUin, '900001');
+  assert.ok(afterSettings.body.allow.private.includes('900001'));
+  assert.equal(afterSettings.body.autoUpdate.ownerUin, '900001');
 
   const resumed = await request('/api/auto-update/resume', 'POST', {
     confirm: true,
-    ownerUin: '900001',
     intervalHours: 12
   });
   assert.equal(resumed.response.status, 200);
   assert.equal(resumed.body.status.enabled, true);
+  assert.equal(resumed.body.status.ownerUin, '900001');
 
   const paused = await request('/api/auto-update/pause', 'POST', { confirm: true });
   assert.equal(paused.response.status, 200);

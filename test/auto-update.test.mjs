@@ -28,9 +28,9 @@ function fixture(t) {
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
   let config = {
+    admin: { ownerUin: '900001' },
     autoUpdate: {
       enabled: false,
-      ownerUin: '900001',
       repository: 'https://github.com/carbonbromine/qq-agent.git',
       branch: 'main',
       intervalHours: 6,
@@ -55,6 +55,7 @@ function fixture(t) {
       config = {
         ...config,
         ...patch,
+        admin: { ...config.admin, ...(patch.admin || {}) },
         autoUpdate: { ...config.autoUpdate, ...(patch.autoUpdate || {}) }
       };
       return config;
@@ -71,6 +72,7 @@ function fixture(t) {
     appDir,
     dataDir,
     get config() { return config; },
+    setAdmin(ownerUin) { config.admin = { ...config.admin, ownerUin }; },
     setAutoUpdate(patch) { config.autoUpdate = { ...config.autoUpdate, ...patch }; },
     setAllowPrivate(value) { config.allow.private = value; },
     manager,
@@ -93,6 +95,7 @@ test('updater launch failure disables automation and queues an administrator not
 
   const state = readAutoUpdateState(f.dataDir);
   assert.equal(f.config.autoUpdate.enabled, false);
+  assert.equal(f.config.admin.ownerUin, '900001');
   assert.equal(state.status, 'failed');
   assert.equal(state.autoDisabled, true);
   assert.equal(state.notification.pending, false);
@@ -133,9 +136,10 @@ test('manual update queues the independent systemd updater', (t) => {
     args.includes('qq-agent-test-update.service') && args.includes('--no-block')));
 });
 
-test('connectivity probe is one-shot, does not require an alert owner and never changes enable state', (t) => {
+test('connectivity probe is one-shot, does not require an administrator and never changes enable state', (t) => {
   const f = fixture(t);
-  f.setAutoUpdate({ enabled: false, ownerUin: '', nextAction: 'probe' });
+  f.setAdmin('');
+  f.setAutoUpdate({ enabled: false, nextAction: 'probe' });
   f.setAllowPrivate([]);
 
   const status = f.manager.requestManual();
@@ -156,11 +160,14 @@ test('status exposes normalized network policy', (t) => {
   assert.equal(status.retryBaseMs, 100);
   assert.equal(status.disableOnFailure, false);
   assert.equal(status.forceHttp11, true);
+  assert.equal(status.ownerUin, '900001');
 });
 
-test('resume and pause persist automatic update state', (t) => {
+test('resume and pause persist automatic update state through global admin', (t) => {
   const f = fixture(t);
+  f.setAdmin('');
   f.manager.resume({ ownerUin: '900001', intervalHours: 12 });
+  assert.equal(f.config.admin.ownerUin, '900001');
   assert.equal(f.config.autoUpdate.enabled, true);
   assert.equal(f.config.autoUpdate.intervalHours, 12);
   assert.equal(readAutoUpdateState(f.dataDir).status, 'idle');

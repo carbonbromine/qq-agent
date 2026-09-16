@@ -130,7 +130,21 @@ export function consumeAutoUpdateRequest(dataDir) {
   return request;
 }
 
+/**
+ * Auto update shares the application's one global administrator.
+ *
+ * The updater runner can execute directly against config.json before the main
+ * process has had a chance to migrate an old install. Therefore legacy owner
+ * paths are read only when the file has no admin section at all. Once admin
+ * exists—even with an intentionally empty ownerUin—it is the sole truth.
+ */
 export function autoUpdateOwner(config = {}) {
+  const hasAdmin = Boolean(
+    config.admin
+    && typeof config.admin === 'object'
+    && !Array.isArray(config.admin)
+  );
+  if (hasAdmin) return String(config.admin.ownerUin || '').trim();
   return String(
     config.autoUpdate?.ownerUin
     || config.incidentPilot?.ownerUin
@@ -239,9 +253,14 @@ export class AutoUpdateManager {
     const autoUpdate = current.autoUpdate || {};
     const next = {
       ...autoUpdate,
-      ownerUin: String(options.ownerUin ?? autoUpdate.ownerUin ?? '').trim(),
       intervalHours: options.intervalHours ?? autoUpdate.intervalHours ?? 6
     };
+    // ownerUin is accepted only as a backwards-compatible API alias. Route it
+    // immediately into admin.ownerUin; autoUpdate.ownerUin remains a config
+    // compatibility mirror maintained by the central config layer.
+    const adminPatch = options.ownerUin === undefined
+      ? null
+      : { ownerUin: String(options.ownerUin || '').trim() };
     for (const key of [
       'branch',
       'networkRetries',
@@ -254,21 +273,26 @@ export class AutoUpdateManager {
     ]) {
       if (options[key] !== undefined) next[key] = options[key];
     }
-    const cfg = this.updateConfig({ autoUpdate: next });
+    const cfg = this.updateConfig({
+      autoUpdate: next,
+      ...(adminPatch ? { admin: adminPatch } : {})
+    });
     this.emit('auto-update', this.status());
     return cfg.autoUpdate;
   }
 
-  resume({ ownerUin = '', intervalHours = 6 } = {}) {
+  resume({ ownerUin, intervalHours = 6 } = {}) {
     const current = this.config();
-    const nextOwner = String(ownerUin || current.autoUpdate?.ownerUin || '').trim();
+    const adminPatch = ownerUin === undefined
+      ? null
+      : { ownerUin: String(ownerUin || '').trim() };
     const cfg = this.updateConfig({
       autoUpdate: {
         ...(current.autoUpdate || {}),
         enabled: true,
-        ownerUin: nextOwner,
         intervalHours
-      }
+      },
+      ...(adminPatch ? { admin: adminPatch } : {})
     });
     writeAutoUpdateState(this.dataDir, {
       status: 'idle',
@@ -317,13 +341,13 @@ export class AutoUpdateManager {
     const ownerUin = autoUpdateOwner(cfg);
     if (!probeOnly) {
       if (!/^\d{5,15}$/.test(ownerUin)) {
-        throw updateError('请先配置自动更新告警管理员 QQ', 400);
+        throw updateError('请先配置全局管理员 QQ', 400);
       }
       if (
         cfg.allowAllWhenEmpty !== true
         && !(cfg.allow?.private || []).map(String).includes(ownerUin)
       ) {
-        throw updateError('自动更新管理员 QQ 必须同时加入私聊白名单', 400);
+        throw updateError('全局管理员 QQ 必须同时加入私聊白名单', 400);
       }
     }
     const current = this.status();
@@ -464,7 +488,7 @@ export class AutoUpdateManager {
       return writeAutoUpdateState(this.dataDir, {
         notification: {
           ...state.notification,
-          error: '未配置有效的更新告警管理员 QQ'
+          error: '未配置有效的全局管理员 QQ'
         }
       });
     }

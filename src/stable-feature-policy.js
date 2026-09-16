@@ -7,6 +7,8 @@ export const STABLE_FEATURE_POLICY = Object.freeze({
   slangPilot: false
 });
 
+const RETIRED_SLANG_KEYS = new Set(['enabled', 'graduated']);
+
 function objectSection(parent, key) {
   if (!parent[key] || typeof parent[key] !== 'object' || Array.isArray(parent[key])) {
     parent[key] = {};
@@ -24,6 +26,8 @@ function legacyAdminCandidates(config = {}) {
     config?.identityPilot?.friendProposal?.ownerUin,
     config?.incidentPilot?.ownerUin,
     config?.autoUpdate?.ownerUin,
+    // One-time migration only. The retired slang worker no longer keeps an
+    // administrator setting after this policy is applied.
     config?.slangPilot?.ownerUin
   ];
 }
@@ -46,6 +50,12 @@ function adminAccessState(config = {}, ownerUin = '') {
   };
 }
 
+function retiredSlangKeys(config = {}) {
+  const slang = config?.slangPilot;
+  if (!slang || typeof slang !== 'object' || Array.isArray(slang)) return [];
+  return Object.keys(slang).filter((key) => !RETIRED_SLANG_KEYS.has(key)).sort();
+}
+
 export function stableFeatureFingerprint(config = {}) {
   const ownerUin = normalizedAdminUin(config?.admin?.ownerUin);
   const access = adminAccessState(config, ownerUin);
@@ -61,7 +71,6 @@ export function stableFeatureFingerprint(config = {}) {
     identityOwnerUin: normalizedAdminUin(config?.identityPilot?.friendProposal?.ownerUin),
     incidentOwnerUin: normalizedAdminUin(config?.incidentPilot?.ownerUin),
     updateOwnerUin: normalizedAdminUin(config?.autoUpdate?.ownerUin),
-    slangOwnerUin: normalizedAdminUin(config?.slangPilot?.ownerUin),
     identity: config?.identityPilot?.enabled === true,
     identityGraduated: config?.identityPilot?.graduated === true,
     incomingFriend: config?.identityPilot?.incomingFriendRequest?.enabled === true,
@@ -70,6 +79,7 @@ export function stableFeatureFingerprint(config = {}) {
     friendDispatch: config?.identityPilot?.friendProposal?.activeDispatchEnabled === true,
     slang: config?.slangPilot?.enabled === true,
     slangGraduated: config?.slangPilot?.graduated === true,
+    retiredSlangKeys: retiredSlangKeys(config),
     incident: config?.incidentPilot?.enabled === true,
     incidentGraduated: config?.incidentPilot?.graduated === true
   });
@@ -82,8 +92,9 @@ export function stableFeatureFingerprint(config = {}) {
  * - once config.admin exists it is the sole source of truth, including an
  *   intentionally empty ownerUin;
  * - old installs without config.admin migrate the first valid historical owner
- *   in this order: Identity/Friends -> Incident -> Auto Update -> Slang;
- * - historical ownerUin fields remain synchronized compatibility mirrors only;
+ *   in this order: Identity/Friends -> Incident -> Auto Update -> retired Slang;
+ * - Identity/Incident/Auto Update keep temporary ownerUin mirrors only because
+ *   legacy runtime code still reads those paths; the retired slang worker does not;
  * - a configured administrator is automatically allowed to private-message the
  *   bot and removed from the private deny list, so QQ approval commands work.
  */
@@ -127,12 +138,15 @@ export function applyStableFeaturePolicy(config = {}) {
   friend.activeDispatchEnabled = true;
   friend.ownerUin = ownerUin;
 
-  // Keep the old object as a compatibility tombstone so older callers can
-  // still read it, but make it impossible to reactivate the retired worker.
+  // Automated slang research is retired, not merely disabled. Keep only the
+  // two tombstone flags so stale clients can see that it cannot be reactivated;
+  // all worker tuning/owner configuration is removed from the canonical config.
   const slang = objectSection(config, 'slangPilot');
+  for (const key of Object.keys(slang)) {
+    if (!RETIRED_SLANG_KEYS.has(key)) delete slang[key];
+  }
   slang.enabled = false;
   slang.graduated = false;
-  slang.ownerUin = ownerUin;
 
   const incident = objectSection(config, 'incidentPilot');
   incident.enabled = true;

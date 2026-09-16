@@ -23,14 +23,11 @@ test('incident infrastructure stays active and versions chat controls', async (t
   const cfg = structuredClone(DEFAULT_CONFIG);
   cfg.server = { ...cfg.server, host: '127.0.0.1', port, token: '' };
   cfg.runtime.mode = 'observe';
+  cfg.admin = { ...(cfg.admin || {}), ownerUin: '2948771712' };
   cfg.allow.private = ['2948771712'];
   cfg.allow.groups = ['1'];
   cfg.onebot.wsUrl = 'ws://127.0.0.1:1';
   cfg.onebot.httpUrl = 'http://127.0.0.1:1';
-  cfg.incidentPilot = {
-    ...cfg.incidentPilot,
-    ownerUin: '2948771712'
-  };
   updateConfig(cfg);
   const app = createApp({ log: () => {} });
   t.after(async () => {
@@ -100,14 +97,17 @@ test('incident infrastructure stays active and versions chat controls', async (t
   });
   assert.equal(deleted.status, 200);
 
-  // Old clients may still submit the removed switch. The stable config facade
-  // must canonicalize it back to enabled, and the API must stay operational.
+  // Old clients may still submit the removed switch. Current configuration
+  // canonicalizes it back to enabled, keeps the global administrator intact,
+  // and the API remains operational.
   const attemptedDisable = await request('/api/config', {
     method: 'POST',
-    body: { incidentPilot: { enabled: false } }
+    body: { incidentPilot: { enabled: false, ownerUin: '12345678' } }
   });
   assert.equal(attemptedDisable.status, 200);
   assert.equal(attemptedDisable.body.config.incidentPilot.enabled, true);
+  assert.equal(attemptedDisable.body.config.admin.ownerUin, '2948771712');
+  assert.equal(attemptedDisable.body.config.incidentPilot.ownerUin, '2948771712');
 
   const stillActive = await request('/api/incidents');
   assert.equal(stillActive.status, 200);
