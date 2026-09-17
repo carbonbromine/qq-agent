@@ -71,6 +71,20 @@ test('identity, automatic friends and incident infrastructure start without an a
   assert.match(proposal.proposal.notifyError, /管理员 QQ/);
   assert.equal(identity.listFriendProposals().length, 1);
 
+  // The production facade forces this gate on, but the manager remains
+  // internally coherent when instantiated directly by tests/tools.
+  cfg.identityPilot.friendProposal.enabled = false;
+  await assert.rejects(
+    identity.proposeFriend({
+      userId: '123458',
+      chatKey: 'private:123458',
+      reasonCode: 'interest',
+      reason: 'disabled direct config test'
+    }),
+    /主动好友候选功能当前未启用/
+  );
+  cfg.identityPilot.friendProposal.enabled = true;
+
   // Missing owner affects only the notification/approval edge. It must not
   // prevent the request from being durably recorded by the always-on manager.
   const incoming = await identity.receiveIncomingFriendRequest({
