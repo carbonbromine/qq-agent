@@ -413,6 +413,8 @@ describe('ChatStore', () => {
     const evidence = store.relationshipEvidence('42', {
       fromTs: base - 1, toTs: base + 10, limit: 48, selfId: '999'
     });
+    assert.equal(store.latestSenderName('42'), 'target');
+    assert.equal(store.latestSenderName('77'), 'other');
     const byText = new Map(evidence.map((item) => [item.text, item]));
     assert.equal(byText.get('群里普通发言').countableEvidence, false);
     assert.equal(byText.get('直接问 Agent').countableEvidence, true);

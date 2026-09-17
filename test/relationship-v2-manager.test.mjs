@@ -106,6 +106,7 @@ test('manual job uses forced structured output and includes current persona', as
   assert.equal(request.toolChoice.function.name, 'submit_relationship_v2_events');
   assert.equal(request.overrides.model, 'relationship-model');
   assert.match(request.messages[0].content, /重视兑现承诺/);
+  assert.equal(manager.listJobs({ limit: 10 }).find((item) => item.id === job.id).name, '测试用户');
   assert.equal(manager.guidanceFor(['12345']), '', 'behavior injection defaults off');
   await manager.stop();
 });

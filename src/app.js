@@ -303,8 +303,13 @@ export function createApp({ log = console.log, autoUpdateOptions = {} } = {}) {
         fromTs, toTs, limit, selfId: onebot.selfId || getConfig().onebot?.selfId || ''
       }),
       personProvider: (userId) => {
-        try { return identityPilot?.identityStore?.getPerson?.(String(userId)) || null; }
-        catch { return null; }
+        let person = null;
+        try { person = identityPilot?.identityStore?.getPerson?.(String(userId)) || null; }
+        catch { /* 回退到消息归档中的最近昵称 */ }
+        if (person?.primaryName || person?.remark || person?.nickname || person?.name) return person;
+        const observedName = store.latestSenderName(userId);
+        if (!observedName) return person;
+        return { ...(person || {}), primaryName: observedName };
       },
       emit,
       log: moduleLog('relationship-v2')

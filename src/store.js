@@ -913,6 +913,16 @@ export class ChatStore {
     });
   }
 
+  /** 返回消息归档中该 QQ 最近一次可用的昵称，供关系等只读页面回填历史状态。 */
+  latestSenderName(userId) {
+    const uin = String(userId || '').trim();
+    if (!/^\d{1,15}$/.test(uin)) return '';
+    const row = this.db.prepare(`SELECT sender_name FROM messages
+      WHERE self=0 AND sender_id=? AND TRIM(COALESCE(sender_name,''))<>''
+      ORDER BY ts DESC,id DESC LIMIT 1`).get(uin);
+    return String(row?.sender_name || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+  }
+
   findByMid(chatKey, mid) {
     return entry(this.db.prepare('SELECT * FROM messages WHERE chat_key=? AND mid=?').get(chatKey, String(mid)));
   }
