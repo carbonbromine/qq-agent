@@ -32,7 +32,7 @@
       <span class="sep" data-page-node-id="xxx5qYDKjwTwAWINv1K3YF"></span>
       <span id="model-label" class="muted" data-page-node-id="mxYqKFiIVWYn1SDTF1HQvJ">模型：-</span>
       <span class="sep" data-page-node-id="JuGqHVKz2OXrfUFdvohz3O"></span>
-      <span id="usage-label" class="muted" data-page-node-id="ASGoXILEnFSWWqgmj2pS4B">今日：-</span>
+      <span id="usage-label" class="muted" title="今日 Token 用量与费用" data-page-node-id="ASGoXILEnFSWWqgmj2pS4B">今日：-</span>
       <span class="sep" data-page-node-id="GWds7ORTDExh6JmgVu8cSC"></span>
       <span id="search-count-label" class="muted" title="今日联网搜索次数（web_search / web_fetch）" data-page-node-id="OLNka4FykNQRaxEpBoEK6t">搜索：-</span>
       <button id="theme-btn" class="icon-btn" title="切换主题（暗 → 亮 → 跟随系统）" aria-label="切换主题" data-page-node-id="v47iM0LsuM4VppZ5WLh7Qi"></button>
@@ -73,12 +73,10 @@
   </nav>
 
   <main id="layout" data-page-node-id="hvuDZ0DOoYC7fFheJnpiGZ">
-    <!-- 统一控制入口 -->
     <section id="view-control" class="view" data-page-node-id="qcontrolview">
       <div id="control-page" class="control-pane" data-page-node-id="qcontrolpage"></div>
     </section>
 
-    <!-- 会话视图 -->
     <section id="view-sessions" class="view active" data-page-node-id="EfuI6TFTs4KY9veb0pkva1">
       <aside id="session-list" class="list-pane" data-page-node-id="NNTSUz4evxhvLGzuY26viB">
         <div class="list-head muted" data-page-node-id="aSFyF0LvBNUq4BH2sydWl0"><span id="session-count"></span></div>
@@ -90,7 +88,6 @@
       </div>
     </section>
 
-    <!-- 存档视图 -->
     <section id="view-chats" class="view" data-page-node-id="vrl1zysqFxujSPCndQWW5B">
       <aside id="chat-list" class="list-pane" data-page-node-id="oHomcx4PNl2n51xeHfeIXI">
         <div class="list-head muted" data-page-node-id="vlqc8FbmqzRhAk07MYf9xH">消息存档</div>
@@ -101,7 +98,6 @@
       </div>
     </section>
 
-    <!-- 会话记忆：只展示 chatKey 隔离的 handoff / 工作状态 -->
     <section id="view-memory" class="view" data-page-node-id="leNhwCaiL4AF1vB9JaXEQw">
       <aside id="memory-list" class="list-pane" data-page-node-id="bPnh3N5qAcbMSCpVxYthSd">
         <div class="list-head muted" data-page-node-id="LVSsdebq14ic87yIdKe0k1">会话记忆</div>
@@ -112,7 +108,6 @@
       </div>
     </section>
 
-    <!-- 人物长期记忆：按 QQ 全局统一；群聊只作为 provenance -->
     <section id="view-people-memory" class="view" data-page-node-id="qpeoplememoryview">
       <aside id="global-memory-list" class="list-pane" data-page-node-id="qpeoplememorylist">
         <div class="gm-head">
@@ -126,7 +121,6 @@
       </div>
     </section>
 
-    <!-- 正式功能：固定随服务启动，不再由实验功能开关控制 -->
     <section id="view-identity" class="view">
       <div id="identity-page" class="asset-pane"></div>
     </section>
@@ -143,17 +137,14 @@
       <div id="relationship-v2-page" class="asset-pane"></div>
     </section>
 
-    <!-- AI 资产观测 -->
     <section id="view-assets" class="view" data-page-node-id="qassetview">
       <div id="asset-page" class="asset-pane" data-page-node-id="qassetpage"></div>
     </section>
 
-    <!-- 用量视图 -->
     <section id="view-usage" class="view" data-page-node-id="At5AHGr3EpuOFlDyc7dES4">
       <div id="usage-page" class="usage-pane" data-page-node-id="1AXcokyh5yiXqQgwn6X2gu"></div>
     </section>
 
-    <!-- 设置视图 -->
     <section id="view-settings" class="view" data-page-node-id="b5GnFq8sxB5x457JFQ28DI">
       <aside id="settings-sidebar" class="settings-sidebar" data-page-node-id="LOVR1dHL6fApG676FLte1j"></aside>
       <div id="settings-form" class="settings-pane" data-page-node-id="EsfgJ2QGHHSAtdlHW1RQyT"></div>
@@ -177,6 +168,7 @@
   <script src="/tool-scheduler-pilot.js"></script>
   <script src="/multimodal-context-pilot.js"></script>
   <script src="/relationship-v2.js"></script>
+  <script src="/global-blocklist.js"></script>
   <script src="/auto-update-network.js"></script>
 </body>
 </html>
