@@ -54,13 +54,15 @@ function normEntry(v) {
     out: Number.isFinite(o) ? o : 0,
     cached: v.cached == null ? null : (Number.isFinite(Number(v.cached)) ? Number(v.cached) : null)
   };
+  // peak 必须保留“远程真正提供了哪些字段”这一信息。
+  // 不能在这里把缺失的 peak.cached 回退成闲时 cached，否则后续无法判断
+  // 它应该继承内置 DeepSeek 高峰缓存价（0.04），会把高峰成本低估成 0.02。
   if (v.peak && typeof v.peak === 'object') {
-    const pi = Number(v.peak.in), po = Number(v.peak.out), pc = Number(v.peak.cached);
-    e.peak = {
-      in: Number.isFinite(pi) ? pi : e.in,
-      out: Number.isFinite(po) ? po : e.out,
-      cached: Number.isFinite(pc) ? pc : e.cached
-    };
+    const peak = {};
+    if (v.peak.in != null && Number.isFinite(Number(v.peak.in))) peak.in = Number(v.peak.in);
+    if (v.peak.out != null && Number.isFinite(Number(v.peak.out))) peak.out = Number(v.peak.out);
+    if (v.peak.cached != null && Number.isFinite(Number(v.peak.cached))) peak.cached = Number(v.peak.cached);
+    if (Object.keys(peak).length) e.peak = peak;
   }
   // 图片计费规则结构各异（capped/pixel/unknown），原样透传，由 imageTokens 解读
   if (v.image && typeof v.image === 'object') e.image = v.image;
@@ -105,21 +107,37 @@ export function normalizePriceFeed(data) {
  * 远程价格表通常只维护 in/out/cached。若它覆盖了一个内置模型却没有携带
  * peak/image，就不能把内置的峰谷定价或图片计费元数据一起抹掉。
  *
- * 规则：
- *   - 远程提供的基础价格永远优先；
- *   - 远程显式提供 peak/image 时也以远程为准；
- *   - 远程省略 peak/image 时，从同名内置模型继承；
- *   - note/src 仍保留远程来源，方便控制台看出当前价格来自 feed。
+ * peak 使用“逐字段覆盖”而不是“整个对象覆盖”：
+ *   - remote.peak.in/out/cached 中明确给出的字段优先；
+ *   - 缺失字段继承 builtin.peak 对应字段；
+ *   - 内置也没有时，才回退到远程基础价。
+ *
+ * 这样远程 feed 即使只维护 peak.in / peak.out，也不会把 DeepSeek 的
+ * peak.cached 从 0.04/M 错误降成闲时 0.02/M。
  */
 export function inheritBuiltinPriceMetadata(prices = {}) {
   const out = {};
   for (const [id, remote] of Object.entries(prices || {})) {
     const builtin = OFFICIAL_PRICES[String(id).toLowerCase()] || null;
+    let peak;
+    if (remote?.peak || builtin?.peak) {
+      peak = {
+        in: remote?.peak?.in ?? builtin?.peak?.in ?? remote?.in ?? builtin?.in ?? 0,
+        out: remote?.peak?.out ?? builtin?.peak?.out ?? remote?.out ?? builtin?.out ?? 0,
+        cached: remote?.peak?.cached
+          ?? builtin?.peak?.cached
+          ?? remote?.cached
+          ?? builtin?.cached
+          ?? remote?.peak?.in
+          ?? builtin?.peak?.in
+          ?? remote?.in
+          ?? builtin?.in
+          ?? 0
+      };
+    }
     out[id] = {
       ...remote,
-      ...(remote?.peak !== undefined
-        ? { peak: remote.peak }
-        : builtin?.peak ? { peak: structuredClone(builtin.peak) } : {}),
+      ...(peak ? { peak } : {}),
       ...(remote?.image !== undefined
         ? { image: remote.image }
         : builtin?.image ? { image: structuredClone(builtin.image) } : {})

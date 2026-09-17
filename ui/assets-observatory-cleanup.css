@@ -1,0 +1,5 @@
+/* 黑话与黑话研究属于独立实验/功能页，不再出现在 AI 资产观测页。 */
+#asset-page [data-asset-kind="slang"],
+#asset-page [data-asset-kind="slang-research"] {
+  display: none !important;
+}

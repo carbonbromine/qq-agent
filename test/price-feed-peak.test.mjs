@@ -28,6 +28,32 @@ test('remote DeepSeek base prices inherit builtin peak tiers when omitted', () =
   assert.equal(peak.cached, 0.04);
 });
 
+test('partial remote peak override inherits missing cached peak price', () => {
+  const normalized = normalizePriceFeed({
+    'deepseek-flash': {
+      in: 1,
+      out: 4,
+      cached: 0.02,
+      peak: { in: 2, out: 8 }
+    }
+  });
+  assert.ok(normalized);
+  assert.deepEqual(normalized.prices['deepseek-flash'].peak, {
+    in: 2,
+    out: 8
+  });
+
+  const merged = inheritBuiltinPriceMetadata(normalized.prices);
+  assert.deepEqual(merged['deepseek-flash'].peak, {
+    in: 2,
+    out: 8,
+    cached: 0.04
+  });
+
+  const peak = priceAt(merged['deepseek-flash'], Date.parse('2026-09-17T01:30:00Z'));
+  assert.equal(peak.cached, 0.04);
+});
+
 test('remote feed can explicitly override builtin peak tiers', () => {
   const normalized = normalizePriceFeed({
     'deepseek-flash': {
