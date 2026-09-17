@@ -314,7 +314,11 @@ export class IdentityPilotManager extends CoreIdentityPilotManager {
         signal
       });
     }
-    if (!this.identityStore || settings.mode === 'triggered') {
+    if (
+      !this.identityStore
+      || settings.enabled !== true
+      || settings.mode === 'triggered'
+    ) {
       throw new Error('主动好友候选功能当前未启用');
     }
 
