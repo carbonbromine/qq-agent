@@ -19,6 +19,8 @@ test('identity, automatic friends and incident infrastructure start without an a
   cfg.runtime.mode = 'active';
   cfg.allowAllWhenEmpty = true;
   cfg.identityPilot.friendProposal.ownerUin = '';
+  cfg.identityPilot.friendProposal.mode = 'prompt';
+  cfg.identityPilot.friendProposal.minMessageCount = 1;
   cfg.incidentPilot.ownerUin = '';
 
   const store = new ChatStore(0, { dataDir: root });
@@ -46,6 +48,28 @@ test('identity, automatic friends and incident infrastructure start without an a
   assert.equal(identityStatus.friendProposal.ownerConfigured, false);
   assert.equal(identityStatus.incomingFriendRequest.enabled, true);
   assert.equal(identityStatus.incomingFriendRequest.ownerConfigured, false);
+
+  // The stable friend pipeline must create and retain candidates even without
+  // an administrator. Only the QQ notification/approval edge should degrade.
+  assert.equal(identity.observeMessage('private:123457', {
+    id: 1,
+    ts: Date.now(),
+    senderId: '123457',
+    senderName: 'candidate',
+    text: 'hello',
+    self: false
+  }), true);
+  const proposal = await identity.proposeFriend({
+    userId: '123457',
+    chatKey: 'private:123457',
+    reasonCode: 'interest',
+    reason: 'stable infrastructure test'
+  });
+  assert.equal(proposal.created, true);
+  assert.equal(proposal.adminNotified, false);
+  assert.equal(proposal.proposal.status, 'pending');
+  assert.match(proposal.proposal.notifyError, /管理员 QQ/);
+  assert.equal(identity.listFriendProposals().length, 1);
 
   // Missing owner affects only the notification/approval edge. It must not
   // prevent the request from being durably recorded by the always-on manager.

@@ -284,6 +284,72 @@ export class IdentityPilotManager extends CoreIdentityPilotManager {
     this.manualFriendReviewSessions = options.sessions || null;
   }
 
+  /**
+   * Persist prompt-mode friend candidates even when no administrator QQ is
+   * configured. The global administrator is an approval/notification edge,
+   * not a prerequisite for the always-on identity/friend infrastructure.
+   *
+   * Keep the mature core path unchanged when an owner exists; only the
+   * missing-owner case is handled here so the compatibility core can be
+   * retired independently later.
+   */
+  async proposeFriend({
+    userId,
+    chatKey,
+    reasonCode,
+    reason,
+    verificationMessage = '',
+    signal
+  }) {
+    const cfg = this.config();
+    const settings = cfg.identityPilot?.friendProposal || {};
+    const ownerUin = String(settings.ownerUin || '').trim();
+    if (/^\d{5,15}$/.test(ownerUin)) {
+      return super.proposeFriend({
+        userId,
+        chatKey,
+        reasonCode,
+        reason,
+        verificationMessage,
+        signal
+      });
+    }
+    if (!this.identityStore || settings.mode === 'triggered') {
+      throw new Error('主动好友候选功能当前未启用');
+    }
+
+    const result = this.identityStore.createFriendProposal({
+      userId: String(userId || '').trim(),
+      sourceChatKey: chatKey,
+      reasonCode,
+      reason,
+      verificationMessage,
+      minMessageCount: settings.minMessageCount,
+      cooldownDays: settings.cooldownDays,
+      maxPending: settings.maxPending
+    });
+    if (!result.created) {
+      return {
+        ...result,
+        adminNotified: Boolean(result.proposal.notifiedAt),
+        protocolDispatchSupported: true
+      };
+    }
+
+    const notifyError = '尚未配置接收好友审批的管理员 QQ';
+    const proposal = this.identityStore.markFriendProposalNotification(
+      result.proposal.id,
+      { notified: false, error: notifyError }
+    );
+    this.log(`[identity-pilot] 好友候选 ${proposal.id} 已记录，管理员通知跳过：${notifyError}`);
+    return {
+      created: true,
+      proposal,
+      adminNotified: false,
+      protocolDispatchSupported: true
+    };
+  }
+
   async manualFriendReview({
     userId,
     chatKey = '',
