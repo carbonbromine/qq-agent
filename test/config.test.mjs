@@ -111,12 +111,21 @@ test('promoted capabilities share one admin and retired slang config is purged',
   assert.equal(cfg.incidentPilot.graduated, true);
   assert.equal(cfg.incidentPilot.retentionDays, 123);
 
-  assert.equal(identityPilotEnabled({ identityPilot: { enabled: false } }), true);
-  assert.equal(friendProposalEnabled({}), true);
-  assert.equal(friendRequestDispatchEnabled({}), true);
-  assert.equal(incomingFriendRequestEnabled({}), true);
-  assert.equal(incidentPilotEnabled({ incidentPilot: { enabled: false } }), true);
-  assert.equal(slangPilotEnabled({ slangPilot: { enabled: true } }), false);
+  // Helpers honor an explicitly supplied raw config so direct unit tests can
+  // exercise disabled/no-diff paths. Production getConfig() above has already
+  // canonicalized the same feature gates to the stable policy.
+  assert.equal(identityPilotEnabled({ identityPilot: { enabled: false } }), false);
+  assert.equal(identityPilotEnabled({ identityPilot: { enabled: true } }), true);
+  assert.equal(friendProposalEnabled({}), false);
+  assert.equal(friendProposalEnabled({ identityPilot: { friendProposal: { enabled: true } } }), true);
+  assert.equal(friendRequestDispatchEnabled({}), false);
+  assert.equal(friendRequestDispatchEnabled({ identityPilot: { friendProposal: { activeDispatchEnabled: true } } }), true);
+  assert.equal(incomingFriendRequestEnabled({}), false);
+  assert.equal(incomingFriendRequestEnabled({ identityPilot: { incomingFriendRequest: { enabled: true } } }), true);
+  assert.equal(incidentPilotEnabled({ incidentPilot: { enabled: false } }), false);
+  assert.equal(incidentPilotEnabled({ incidentPilot: { enabled: true } }), true);
+  assert.equal(slangPilotEnabled({ slangPilot: { enabled: true } }), true);
+  assert.equal(slangPilotEnabled({ slangPilot: { enabled: false } }), false);
   assert.equal(promptFriendProposalEnabled(cfg), true);
   assert.equal(triggeredFriendProposalEnabled(cfg), false);
 
@@ -186,8 +195,10 @@ test('promoted capabilities share one admin and retired slang config is purged',
     /管理员 QQ 必须为 5 到 15 位数字/
   );
 
-  await new Promise((resolve) => setTimeout(resolve, 500));
-  const saved = JSON.parse(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'));
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  const savedFile = path.join(dir, 'config.json');
+  const saved = JSON.parse(fs.readFileSync(savedFile, 'utf8'));
+  assert.equal(fs.statSync(savedFile).mode & 0o777, 0o600);
   assert.equal(saved.ui.refreshMs, 7000);
   assert.equal(saved.admin.ownerUin, '23456789');
   assert.equal(saved.identityPilot.friendProposal.ownerUin, '23456789');
