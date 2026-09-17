@@ -74,9 +74,9 @@
       <div class="asset-section">
         <h3>关系状态</h3>
         <div class="table-wrap"><table class="usage-table">
-          <thead><tr><th>QQ</th><th>熟悉</th><th>长期等级</th><th>关系置信</th><th>近期温暖</th><th>近期紧张</th><th>策略</th><th>最近互动</th></tr></thead>
+          <thead><tr><th>QQ名</th><th>QQ号</th><th>熟悉</th><th>长期等级</th><th>关系置信</th><th>近期温暖</th><th>近期紧张</th><th>策略</th><th>最近互动</th></tr></thead>
           <tbody>${relationships.length ? relationships.map((item) => `<tr>
-            <td><code>${esc(item.userId)}</code></td>
+            <td>${esc(item.name || '未记录')}</td><td><code>${esc(item.userId)}</code></td>
             <td>${pct(item.familiarity)}</td>
             <td>${Number(item.bondLevel) || 0}</td>
             <td>${pct(item.bondConfidence)}</td>
@@ -84,20 +84,20 @@
             <td>${pct(item.recentTension)}</td>
             <td>${esc(modeLabel[item.policy?.mode] || item.policy?.mode || '—')}</td>
             <td>${esc(timeText(item.lastInteractionAt))}</td>
-          </tr>`).join('') : '<tr><td colspan="8" class="muted">尚无 V2 状态</td></tr>'}</tbody>
+          </tr>`).join('') : '<tr><td colspan="9" class="muted">尚无 V2 状态</td></tr>'}</tbody>
         </table></div>
       </div>
 
       <div class="asset-section">
         <h3>后台任务</h3>
         <div class="table-wrap"><table class="usage-table">
-          <thead><tr><th>任务</th><th>QQ</th><th>触发</th><th>状态</th><th>证据 / 事件</th><th>时间</th><th>错误</th></tr></thead>
+          <thead><tr><th>任务</th><th>QQ名</th><th>QQ号</th><th>触发</th><th>状态</th><th>证据 / 事件</th><th>时间</th><th>错误</th></tr></thead>
           <tbody>${jobs.length ? jobs.map((job) => `<tr>
-            <td><code>${esc(job.id)}</code></td><td><code>${esc(job.userId)}</code></td>
+            <td><code>${esc(job.id)}</code></td><td>${esc(job.name || '未记录')}</td><td><code>${esc(job.userId)}</code></td>
             <td>${esc(job.triggerKind)}</td><td>${esc(jobLabel[job.status] || job.status)}</td>
             <td>${Number(job.evidenceCount) || 0} / ${Number(job.eventCount) || 0}</td>
             <td>${esc(timeText(job.createdAt))}</td><td title="${esc(job.error)}">${esc(job.error || '—')}</td>
-          </tr>`).join('') : '<tr><td colspan="7" class="muted">尚无任务</td></tr>'}</tbody>
+          </tr>`).join('') : '<tr><td colspan="8" class="muted">尚无任务</td></tr>'}</tbody>
         </table></div>
       </div>`;
 

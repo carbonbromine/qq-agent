@@ -94,6 +94,8 @@ test('manual job uses forced structured output and includes current persona', as
     log: () => {}
   });
   manager.start();
+  manager.store.recordDirectInteraction('12345', 'private:12345', Date.now(), manager.settings(), '测试用户');
+  assert.equal(manager.listStates(10)[0].name, '测试用户');
   const job = manager.enqueueManual({ userId: '12345' });
   for (let i = 0; i < 50; i += 1) {
     if (manager.listJobs({ limit: 10 }).find((item) => item.id === job.id)?.status === 'done') break;

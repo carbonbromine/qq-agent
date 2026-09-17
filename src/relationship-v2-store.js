@@ -84,6 +84,7 @@ function stateView(row, settings = {}, now = Date.now()) {
   const decayed = decayRelationshipState(row, settings, now);
   const state = {
     userId: String(row.uin),
+    name: clean(row.display_name, 120),
     familiarity: decayed.familiarity,
     familiarityMass: decayed.familiarityMass,
     bondLevel: Number(row.bond_level) || 0,
@@ -156,6 +157,7 @@ export class RelationshipV2Store {
       PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS relationship_v2_states (
         uin TEXT PRIMARY KEY,
+        display_name TEXT NOT NULL DEFAULT '',
         familiarity_mass REAL NOT NULL DEFAULT 0,
         familiarity_updated_at INTEGER NOT NULL DEFAULT 0,
         bond_level INTEGER NOT NULL DEFAULT 0,
@@ -220,6 +222,10 @@ export class RelationshipV2Store {
         updated_at INTEGER NOT NULL
       );
     `);
+    const stateColumns = this.db.prepare('PRAGMA table_info(relationship_v2_states)').all();
+    if (!stateColumns.some((column) => column.name === 'display_name')) {
+      this.db.exec("ALTER TABLE relationship_v2_states ADD COLUMN display_name TEXT NOT NULL DEFAULT ''");
+    }
   }
 
   close() { this.db.close(); }
@@ -242,15 +248,16 @@ export class RelationshipV2Store {
     return this.db.prepare('SELECT * FROM relationship_v2_states WHERE uin=?').get(id);
   }
 
-  recordDirectInteraction(uin, chatKey, at = Date.now(), settings = {}) {
+  recordDirectInteraction(uin, chatKey, at = Date.now(), settings = {}, displayName = '') {
     const id = String(uin || '').trim();
     const now = Number(at) || Date.now();
     const row = this.ensureState(id, now);
     const current = decayRelationshipState(row, settings, now);
     const mass = Math.min(200, current.familiarityMass + 1);
-    this.db.prepare(`UPDATE relationship_v2_states SET familiarity_mass=?,familiarity_updated_at=?,
-      last_interaction_at=MAX(last_interaction_at,?),updated_at=? WHERE uin=?`)
-      .run(mass, now, now, now, id);
+    const name = clean(displayName, 120);
+    this.db.prepare(`UPDATE relationship_v2_states SET display_name=CASE WHEN ?<>'' THEN ? ELSE display_name END,
+      familiarity_mass=?,familiarity_updated_at=?,last_interaction_at=MAX(last_interaction_at,?),updated_at=? WHERE uin=?`)
+      .run(name, name, mass, now, now, now, id);
     const pending = this.db.prepare('SELECT * FROM relationship_v2_pending WHERE uin=?').get(id);
     const chats = new Set(parseJson(pending?.chat_keys, []).map(String));
     if (/^(group|private):\d+$/.test(String(chatKey || ''))) chats.add(String(chatKey));

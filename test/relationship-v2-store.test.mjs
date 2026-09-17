@@ -44,6 +44,8 @@ function event(type, evidenceId, extra = {}) {
 test('recent warmth changes quickly but does not directly promote durable bond', () => {
   const store = makeStore();
   const now = 1_800_000_000_000;
+  store.recordDirectInteraction('12345', 'private:12345', now, settings, '小明');
+  assert.equal(store.getState('12345', settings, now).name, '小明');
   const result = store.applyEvaluation('12345', [event('pleasant_moment', 'group:1#1')], {
     settings, now, personaVersion: 'p1'
   });

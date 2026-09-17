@@ -19,6 +19,9 @@ import {
 
 const EVENT_TYPES = new Set(RELATIONSHIP_V2_EVENT_TYPES);
 const clean = (value, max = 240) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
+const personName = (person = {}) => clean(
+  (person || {}).primaryName || (person || {}).remark || (person || {}).nickname || (person || {}).name || '', 120
+);
 
 function usageOf(response) {
   const usage = response?.usage || {};
@@ -181,7 +184,7 @@ export class RelationshipV2Manager {
       || (selfId && String(message?.reply?.senderId || '') === selfId);
     if (!direct) return false;
     const pending = this.store.recordDirectInteraction(
-      uin, chatKey, Number(message?.ts) || this.now(), settings
+      uin, chatKey, Number(message?.ts) || this.now(), settings, message?.senderName
     );
     const state = this.store.getState(uin, settings, this.now());
     const cooldownMs = settings.perUserCooldownHours * 3600000;
@@ -228,11 +231,22 @@ export class RelationshipV2Manager {
   }
 
   listStates(limit = 100) {
-    return this.store?.listStates(limit, this.settings(), this.now()) || [];
+    return (this.store?.listStates(limit, this.settings(), this.now()) || []).map((state) => ({
+      ...state,
+      name: personName(this.personProvider(state.userId)) || state.name || ''
+    }));
   }
 
-  listEvents(options = {}) { return this.store?.recentEvents(options) || []; }
-  listJobs(options = {}) { return this.store?.listJobs(options) || []; }
+  listEvents(options = {}) {
+    return (this.store?.recentEvents(options) || []).map((event) => ({
+      ...event, name: personName(this.personProvider(event.userId)) || this.store?.getState(event.userId, this.settings(), this.now())?.name || ''
+    }));
+  }
+  listJobs(options = {}) {
+    return (this.store?.listJobs(options) || []).map((job) => ({
+      ...job, name: personName(this.personProvider(job.userId)) || this.store?.getState(job.userId, this.settings(), this.now())?.name || ''
+    }));
+  }
 
   guidanceFor(userIds = []) {
     const settings = this.settings();
@@ -241,7 +255,7 @@ export class RelationshipV2Manager {
     for (const userId of [...new Set(userIds.map(String))].slice(0, 4)) {
       const state = this.store.getState(userId, settings, this.now());
       if (!state) continue;
-      const name = this.personProvider(userId)?.primaryName || userId;
+      const name = personName(this.personProvider(userId)) || state.name || userId;
       const policy = state.policy;
       let instruction = '保持人格原本的社交距离';
       if (policy.mode === 'boundary') instruction = '存在未解决边界问题；克制、明确，不继续互怼或主动拉近关系';
