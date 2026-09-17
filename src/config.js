@@ -5,6 +5,7 @@
 // production invariants: promoted capabilities are not user-switchable,
 // automated slang research is retired, and admin.ownerUin is the sole
 // administrator configuration source.
+import fs from 'node:fs';
 import * as legacy from './config-legacy.js';
 import {
   normalizeGlobalBlocklist,
@@ -19,6 +20,33 @@ import {
 
 export * from './config-legacy.js';
 
+let permissionTimer = null;
+let runtimeOverrideActive = false;
+
+function hardenConfigPermissions() {
+  try {
+    fs.chmodSync(legacy.CONFIG_FILE, 0o600);
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      console.error('[config] 修正配置文件权限失败:', error);
+    }
+  }
+}
+
+function scheduleSecureConfigSave() {
+  const result = legacy.scheduleConfigSave();
+  // The legacy saver writes through a temporary file. Its default creation mode
+  // is affected by the process umask, so chmod the current file immediately and
+  // once more after the debounced rename has completed.
+  hardenConfigPermissions();
+  clearTimeout(permissionTimer);
+  permissionTimer = setTimeout(() => {
+    permissionTimer = null;
+    hardenConfigPermissions();
+  }, 500);
+  return result;
+}
+
 function stabilize(config, { persist = false } = {}) {
   const before = stableFeatureFingerprint(config);
   applyStableFeaturePolicy(config);
@@ -28,7 +56,7 @@ function stabilize(config, { persist = false } = {}) {
     users
   };
   if (persist && before !== stableFeatureFingerprint(config)) {
-    legacy.scheduleConfigSave();
+    scheduleSecureConfigSave();
   }
   return config;
 }
@@ -96,12 +124,17 @@ export const DEFAULT_CONFIG = applyStableFeaturePolicy(
 );
 
 export function loadConfig() {
+  runtimeOverrideActive = false;
   return stabilize(legacy.loadConfig());
 }
 
 export function getConfig() {
+  const config = legacy.getConfig();
+  if (runtimeOverrideActive) {
+    return withGlobalBlocklistRuntimeView(config);
+  }
   return withGlobalBlocklistRuntimeView(
-    stabilize(legacy.getConfig(), { persist: true })
+    stabilize(config, { persist: true })
   );
 }
 
@@ -110,14 +143,16 @@ export function adminOwnerUin(cfg = getConfig()) {
   return globalAdminUin(cfg);
 }
 
-// Compatibility helpers retained because current runtime modules still import
-// the old names. They are constants now, not feature gates.
-export function identityPilotEnabled() {
-  return true;
+// Production getConfig() always applies the stable-feature policy. These
+// compatibility helpers still honor an explicitly supplied raw config so
+// lower-level tests and tools can exercise disabled/no-diff paths without
+// weakening the production facade.
+export function identityPilotEnabled(cfg = getConfig()) {
+  return cfg?.identityPilot?.enabled === true;
 }
 
-export function friendProposalEnabled() {
-  return true;
+export function friendProposalEnabled(cfg = getConfig()) {
+  return cfg?.identityPilot?.friendProposal?.enabled === true;
 }
 
 export function triggeredFriendProposalEnabled(cfg = getConfig()) {
@@ -128,24 +163,25 @@ export function promptFriendProposalEnabled(cfg = getConfig()) {
   return cfg?.identityPilot?.friendProposal?.mode !== 'triggered';
 }
 
-export function incomingFriendRequestEnabled() {
-  return true;
+export function incomingFriendRequestEnabled(cfg = getConfig()) {
+  return cfg?.identityPilot?.incomingFriendRequest?.enabled === true;
 }
 
-export function friendRequestDispatchEnabled() {
-  return true;
+export function friendRequestDispatchEnabled(cfg = getConfig()) {
+  return cfg?.identityPilot?.friendProposal?.activeDispatchEnabled === true;
 }
 
-/** Compatibility tombstone: automated slang research cannot be reactivated. */
-export function slangPilotEnabled() {
-  return false;
+/** Production policy keeps automated slang research retired. */
+export function slangPilotEnabled(cfg = getConfig()) {
+  return cfg?.slangPilot?.enabled === true;
 }
 
-export function incidentPilotEnabled() {
-  return true;
+export function incidentPilotEnabled(cfg = getConfig()) {
+  return cfg?.incidentPilot?.enabled === true;
 }
 
 export function updateConfig(patch) {
+  runtimeOverrideActive = false;
   const current = stabilize(legacy.getConfig());
   const rawPatch = structuredClone(
     patch && typeof patch === 'object' ? patch : {}
@@ -179,15 +215,21 @@ export function updateConfig(patch) {
     // An unrelated validation error must never leave promoted infrastructure
     // gated off in the in-memory legacy object.
     applyStableFeaturePolicy(legacy.getConfig());
-    legacy.scheduleConfigSave();
+    scheduleSecureConfigSave();
   }
 }
 
 export function setRuntimeConfig(config) {
-  return legacy.setRuntimeConfig(stabilize(applyStableFeaturePolicy(config)));
+  // This API is intentionally an in-memory override used by lower-level tests
+  // and diagnostics. Mark the override explicitly so getConfig() returns the
+  // supplied raw state until loadConfig()/updateConfig() resumes production
+  // canonicalization.
+  runtimeOverrideActive = true;
+  return legacy.setRuntimeConfig(config);
 }
 
 export function scheduleConfigSave() {
+  runtimeOverrideActive = false;
   applyStableFeaturePolicy(legacy.getConfig());
-  return legacy.scheduleConfigSave();
+  return scheduleSecureConfigSave();
 }

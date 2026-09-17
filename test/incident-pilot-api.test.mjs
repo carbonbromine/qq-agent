@@ -57,8 +57,13 @@ test('incident infrastructure stays active and versions chat controls', async (t
 
   const list = await request('/api/incidents?state=open');
   assert.equal(list.status, 200);
-  assert.equal(list.body.incidents.length, 1);
-  assert.equal(list.body.incidents[0].notifyState, 'pending');
+  // Startup may legitimately capture a separate integration incident because
+  // this fixture points OneBot at a closed port. Verify the incident created by
+  // this test by identity instead of assuming the entire open list has length 1.
+  const listedIncident = list.body.incidents.find((item) => item.id === incident.id);
+  assert.ok(listedIncident);
+  assert.equal(listedIncident.source, 'test-api');
+  assert.equal(listedIncident.notifyState, 'pending');
 
   const control = await request('/api/chats/group_1/runtime-control', {
     method: 'PUT',
