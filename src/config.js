@@ -21,6 +21,7 @@ import {
 export * from './config-legacy.js';
 
 let permissionTimer = null;
+let runtimeOverrideActive = false;
 
 function hardenConfigPermissions() {
   try {
@@ -123,12 +124,17 @@ export const DEFAULT_CONFIG = applyStableFeaturePolicy(
 );
 
 export function loadConfig() {
+  runtimeOverrideActive = false;
   return stabilize(legacy.loadConfig());
 }
 
 export function getConfig() {
+  const config = legacy.getConfig();
+  if (runtimeOverrideActive) {
+    return withGlobalBlocklistRuntimeView(config);
+  }
   return withGlobalBlocklistRuntimeView(
-    stabilize(legacy.getConfig(), { persist: true })
+    stabilize(config, { persist: true })
   );
 }
 
@@ -166,9 +172,8 @@ export function friendRequestDispatchEnabled(cfg = getConfig()) {
 }
 
 /** Production policy keeps automated slang research retired. */
-export function slangPilotEnabled(cfg = null) {
-  const source = cfg ?? legacy.getConfig();
-  return source?.slangPilot?.enabled === true;
+export function slangPilotEnabled(cfg = getConfig()) {
+  return cfg?.slangPilot?.enabled === true;
 }
 
 export function incidentPilotEnabled(cfg = getConfig()) {
@@ -176,6 +181,7 @@ export function incidentPilotEnabled(cfg = getConfig()) {
 }
 
 export function updateConfig(patch) {
+  runtimeOverrideActive = false;
   const current = stabilize(legacy.getConfig());
   const rawPatch = structuredClone(
     patch && typeof patch === 'object' ? patch : {}
@@ -215,12 +221,15 @@ export function updateConfig(patch) {
 
 export function setRuntimeConfig(config) {
   // This API is intentionally an in-memory override used by lower-level tests
-  // and diagnostics. Production callers read through getConfig(), which applies
-  // the stable-feature policy before returning configuration.
+  // and diagnostics. Mark the override explicitly so getConfig() returns the
+  // supplied raw state until loadConfig()/updateConfig() resumes production
+  // canonicalization.
+  runtimeOverrideActive = true;
   return legacy.setRuntimeConfig(config);
 }
 
 export function scheduleConfigSave() {
+  runtimeOverrideActive = false;
   applyStableFeaturePolicy(legacy.getConfig());
   return scheduleSecureConfigSave();
 }
