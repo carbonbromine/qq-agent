@@ -22,7 +22,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR } from './config.js';
-import { setRemotePrices } from './model-prices.js';
+import { OFFICIAL_PRICES, setRemotePrices } from './model-prices.js';
 
 const CACHE_FILE = path.join(DATA_DIR, 'price-feed-cache.json');
 const FETCH_TIMEOUT_MS = 10000;
@@ -101,11 +101,39 @@ export function normalizePriceFeed(data) {
   return { prices, dropped };
 }
 
+/**
+ * 远程价格表通常只维护 in/out/cached。若它覆盖了一个内置模型却没有携带
+ * peak/image，就不能把内置的峰谷定价或图片计费元数据一起抹掉。
+ *
+ * 规则：
+ *   - 远程提供的基础价格永远优先；
+ *   - 远程显式提供 peak/image 时也以远程为准；
+ *   - 远程省略 peak/image 时，从同名内置模型继承；
+ *   - note/src 仍保留远程来源，方便控制台看出当前价格来自 feed。
+ */
+export function inheritBuiltinPriceMetadata(prices = {}) {
+  const out = {};
+  for (const [id, remote] of Object.entries(prices || {})) {
+    const builtin = OFFICIAL_PRICES[String(id).toLowerCase()] || null;
+    out[id] = {
+      ...remote,
+      ...(remote?.peak !== undefined
+        ? { peak: remote.peak }
+        : builtin?.peak ? { peak: structuredClone(builtin.peak) } : {}),
+      ...(remote?.image !== undefined
+        ? { image: remote.image }
+        : builtin?.image ? { image: structuredClone(builtin.image) } : {})
+    };
+  }
+  return out;
+}
+
 /** 应用一张表：注入查价层 + 更新状态。 */
 function applyPrices(prices, source) {
-  setRemotePrices(prices);
+  const effective = inheritBuiltinPriceMetadata(prices);
+  setRemotePrices(effective);
   status.source = source;
-  status.count = Object.keys(prices).length;
+  status.count = Object.keys(effective).length;
 }
 
 /** 启动时先吃磁盘缓存（URL 对得上才用）。 */
