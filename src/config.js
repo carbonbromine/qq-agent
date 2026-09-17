@@ -166,8 +166,9 @@ export function friendRequestDispatchEnabled(cfg = getConfig()) {
 }
 
 /** Production policy keeps automated slang research retired. */
-export function slangPilotEnabled(cfg = getConfig()) {
-  return cfg?.slangPilot?.enabled === true;
+export function slangPilotEnabled(cfg = null) {
+  const source = cfg ?? legacy.getConfig();
+  return source?.slangPilot?.enabled === true;
 }
 
 export function incidentPilotEnabled(cfg = getConfig()) {
