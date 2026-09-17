@@ -172,7 +172,7 @@ function applyDiskCache(url) {
 function writeDiskCache(url, prices) {
   try {
     fs.mkdirSync(DATA_DIR, { recursive: true });
-    const tmp = `${file}.${process.pid}.tmp`;
+    const tmp = `${CACHE_FILE}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify({ url, fetchedAt: Date.now(), prices }), 'utf8');
     fs.renameSync(tmp, CACHE_FILE);
   } catch { /* 缓存写不进去不影响使用 */ }
