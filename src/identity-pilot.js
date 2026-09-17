@@ -314,6 +314,25 @@ export class IdentityPilotManager extends CoreIdentityPilotManager {
         signal
       });
     }
+    const hasCanonicalAdmin = Boolean(
+      cfg.admin
+      && typeof cfg.admin === 'object'
+      && !Array.isArray(cfg.admin)
+    );
+    if (!hasCanonicalAdmin) {
+      // Direct legacy/test configurations without the canonical admin section
+      // retain the mature core validation contract. Current production config
+      // always has admin, so ownerless stable infrastructure still persists the
+      // candidate and degrades only the notification/approval edge below.
+      return super.proposeFriend({
+        userId,
+        chatKey,
+        reasonCode,
+        reason,
+        verificationMessage,
+        signal
+      });
+    }
     if (
       !this.identityStore
       || settings.enabled !== true
