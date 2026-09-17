@@ -7,6 +7,10 @@
 // administrator configuration source.
 import * as legacy from './config-legacy.js';
 import {
+  normalizeGlobalBlocklist,
+  withGlobalBlocklistRuntimeView
+} from './global-blocklist.js';
+import {
   applyStableFeaturePolicy,
   globalAdminUin,
   stableFeatureFingerprint,
@@ -18,6 +22,11 @@ export * from './config-legacy.js';
 function stabilize(config, { persist = false } = {}) {
   const before = stableFeatureFingerprint(config);
   applyStableFeaturePolicy(config);
+  const users = normalizeGlobalBlocklist(config?.deny?.users);
+  config.deny = {
+    ...(config.deny || {}),
+    users
+  };
   if (persist && before !== stableFeatureFingerprint(config)) {
     legacy.scheduleConfigSave();
   }
@@ -91,7 +100,9 @@ export function loadConfig() {
 }
 
 export function getConfig() {
-  return stabilize(legacy.getConfig(), { persist: true });
+  return withGlobalBlocklistRuntimeView(
+    stabilize(legacy.getConfig(), { persist: true })
+  );
 }
 
 /** The only administrator QQ configuration read/written by current code. */
@@ -139,6 +150,9 @@ export function updateConfig(patch) {
   const rawPatch = structuredClone(
     patch && typeof patch === 'object' ? patch : {}
   );
+  if (hasOwn(rawPatch?.deny, 'users')) {
+    rawPatch.deny.users = normalizeGlobalBlocklist(rawPatch.deny.users, { strict: true });
+  }
   const requestedAdmin = normalizedRequestedAdmin(rawPatch, current);
   const autoUpdateEnabled = hasOwn(rawPatch?.autoUpdate, 'enabled')
     ? rawPatch.autoUpdate.enabled === true
@@ -170,7 +184,7 @@ export function updateConfig(patch) {
 }
 
 export function setRuntimeConfig(config) {
-  return legacy.setRuntimeConfig(applyStableFeaturePolicy(config));
+  return legacy.setRuntimeConfig(stabilize(applyStableFeaturePolicy(config)));
 }
 
 export function scheduleConfigSave() {
