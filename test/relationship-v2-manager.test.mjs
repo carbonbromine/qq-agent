@@ -66,7 +66,7 @@ test('parser accepts only countable target evidence', () => {
   }]), evidence, ['role:1']), /人格依据/);
 });
 
-test('manual job uses forced structured output and includes current persona', async () => {
+test('manual job uses an auto-compatible single structured tool and includes current persona', async () => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'relationship-v2-manager-'));
   dirs.push(dataDir);
   let request = null;
@@ -103,7 +103,7 @@ test('manual job uses forced structured output and includes current persona', as
   }
   const done = manager.listJobs({ limit: 10 }).find((item) => item.id === job.id);
   assert.equal(done.status, 'done');
-  assert.equal(request.toolChoice.function.name, 'submit_relationship_v2_events');
+  assert.equal(request.toolChoice, 'auto');
   assert.equal(request.overrides.model, 'relationship-model');
   assert.match(request.messages[0].content, /重视兑现承诺/);
   assert.equal(manager.listJobs({ limit: 10 }).find((item) => item.id === job.id).name, '测试用户');

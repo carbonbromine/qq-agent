@@ -332,10 +332,9 @@ export class RelationshipV2Manager {
       const response = await this.complete({
         messages,
         tools: [RELATIONSHIP_V2_EVENT_TOOL],
-        toolChoice: {
-          type: 'function',
-          function: { name: 'submit_relationship_v2_events' }
-        },
+        // Thinking 模式（尤其 DeepSeek）拒绝 named/required tool_choice。
+        // 仍只提供一个结果工具，并在解析层强制要求唯一调用，兼容两类模型。
+        toolChoice: 'auto',
         temperature: 0.1,
         maxTokens: 1400,
         signal: controller.signal,

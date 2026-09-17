@@ -49,7 +49,9 @@ one ordinary disagreement permanently destructive.
 Automatic evaluation is only considered for private messages, mentions or
 replies to the Agent. The default gate is six direct messages and a twelve-hour
 per-person cooldown. Jobs are persisted before the model call, processed in a
-single background queue and use a forced result tool. A failed job becomes
+single background queue and expose exactly one structured result tool with
+`tool_choice=auto` for Thinking-model compatibility. The parser still requires
+that one tool call and rejects free text. A failed job becomes
 `failed_reviewable`; it is not automatically retried in a loop.
 
 The evaluator receives the current versioned role card and must attach persona
