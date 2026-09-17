@@ -44,6 +44,7 @@ fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
     enabled: false,
     ownerUin: '56789012'
   },
+  relationshipPilot: { enabled: true, minNewMessages: 4 },
   allow: { groups: [], private: [] },
   deny: { groups: [], private: ['12345678'] },
   ui: { refreshMs: 15000 }
@@ -59,6 +60,7 @@ const {
   incomingFriendRequestEnabled,
   incidentPilotEnabled,
   promptFriendProposalEnabled,
+  relationshipV2Enabled,
   slangPilotEnabled,
   triggeredFriendProposalEnabled,
   updateConfig
@@ -73,12 +75,18 @@ test('promoted capabilities share one admin and retired slang config is purged',
   assert.equal(DEFAULT_CONFIG.identityPilot.friendProposal.activeDispatchEnabled, true);
   assert.equal(DEFAULT_CONFIG.incidentPilot.enabled, true);
   assert.deepEqual(DEFAULT_CONFIG.slangPilot, { enabled: false, graduated: false });
+  assert.equal(DEFAULT_CONFIG.relationshipV2.enabled, false);
+  assert.equal(DEFAULT_CONFIG.relationshipV2.behaviorInjectionEnabled, false);
   assert.equal(DEFAULT_CONFIG.admin.ownerUin, '');
 
   // Old installs had separate owner fields. Identity/Friends is the migration
   // priority. Current administrator consumers keep compatibility mirrors, while
   // retired slang research loses all owner/tuning configuration entirely.
   const cfg = getConfig();
+  assert.equal('relationshipPilot' in cfg, false);
+  assert.equal(cfg.relationshipV2.enabled, false);
+  assert.equal(cfg.relationshipV2.minDirectMessages, 6);
+  assert.equal(relationshipV2Enabled(cfg), false);
   assert.equal(adminOwnerUin(cfg), '12345678');
   assert.equal(cfg.admin.ownerUin, '12345678');
   assert.equal(cfg.identityPilot.friendProposal.ownerUin, '12345678');
@@ -134,6 +142,13 @@ test('promoted capabilities share one admin and retired slang config is purged',
       minOccurrences: 1,
       webResearch: true
     },
+    relationshipV2: {
+      enabled: true,
+      graduated: true,
+      behaviorInjectionEnabled: true,
+      minDirectMessages: 9,
+      perUserCooldownHours: 18
+    },
     ui: { refreshMs: 7000 }
   });
 
@@ -143,6 +158,12 @@ test('promoted capabilities share one admin and retired slang config is purged',
   assert.equal(stale.incidentPilot.ownerUin, '12345678');
   assert.equal(stale.autoUpdate.ownerUin, '12345678');
   assert.deepEqual(stale.slangPilot, { enabled: false, graduated: false });
+  assert.equal(stale.relationshipV2.enabled, true);
+  assert.equal(stale.relationshipV2.graduated, true);
+  assert.equal(stale.relationshipV2.behaviorInjectionEnabled, true);
+  assert.equal(stale.relationshipV2.minDirectMessages, 9);
+  assert.equal(stale.relationshipV2.perUserCooldownHours, 18);
+  assert.equal(relationshipV2Enabled(stale), true);
   assert.equal(stale.identityPilot.enabled, true);
   assert.equal(stale.identityPilot.incomingFriendRequest.enabled, true);
   assert.equal(stale.identityPilot.friendProposal.enabled, true);
@@ -177,5 +198,9 @@ test('promoted capabilities share one admin and retired slang config is purged',
   assert.equal(saved.identityPilot.friendProposal.enabled, true);
   assert.equal(saved.identityPilot.friendProposal.activeDispatchEnabled, true);
   assert.equal(saved.incidentPilot.enabled, true);
+  assert.equal(saved.relationshipV2.enabled, true);
+  assert.equal(saved.relationshipV2.graduated, true);
+  assert.equal(saved.relationshipV2.behaviorInjectionEnabled, true);
+  assert.equal(saved.relationshipV2.minDirectMessages, 9);
   assert.deepEqual(saved.slangPilot, { enabled: false, graduated: false });
 });

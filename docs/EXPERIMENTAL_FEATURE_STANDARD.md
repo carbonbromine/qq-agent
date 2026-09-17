@@ -61,13 +61,12 @@ its own page.
 - A feature page must not depend on hidden controls rendered in the experiment
   settings page.
 
-For the current modules:
+For the current experimental modules (graduated identity, friend-management and
+incident capabilities are documented separately as stable features):
 
 | Feature | Runtime switch | Graduation switch | Owned page |
 | --- | --- | --- | --- |
-| Person impressions | `identityPilot.enabled` | `identityPilot.graduated` | `identity` / 旧印象 |
-| Automatic friend handling | nested friend switches | `identityPilot.friendProposal.graduated` | `friends` / 好友管理 |
-| Slang research | `slangPilot.enabled` | `slangPilot.graduated` | `slang` / 黑话研究 |
+| Relationship state V2 | `relationshipV2.enabled` | `relationshipV2.graduated` | `relationships` / 关系 |
 
 ## 4. API And Persistence
 

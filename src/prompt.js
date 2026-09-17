@@ -604,6 +604,10 @@ export function buildUserPrompt(ctx) {
   const memText = ctx.memory.formatForPrompt(ctx.chatKey, { userIds: [...relevantUserIds] });
   if (memText) parts.push(`【记忆】\n${memText}`);
 
+  if (ctx.relationshipGuidance) {
+    parts.push(`【关系适配】\n${ctx.relationshipGuidance}`);
+  }
+
   // 成员备注：不再单独成段——备注名已经直接替换了消息里的显示名
   // （formatEntry/triggerLabels 都优先用备注），单独列一遍是重复信息。
 

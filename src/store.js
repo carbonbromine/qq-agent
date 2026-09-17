@@ -860,6 +860,59 @@ export class ChatStore {
       .all(chatKey, Math.max(1, Number(limit) || 1), Math.max(0, Number(offset) || 0)).reverse().map(entry);
   }
 
+  /**
+   * 关系 V2 的窄证据接口。关系模块不直接接触 messages.sqlite；这里只返回
+   * 目标用户的直接互动及其同会话消歧上下文，并明确标记哪些消息可计数。
+   */
+  relationshipEvidence(userId, {
+    fromTs = 0,
+    toTs = Date.now(),
+    limit = 48,
+    selfId = ''
+  } = {}) {
+    const uin = String(userId || '').trim();
+    if (!/^\d{1,15}$/.test(uin)) return [];
+    const from = Math.max(0, Number(fromTs) || 0);
+    const to = Math.max(from, Number(toTs) || Date.now());
+    const cap = Math.min(120, Math.max(12, Number(limit) || 48));
+    const targetRows = this.db.prepare(`SELECT * FROM messages
+      WHERE self=0 AND sender_id=? AND ts BETWEEN ? AND ?
+      ORDER BY ts DESC,id DESC LIMIT ?`).all(uin, from, to, cap).reverse();
+    if (!targetRows.length) return [];
+    const chatKeys = [...new Set(targetRows.map((row) => String(row.chat_key)))];
+    const contextFrom = Math.max(0, Math.min(...targetRows.map((row) => Number(row.ts))) - 10 * 60000);
+    const contextTo = Math.max(...targetRows.map((row) => Number(row.ts))) + 10 * 60000;
+    const rows = [];
+    for (const chatKey of chatKeys) {
+      rows.push(...this.db.prepare(`SELECT * FROM messages WHERE chat_key=? AND ts BETWEEN ? AND ?
+        ORDER BY ts,id LIMIT ?`).all(chatKey, contextFrom, contextTo, cap * 2));
+    }
+    const unique = new Map();
+    for (const row of rows) unique.set(`${row.chat_key}#${row.id}`, row);
+    const selected = [...unique.values()]
+      .sort((a, b) => Number(a.ts) - Number(b.ts) || Number(a.id) - Number(b.id))
+      .slice(-cap);
+    return selected.map((row) => {
+      const value = entry(row);
+      const target = !value.self && String(value.senderId || '') === uin;
+      const directToAgent = target && (
+        String(value.chat_key).startsWith('private:')
+        || value.mentionsSelf === true
+        || (selfId && String(value.reply?.senderId || '') === String(selfId))
+      );
+      return {
+        evidenceId: `${value.chat_key}#${value.id}`,
+        chatKey: String(value.chat_key),
+        messageId: Number(value.id) || 0,
+        at: Number(value.ts) || 0,
+        speaker: value.self ? 'agent' : target ? 'target' : 'other',
+        text: String(value.text || '').slice(0, 1000),
+        countableEvidence: directToAgent,
+        directToAgent
+      };
+    });
+  }
+
   findByMid(chatKey, mid) {
     return entry(this.db.prepare('SELECT * FROM messages WHERE chat_key=? AND mid=?').get(chatKey, String(mid)));
   }

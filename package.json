@@ -13,7 +13,7 @@
     "test": "node --test test/*.test.mjs && node test/test-prompt.mjs && node test/scroll-test.mjs && node test/usage-e2e.mjs",
     "test:unit": "node --test test/*.test.mjs",
     "test:prompt": "node test/test-prompt.mjs",
-    "test:render": "node --test test/stable-feature-architecture.test.mjs test/relationship-pilot-ui-save.test.mjs test/memory-page-separation.test.mjs",
+    "test:render": "node --test test/stable-feature-architecture.test.mjs test/relationship-v2-ui.test.mjs test/memory-page-separation.test.mjs",
     "test:scroll": "node test/scroll-test.mjs",
     "test:usage": "node test/usage-e2e.mjs",
     "test:legacy-render": "node test/render-test.mjs",

@@ -2,7 +2,6 @@
 import { MemoryStore as BaseMemoryStore } from './memory-global.js';
 import { bindGlobalMemoryStore } from './memory-runtime-integration.js';
 import { backupPersonBeforeConsolidation } from './memory-consolidation-backup.js';
-import './relationship-runtime-integration.js';
 
 export class MemoryStore extends BaseMemoryStore {
   constructor(...args) {

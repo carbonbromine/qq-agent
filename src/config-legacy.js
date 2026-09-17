@@ -6,6 +6,11 @@ import { PERSONAS, normalizeBehaviorProfile } from './personas.js';
 import { sliderToTier } from './tier-slider.js';   // 零依赖模块，避免循环依赖
 import { DEFAULT_TIME_CONTROL, normalizeTimeControl } from './time-control.js';
 import { normalizeMomentWindows } from './moment-schedule.js';
+import {
+  DEFAULT_RELATIONSHIP_V2_CONFIG,
+  normalizeRelationshipV2Config,
+  relationshipV2Enabled as relationshipV2ConfigEnabled
+} from './relationship-v2-config.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const ROOT = path.resolve(__dirname, '..');
@@ -261,6 +266,8 @@ export const DEFAULT_CONFIG = {
       }
     }
   },
+  // 关系状态 V2。与人物统一印象解耦；默认关闭，旧 V1 数据不会自动迁移。
+  relationshipV2: { ...DEFAULT_RELATIONSHIP_V2_CONFIG },
   // 黑话语料库试点。关闭时不建库、不扫描消息、不注册任务或改变模型请求。
   slangPilot: {
     enabled: false,
@@ -358,6 +365,9 @@ export const DEFAULT_CONFIG = {
 
 function migrateConfig(parsed) {
   const out = structuredClone(parsed);
+  // V1 relationshipPilot 已移除。保留磁盘上的旧 SQLite 作为历史审计，但旧开关、
+  // 分数和阈值不进入 V2，避免一次普通互动被错误迁移为长期关系。
+  delete out.relationshipPilot;
   if (
     out.identityPilot?.friendProposal
     && out.identityPilot.friendProposal.mode == null
@@ -485,6 +495,10 @@ export function slangPilotEnabled(cfg = getConfig()) {
 
 export function incidentPilotEnabled(cfg = getConfig()) {
   return cfg?.incidentPilot?.enabled === true;
+}
+
+export function relationshipV2Enabled(cfg = getConfig()) {
+  return relationshipV2ConfigEnabled(cfg);
 }
 
 /** 更新并持久化配置（浅合并到当前值；patch 里传对象字段则整体替换该字段）。 */
@@ -749,6 +763,7 @@ export function updateConfig(patch) {
       throw new Error('自动更新管理员 QQ 必须同时加入私聊白名单');
     }
   }
+  next.relationshipV2 = normalizeRelationshipV2Config(next.relationshipV2 || {});
   const slangPilot = next.slangPilot || {};
   next.slangPilot = {
     ...slangPilot,

@@ -66,6 +66,7 @@
     <button class="tab" data-tab="identity" data-feature-nav="identity">人物印象</button>
     <button class="tab" data-tab="friends" data-feature-nav="auto-friend">好友管理</button>
     <button class="tab" data-tab="incidents" data-feature-nav="incidents">异常处理</button>
+    <button class="tab hidden" data-tab="relationships" data-feature-nav="relationships">关系</button>
     <button class="tab" data-tab="assets" data-page-node-id="qassetobserve">观测</button>
     <button class="tab" data-tab="usage" data-page-node-id="hcZzcXuMojNoiE7UcRVYfR">用量</button>
     <button class="tab" data-tab="settings" data-page-node-id="4cXbRBtGmcpcL272eKvHPV">设置</button>
@@ -138,6 +139,10 @@
       <div id="incident-page" class="asset-pane"></div>
     </section>
 
+    <section id="view-relationships" class="view">
+      <div id="relationship-v2-page" class="asset-pane"></div>
+    </section>
+
     <!-- AI 资产观测 -->
     <section id="view-assets" class="view" data-page-node-id="qassetview">
       <div id="asset-page" class="asset-pane" data-page-node-id="qassetpage"></div>
@@ -171,7 +176,7 @@
   <script src="/global-memory.js"></script>
   <script src="/tool-scheduler-pilot.js"></script>
   <script src="/multimodal-context-pilot.js"></script>
-  <script src="/relationship-pilot.js"></script>
+  <script src="/relationship-v2.js"></script>
   <script src="/auto-update-network.js"></script>
 </body>
 </html>

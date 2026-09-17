@@ -167,6 +167,7 @@ export class Orchestrator {
     emit = null,
     random = Math.random,
     getIdentityPilot = null,
+    getRelationshipV2 = null,
     getIncidentPilot = null
   }) {
     this.store = store;
@@ -177,6 +178,9 @@ export class Orchestrator {
     this.onebot = onebot;
     this.random = random;
     this.getIdentityPilot = typeof getIdentityPilot === 'function' ? getIdentityPilot : (() => null);
+    this.getRelationshipV2 = typeof getRelationshipV2 === 'function'
+      ? getRelationshipV2
+      : (() => null);
     this.getIncidentPilot = typeof getIncidentPilot === 'function'
       ? getIncidentPilot
       : (() => null);
@@ -1079,6 +1083,9 @@ export class Orchestrator {
     const incidentContext = this.getIncidentPilot()?.active
       ? this.getIncidentPilot().contextForChat(chatKey, this.store.getChatMeta(chatKey))
       : '';
+    const relationshipGuidance = this.getRelationshipV2()?.guidanceFor?.(
+      (triggerEntries || []).filter((item) => !item.self && item.senderId).map((item) => item.senderId)
+    ) || '';
 
     // 工具集按配置过滤：工具列表属于缓存前缀，必须先固定后再决定是否复用生命周期 transcript。
     const visionEnabled = cfg.api.vision !== false
@@ -1159,6 +1166,7 @@ export class Orchestrator {
       stickerEntries,
       slangContext,
       incidentContext,
+      relationshipGuidance,
       selfNickname,
       selfLastMessageAt,
       lastMessageAt,

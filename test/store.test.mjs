@@ -391,4 +391,35 @@ describe('ChatStore', () => {
     assert.equal(store.getConversationThread('group:1'), null);
     assert.equal(store.latestThreadCheckpoint('group:1'), null);
   });
+
+  it('exposes only direct target messages as countable relationship evidence', (t) => {
+    const { store } = fixture(t);
+    const base = Date.now() - 1000;
+    store.appendIncoming('group:1', {
+      mid: 'plain', ts: base, senderId: '42', senderName: 'target', text: '群里普通发言'
+    });
+    store.appendIncoming('group:1', {
+      mid: 'mention', ts: base + 1, senderId: '42', senderName: 'target',
+      text: '直接问 Agent', mentionsSelf: true
+    });
+    store.appendIncoming('group:1', {
+      mid: 'other', ts: base + 2, senderId: '77', senderName: 'other', text: '第三方上下文'
+    });
+    store.appendSelf('group:1', { mid: 'self', ts: base + 3, text: 'Agent 上下文' });
+    store.appendIncoming('private:42', {
+      mid: 'private', ts: base + 4, senderId: '42', senderName: 'target', text: '私聊消息'
+    });
+
+    const evidence = store.relationshipEvidence('42', {
+      fromTs: base - 1, toTs: base + 10, limit: 48, selfId: '999'
+    });
+    const byText = new Map(evidence.map((item) => [item.text, item]));
+    assert.equal(byText.get('群里普通发言').countableEvidence, false);
+    assert.equal(byText.get('直接问 Agent').countableEvidence, true);
+    assert.equal(byText.get('私聊消息').countableEvidence, true);
+    assert.equal(byText.get('第三方上下文').speaker, 'other');
+    assert.equal(byText.get('第三方上下文').countableEvidence, false);
+    assert.equal(byText.get('Agent 上下文').speaker, 'agent');
+    assert.equal(byText.get('Agent 上下文').countableEvidence, false);
+  });
 });

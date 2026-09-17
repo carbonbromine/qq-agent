@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { conversationConfigForChat, getConfig, identityPilotEnabled, incidentPilotEnabled, slangPilotEnabled, updateConfig, onTimeControlChange, DATA_DIR, ROOT } from './config.js';
+import { conversationConfigForChat, getConfig, identityPilotEnabled, incidentPilotEnabled, relationshipV2Enabled, slangPilotEnabled, updateConfig, onTimeControlChange, DATA_DIR, ROOT } from './config.js';
 import { customSearch } from './web-search.js';
 import { OneBotClient, segmentsToText, extractMediaFromSegments, expandForwardNodes } from './onebot.js';
 import { ChatStore } from './store.js';
@@ -36,6 +36,11 @@ import {
 import { safeFetchBinary } from './safe-fetch.js';
 import { integrationStatus, updateSnowLumaPassword } from './integrations.js';
 import { AutoUpdateManager } from './auto-update.js';
+import {
+  RelationshipV2Manager,
+  inactiveRelationshipV2Status
+} from './relationship-v2.js';
+import { relationshipV2DatabasePath } from './relationship-v2-store.js';
 
 // 全局 fetch（undici）默认连接建立超时只有 10 秒，openrouter.ai 这类海外端点
 // 握手慢时会直接报 "Connect Timeout Error ... timeout: 10000ms"（注意这不是
@@ -184,6 +189,8 @@ export function createApp({ log = console.log, autoUpdateOptions = {} } = {}) {
   });
   let identityPilot = null;
   let identityPilotError = '';
+  let relationshipV2 = null;
+  let relationshipV2Error = '';
   const orchestrator = new Orchestrator({
     store,
     memory,
@@ -193,6 +200,7 @@ export function createApp({ log = console.log, autoUpdateOptions = {} } = {}) {
     onebot,
     emit,
     getIdentityPilot: () => identityPilot,
+    getRelationshipV2: () => relationshipV2,
     getIncidentPilot: () => incidentPilot
   });
   const dailyMoments = new DailyMomentsManager({
@@ -286,6 +294,51 @@ export function createApp({ log = console.log, autoUpdateOptions = {} } = {}) {
       enabled: identityPilotEnabled(),
       error: identityPilotError
     });
+  }
+  function createRelationshipV2() {
+    return new RelationshipV2Manager({
+      dataDir: DATA_DIR,
+      config: getConfig,
+      evidenceProvider: ({ userId, fromTs, toTs, limit }) => store.relationshipEvidence(userId, {
+        fromTs, toTs, limit, selfId: onebot.selfId || getConfig().onebot?.selfId || ''
+      }),
+      personProvider: (userId) => {
+        try { return identityPilot?.identityStore?.getPerson?.(String(userId)) || null; }
+        catch { return null; }
+      },
+      emit,
+      log: moduleLog('relationship-v2')
+    });
+  }
+  function relationshipV2Status() {
+    return relationshipV2?.status() || inactiveRelationshipV2Status({
+      enabled: relationshipV2Enabled(),
+      error: relationshipV2Error
+    });
+  }
+  async function syncRelationshipV2() {
+    if (!relationshipV2Enabled()) {
+      if (relationshipV2?.active) await relationshipV2.stop();
+      relationshipV2 = null;
+      if (fs.existsSync(relationshipV2DatabasePath(DATA_DIR))) {
+        relationshipV2 = createRelationshipV2();
+        relationshipV2.openExisting();
+      }
+      relationshipV2Error = '';
+      return relationshipV2Status();
+    }
+    relationshipV2 ||= createRelationshipV2();
+    try {
+      const status = relationshipV2.start();
+      relationshipV2Error = '';
+      emit('relationship-v2-update', status);
+      return status;
+    } catch (error) {
+      relationshipV2Error = String(error?.message ?? error);
+      await relationshipV2.stop();
+      relationshipV2 = null;
+      throw error;
+    }
   }
   async function sendIdentityAdminText(ownerUin, text, signal) {
     const userId = String(ownerUin || '').trim();
@@ -627,6 +680,7 @@ export function createApp({ log = console.log, autoUpdateOptions = {} } = {}) {
     });
     if (stored.duplicate) return;
     if (!isSelf) identityPilot?.observeMessage(chatKey, stored);
+    if (!isSelf) relationshipV2?.observeMessage(chatKey, stored);
     if (!isSelf) slangPilot?.observeMessage(chatKey, stored);
     emit('chat-update', chatKey);
     if (
@@ -1726,6 +1780,7 @@ export function createApp({ log = console.log, autoUpdateOptions = {} } = {}) {
         const previousDailyMoments = JSON.stringify(cfgNow.dailyMoments || {});
         const previousQzoneInteractions = JSON.stringify(cfgNow.qzoneInteractions || {});
         const previousIdentityPilot = JSON.stringify(cfgNow.identityPilot || {});
+        const previousRelationshipV2 = JSON.stringify(cfgNow.relationshipV2 || {});
         const previousPersona = JSON.stringify(cfgNow.persona || {});
         const previousSlangPilot = JSON.stringify(cfgNow.slangPilot || {});
         const previousIncidentPilot = JSON.stringify(cfgNow.incidentPilot || {});
@@ -1805,6 +1860,23 @@ export function createApp({ log = console.log, autoUpdateOptions = {} } = {}) {
             });
           }
         }
+        if (
+          JSON.stringify(next.relationshipV2 || {}) !== previousRelationshipV2
+          || (relationshipV2Enabled(next) && personaChanged)
+        ) {
+          try {
+            await syncRelationshipV2();
+          } catch (error) {
+            const reverted = updateConfig({
+              relationshipV2: { ...(next.relationshipV2 || {}), enabled: false }
+            });
+            return json(res, 500, {
+              ok: false,
+              error: `关系 V2 实验启动失败，开关已恢复为关闭：${String(error?.message ?? error)}`,
+              config: sanitizeConfig(reverted)
+            });
+          }
+        }
         if (JSON.stringify(next.slangPilot || {}) !== previousSlangPilot) {
           try {
             await syncSlangPilot();
@@ -1834,6 +1906,47 @@ export function createApp({ log = console.log, autoUpdateOptions = {} } = {}) {
 
       if (pathname === '/api/identity-pilot/status' && method === 'GET') {
         return json(res, 200, identityPilotStatus());
+      }
+
+      if (pathname === '/api/relationship-v2/status' && method === 'GET') {
+        return json(res, 200, relationshipV2Status());
+      }
+      if (pathname === '/api/relationships' && method === 'GET') {
+        const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 100));
+        return json(res, 200, {
+          status: relationshipV2Status(),
+          relationships: relationshipV2?.listStates(limit) || []
+        });
+      }
+      if (pathname === '/api/relationship-v2/events' && method === 'GET') {
+        const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 100));
+        return json(res, 200, {
+          events: relationshipV2?.listEvents({
+            uin: url.searchParams.get('uin') || '', limit
+          }) || []
+        });
+      }
+      if (pathname === '/api/relationship-v2/jobs' && method === 'GET') {
+        const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 100));
+        return json(res, 200, {
+          jobs: relationshipV2?.listJobs({
+            status: url.searchParams.get('status') || '', limit
+          }) || []
+        });
+      }
+      if (pathname === '/api/relationship-v2/evaluations' && method === 'POST') {
+        if (!relationshipV2?.active) return json(res, 409, { error: '关系 V2 实验未启用' });
+        try {
+          const body = await readBody(req);
+          const job = relationshipV2.enqueueManual({
+            userId: body.userId,
+            fromTs: body.fromTs,
+            toTs: body.toTs
+          });
+          return json(res, 202, { ok: true, job });
+        } catch (error) {
+          return json(res, 400, { error: String(error?.message ?? error) });
+        }
       }
 
       if (pathname === '/api/slang-pilot/status' && method === 'GET') {
@@ -2819,6 +2932,16 @@ export function createApp({ log = console.log, autoUpdateOptions = {} } = {}) {
         log(`[identity-pilot] 启动失败，聊天主流程继续：${error?.message ?? error}`);
       }
     }
+    if (
+      relationshipV2Enabled()
+      || fs.existsSync(relationshipV2DatabasePath(DATA_DIR))
+    ) {
+      try {
+        await syncRelationshipV2();
+      } catch (error) {
+        log(`[relationship-v2] 启动失败，聊天主流程继续：${error?.message ?? error}`);
+      }
+    }
     if (slangPilotEnabled()) {
       try {
         await syncSlangPilot();
@@ -2848,6 +2971,8 @@ export function createApp({ log = console.log, autoUpdateOptions = {} } = {}) {
     autoUpdate.stop();
     identityPilot?.stop();
     identityPilot = null;
+    await relationshipV2?.stop();
+    relationshipV2 = null;
     await slangPilot?.stop();
     slangPilot = null;
     await incidentPilot?.stop();
@@ -2894,6 +3019,8 @@ export function createApp({ log = console.log, autoUpdateOptions = {} } = {}) {
     },
     get identityPilot() { return identityPilot; },
     identityPilotStatus,
+    get relationshipV2() { return relationshipV2; },
+    relationshipV2Status,
     get slangPilot() { return slangPilot; },
     slangPilotStatus,
     start,

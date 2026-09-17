@@ -204,6 +204,7 @@ Agent 配置或前端存储。旧的 `3110` 门户不再映射。
 - `sessions/`：每次 Agent 运行记录
 - `memory/`：群友长期印象和跨 Session 会话交接状态
 - `identity-pilot.sqlite`：实验性统一 QQ 身份索引（仅启用实验开关后创建）
+- `relationship-v2.sqlite`：关系 V2 的事件、分层状态与后台评估任务（仅启用后创建）
 - `slang-pilot.sqlite`：黑话发现、研究任务和两级审批审计（仅启用后创建）
 - `daily-moments.json`：每日群聊总结、说说决策与发布结果
 - `qzone-interactions.json`：好友动态未读队列、评论回复和外部写入状态

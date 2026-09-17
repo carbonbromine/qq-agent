@@ -22,7 +22,7 @@ test('legacy audits remain explicitly runnable', () => {
 test('current render command targets current-architecture UI invariants', () => {
   const command = String(pkg.scripts?.['test:render'] || '');
   assert.match(command, /stable-feature-architecture\.test\.mjs/);
-  assert.match(command, /relationship-pilot-ui-save\.test\.mjs/);
+  assert.match(command, /relationship-v2-ui\.test\.mjs/);
   assert.match(command, /memory-page-separation\.test\.mjs/);
   assert.doesNotMatch(command, /render-test\.mjs/);
 });
