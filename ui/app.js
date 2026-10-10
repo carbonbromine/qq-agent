@@ -55,8 +55,7 @@ function graduatedFeatureState(c = state.config || {}) {
     identity: c.identityPilot?.graduated === true,
     'auto-friend': c.identityPilot?.friendProposal?.graduated === true,
     slang: c.slangPilot?.graduated === true,
-    incidents: c.incidentPilot?.graduated === true,
-    relationships: c.relationshipV2?.graduated === true
+    incidents: c.incidentPilot?.graduated === true
   };
 }
 
@@ -607,7 +606,6 @@ function switchTab(name) {
   if (name === 'friends') loadFriendFeaturePage();
   if (name === 'slang') loadSlangFeaturePage();
   if (name === 'incidents') loadIncidentFeaturePage();
-  if (name === 'relationships') window.loadRelationshipV2Page?.();
   if (name === 'assets') loadAssetObservatory();
   if (name === 'usage') loadUsageView({ force: true });
   if (name === 'settings') loadSettings();
@@ -920,7 +918,6 @@ async function refreshStatus() {
     if (state.tab === 'identity') loadIdentityFeaturePage();
     if (state.tab === 'friends') loadFriendFeaturePage();
     if (state.tab === 'incidents') loadIncidentFeaturePage();
-    if (state.tab === 'relationships') window.loadRelationshipV2Page?.();
     renderBanner();
   } catch (e) { /* 忽略瞬时错误 */ }
 }
@@ -1159,12 +1156,6 @@ function connectSSE() {
     }
     if (state.tab === 'incidents') loadIncidentFeaturePage();
     if (state.tab === 'chats') loadChats({ quiet: true });
-  });
-  es.addEventListener('relationship-v2-update', () => {
-    if (state.tab === 'settings' && state.settingsSection === 'experiments') {
-      loadExperimentalFeatureStatuses();
-    }
-    if (state.tab === 'relationships') window.loadRelationshipV2Page?.();
   });
   es.addEventListener('auto-update', () => {
     if (state.tab === 'control') loadControlHub({ force: true });
@@ -4732,7 +4723,6 @@ function renderExperimentalSettingsSection(c) {
   const incoming = c.identityPilot?.incomingFriendRequest || {};
   const slang = c.slangPilot || {};
   const incident = c.incidentPilot || {};
-  const relationship = c.relationshipV2 || {};
   const autoFriendEnabled = enabled
     && friend.enabled === true
     && incoming.enabled === true;
@@ -4778,16 +4768,6 @@ function renderExperimentalSettingsSection(c) {
             <button type="button" class="btn btn-small ${incident.graduated === true ? '' : 'btn-primary'}"
               id="launch-incident-feature" ${incident.graduated === true ? 'disabled' : ''}>
               ${incident.graduated === true ? '已固化' : '固化上线'}
-            </button>
-          </span>
-        </div>
-        <div class="control-key-row">
-          <span><strong>关系状态 V2</strong><small id="relationship-v2-state">${relationship.enabled === true ? '已启用' : '已停用'} · ${relationship.graduated === true ? '已固化' : '实验中'}</small></span>
-          <span class="settings-actions" style="margin:0">
-            <label class="checkbox-row" style="margin:0"><input type="checkbox" id="cfg-relationship-v2-enabled" ${relationship.enabled === true ? 'checked' : ''} /><span>启用</span></label>
-            <button type="button" class="btn btn-small ${relationship.graduated === true ? '' : 'btn-primary'}"
-              id="launch-relationship-v2" ${relationship.graduated === true ? 'disabled' : ''}>
-              ${relationship.graduated === true ? '已固化' : '固化上线'}
             </button>
           </span>
         </div>
@@ -4878,15 +4858,6 @@ function experimentalFeatureLaunchPatch(c, feature, ownerUin = '') {
       }
     };
   }
-  if (feature === 'relationships') {
-    return {
-      relationshipV2: {
-        ...(c.relationshipV2 || {}),
-        enabled: true,
-        graduated: true
-      }
-    };
-  }
   throw new Error(`未知实验功能：${feature}`);
 }
 
@@ -4938,8 +4909,6 @@ async function launchExperimentalFeature(feature) {
       ? $('#launch-auto-friend-feature')
       : feature === 'incidents'
         ? $('#launch-incident-feature')
-        : feature === 'relationships'
-          ? $('#launch-relationship-v2')
         : $('#launch-slang-feature');
   const result = $('#experiment-launch-result');
   let ownerUin = feature === 'slang'
@@ -4967,8 +4936,6 @@ async function launchExperimentalFeature(feature) {
       ? '固化上线自动好友添加？Agent 可提交好友候选，管理员批准后会立即发送申请；收到的好友申请仍需管理员审批。发送结果未知时不会自动重试。'
       : feature === 'incidents'
         ? '固化上线异常处理基础设施？上线后会记录异常、向管理员告警，并允许逐群控制自动、阻塞或继续。结果未知的旧写入不会自动重试。'
-        : feature === 'relationships'
-          ? '固化上线关系状态 V2？上线后会显示独立关系页面。行为注入仍保持关闭，需在关系页面单独启用。'
         : '固化上线黑话语料库？上线后会启用本地发现和审批流程，并显示独立页面。';
   if (!await askForConfirmation(message)) return;
   if (button) button.disabled = true;
@@ -4989,8 +4956,6 @@ async function launchExperimentalFeature(feature) {
           ? '自动好友添加已固化上线'
           : feature === 'incidents'
             ? '异常处理基础设施已固化上线'
-            : feature === 'relationships'
-              ? '关系状态 V2 已固化上线'
             : '黑话语料库已固化上线';
     }
     refreshStatus();
@@ -5006,12 +4971,10 @@ async function loadExperimentalFeatureStatuses() {
   const friendNode = $('#experiment-auto-friend-state');
   const slangNode = $('#slang-pilot-state');
   const incidentNode = $('#incident-pilot-state');
-  const relationshipNode = $('#relationship-v2-state');
-  const [identityResult, slangResult, incidentResult, relationshipResult] = await Promise.allSettled([
+  const [identityResult, slangResult, incidentResult] = await Promise.allSettled([
       api('/api/identity-pilot/status'),
       api('/api/slang-pilot/status'),
-      api('/api/incident-pilot/status'),
-      api('/api/relationship-v2/status')
+      api('/api/incident-pilot/status')
   ]);
   if (identityResult.status === 'fulfilled') {
     const identity = identityResult.value;
@@ -5043,15 +5006,6 @@ async function loadExperimentalFeatureStatuses() {
   } else if (incidentNode) {
     incidentNode.textContent =
       `状态读取失败：${incidentResult.reason?.message || incidentResult.reason}`;
-  }
-  if (relationshipNode && relationshipResult.status === 'fulfilled') {
-    const relationship = relationshipResult.value;
-    relationshipNode.textContent =
-      `${relationship.active ? '运行中' : relationship.enabled ? '启动失败' : '已停用'} · `
-      + `${state.config?.relationshipV2?.graduated === true ? '已固化' : '实验中'}`;
-  } else if (relationshipNode) {
-    relationshipNode.textContent =
-      `状态读取失败：${relationshipResult.reason?.message || relationshipResult.reason}`;
   }
 }
 
@@ -6524,6 +6478,11 @@ return `
       </div>
     </div>
 
+    <h3>所有模式 · 已上线执行增强</h3>
+    <div class="hint">多模态上下文续接已常驻：跨 Session 只保存摘要和原 QQ 消息 ID，不保存图片 base64。</div>
+    <div class="field"><label for="cfg-tool-parallel">工具调度 · 只读并发上限（2–8）</label>
+      <input type="number" id="cfg-tool-parallel" min="2" max="8" step="1" value="${esc(c.toolSchedulerPilot?.maxParallelReads ?? 4)}" />
+      <div class="hint">纯读并行；写入串行，finish 具有失败屏障。</div></div>
     <h3>所有模式 · 运行节奏</h3>
     <div class="field-row">
       <div class="field"><label>未思考等待最短值（毫秒）</label><input type="number" id="cfg-wakedelay-min" min="0" max="20000" value="${esc(c.wakeDelayMinMs ?? c.wakeDelayMs ?? 8000)}" /></div>
@@ -6715,8 +6674,7 @@ function bindSettingsEvents(c) {
       ['#launch-identity-feature', 'identity'],
       ['#launch-auto-friend-feature', 'auto-friend'],
       ['#launch-slang-feature', 'slang'],
-      ['#launch-incident-feature', 'incidents'],
-      ['#launch-relationship-v2', 'relationships']
+      ['#launch-incident-feature', 'incidents']
     ].forEach(([selector, feature]) => {
       $(selector)?.addEventListener('click', () =>
         launchExperimentalFeature(feature).catch(() => {}));
@@ -6725,8 +6683,7 @@ function bindSettingsEvents(c) {
       '#cfg-identity-pilot-enabled',
       '#cfg-auto-friend-enabled',
       '#cfg-slang-pilot-enabled',
-      '#cfg-incident-pilot-enabled',
-      '#cfg-relationship-v2-enabled'
+      '#cfg-incident-pilot-enabled'
     ].forEach((selector) => {
       const toggle = $(selector);
       toggle?.addEventListener('change', async () => {
@@ -8168,10 +8125,6 @@ async function saveConfig({ quiet = false } = {}) {
       ...(c.incidentPilot || {}),
       enabled: chk('#cfg-incident-pilot-enabled', c.incidentPilot?.enabled === true)
     };
-    patch.relationshipV2 = {
-      ...(c.relationshipV2 || {}),
-      enabled: chk('#cfg-relationship-v2-enabled', c.relationshipV2?.enabled === true)
-    };
   }
 
   if (sec === 'moments') {
@@ -8415,6 +8368,7 @@ async function saveConfig({ quiet = false } = {}) {
     patch.wakeDelayMs = Math.round((wakeDelayMinMs + wakeDelayMaxMs) / 2);
     patch.drainDelayMs = Number(val('#cfg-draindelay', c.drainDelayMs)) || 1200;
     patch.maxConcurrentRuns = Number(val('#cfg-maxruns', c.maxConcurrentRuns)) || 2;
+    patch.toolSchedulerPilot = { maxParallelReads: clampInt(val('#cfg-tool-parallel', c.toolSchedulerPilot?.maxParallelReads ?? 4), 2, 8, 4) };
     patch.conversation = {
       ...(c.conversation || {}),
       mode: val('#cfg-conversation-mode', c.conversation?.mode || 'legacy'),

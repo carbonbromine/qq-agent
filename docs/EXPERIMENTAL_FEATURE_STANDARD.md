@@ -66,7 +66,7 @@ incident capabilities are documented separately as stable features):
 
 | Feature | Runtime switch | Graduation switch | Owned page |
 | --- | --- | --- | --- |
-| Relationship state V2 | `relationshipV2.enabled` | `relationshipV2.graduated` | `relationships` / 关系 |
+| 关系 V2 | — | — | 已下线；历史数据保留 |
 
 ## 4. API And Persistence
 

@@ -7,6 +7,10 @@
 - 人物统一印象（`IdentityPilotManager` / `IdentityStore`，类名暂保留以避免一次性重命名扩散）
 - 好友管理（主动候选、入站好友请求、管理员审批、批准后发送）
 - 异常处理基础设施（`IncidentPilotManager`，类名暂保留用于存储/API 兼容）
+- 多模态上下文续接（原 Pilot 兼容配置，正式常驻）
+- 工具调度优化（原 Pilot 兼容配置，正式常驻）
+
+关系 V2 已下线，不再启动评估、观察聊天、注入 Prompt 或暴露页面/API；历史 `relationship-v2.sqlite` 保留。多模态上下文续接和工具调度优化正式常驻，旧开关不能关闭；工具只读并发量在「设置 → 聊天设置」配置。
 
 自动“黑话研究”流水线已退休。手工维护的黑话资产（`data/slang.json` / `AssetObserver`）与研究流水线不是同一能力，继续保留。
 
