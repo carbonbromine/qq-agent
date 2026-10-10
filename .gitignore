@@ -15,6 +15,7 @@ task_plan.md
 
 # 依赖
 node_modules/
+**/.venv/
 .runtime/
 .dbg/
 debug-*.md

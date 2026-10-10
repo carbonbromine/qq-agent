@@ -270,6 +270,20 @@ export class OneBotClient {
     return this.sendSegments(kind, id, segments, signal);
   }
 
+  /** QQ record 消息段（音频数据不记录在 Outbox）。 */
+  async sendVoice(kind, id, wav, signal) {
+    if (kind !== 'group' && kind !== 'private') {
+      throw new OneBotActionError('QQ 会话类型错误', { action: 'send_voice', outcome: 'failed' });
+    }
+    if (!Buffer.isBuffer(wav) || wav.length < 44) {
+      throw new OneBotActionError('QQ 语音音频无效', { action: 'send_voice', outcome: 'failed' });
+    }
+    const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
+    const params = kind === 'private' ? { user_id: Number(id) } : { group_id: Number(id) };
+    params.message = [{ type: 'record', data: { file: 'base64://' + wav.toString('base64') } }];
+    return this.call(action, params, 30000, signal);
+  }
+
   async sendSticker(kind, id, imageUrl, { replyToMessageId = null, atUserId = null, signal } = {}) {
     const segments = [];
     if (replyToMessageId !== undefined && replyToMessageId !== null && String(replyToMessageId).trim() !== '') {

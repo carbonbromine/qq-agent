@@ -7,6 +7,7 @@ import { getConfig, DEFAULT_CONFIG } from './config.js';
 import { sleep, randInt, createSendChain, escapeCqText, formatClockTime } from './util.js';
 import { mdToPlain, splitForQQ } from './md-to-plain.js';
 import { assertCanSend } from './access.js';
+import { synthesizeLocalVoice } from './experimental-voice-tts.js';
 
 // 限频回退值统一取自 DEFAULT_CONFIG，杜绝"代码默认 80 / 回退值 8 / UI 回退 8"三处打架。
 const DEFAULT_MAX_PER_MINUTE = DEFAULT_CONFIG.send.maxPerMinute;
@@ -160,6 +161,35 @@ export class SendQueue {
       console.warn(`[sender] 部分发送失败（${failed.length}/${parts.length}）：${detail}`);
     }
     return { sent, failed };
+  }
+
+  /** 实验：语音和文本使用同一会话队列、频控与 Outbox。 */
+  sendVoice(chatKey, text, options = {}) {
+    const [kind, id] = String(chatKey).split(':');
+    if (kind !== 'group' && kind !== 'private') throw new Error('非法会话 key：' + chatKey);
+    return this.#chain(chatKey)(async () => {
+      assertCanSend(chatKey, options.signal);
+      if (options.runId && this.store.hasUncertainEffects(options.runId)) {
+        throw new Error('Previous send delivery is uncertain');
+      }
+      this.#checkRate(chatKey);
+      const cfg = getConfig().voiceTtsPilot || {};
+      const wav = await synthesizeLocalVoice(text, cfg, { signal: options.signal });
+      assertCanSend(chatKey, options.signal);
+      const data = await this.#deliver(
+        chatKey, options,
+        { type: 'voice', text: String(text), speaker: cfg.speaker || 'Vivian' },
+        () => this.onebot.sendVoice(kind, id, wav, options.signal)
+      );
+      const ts = Date.now();
+      const preview = '[语音]' + String(text);
+      this.store.appendSelf(chatKey, {
+        text: preview, ts, mid: data?.message_id ?? null,
+        targetUserId: kind === 'private' ? String(id) : '', eventKind: 'message'
+      });
+      this.onSent?.({ chatKey, text: preview, messageId: data?.message_id ?? null });
+      return { message_id: data?.message_id ?? null };
+    });
   }
 
   /** 发送一个收藏表情（独立气泡）。 */
