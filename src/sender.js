@@ -175,6 +175,8 @@ export class SendQueue {
       this.#checkRate(chatKey);
       const cfg = getConfig().voiceTtsPilot || {};
       const wav = await synthesizeLocalVoice(text, cfg, { signal: options.signal });
+      // Admin may disable the pilot while GPU inference is running: fail closed before QQ writes.
+      if (getConfig().voiceTtsPilot?.enabled !== true) throw new Error('本地语音实验在合成期间已关闭');
       assertCanSend(chatKey, options.signal);
       const data = await this.#deliver(
         chatKey, options,
