@@ -4,6 +4,9 @@ export const STABLE_FEATURE_POLICY = Object.freeze({
   friendProposal: true,
   friendRequestDispatch: true,
   incidentPilot: true,
+  multimodalContext: true,
+  toolScheduler: true,
+  relationshipV2: false,
   slangPilot: false
 });
 
@@ -81,7 +84,14 @@ export function stableFeatureFingerprint(config = {}) {
     slangGraduated: config?.slangPilot?.graduated === true,
     retiredSlangKeys: retiredSlangKeys(config),
     incident: config?.incidentPilot?.enabled === true,
-    incidentGraduated: config?.incidentPilot?.graduated === true
+    incidentGraduated: config?.incidentPilot?.graduated === true,
+    multimodalEnabled: config?.multimodalContextPilot?.enabled === true,
+    multimodalGraduated: config?.multimodalContextPilot?.graduated === true,
+    schedulerEnabled: config?.toolSchedulerPilot?.enabled === true,
+    schedulerGraduated: config?.toolSchedulerPilot?.graduated === true,
+    schedulerParallel: config?.toolSchedulerPilot?.maxParallelReads,
+    relationship: config?.relationshipV2?.enabled === true,
+    relationshipGraduated: config?.relationshipV2?.graduated === true
   });
 }
 
@@ -152,6 +162,28 @@ export function applyStableFeaturePolicy(config = {}) {
   incident.enabled = true;
   incident.graduated = true;
   incident.ownerUin = ownerUin;
+
+  // Former experimental switches remain only for persisted-config compatibility.
+  const multimodal = objectSection(config, 'multimodalContextPilot');
+  multimodal.enabled = true;
+  multimodal.graduated = true;
+
+  const scheduler = objectSection(config, 'toolSchedulerPilot');
+  scheduler.enabled = true;
+  scheduler.graduated = true;
+  scheduler.maxParallelReads = Math.min(8, Math.max(2,
+    Number.isFinite(Number(scheduler.maxParallelReads))
+      ? Math.round(Number(scheduler.maxParallelReads)) : 4
+  ));
+
+  // Retirement tombstone: stale clients must not revive Relationship V2.
+  // Preserve the historical SQLite file without opening or deleting it.
+  const relationship = objectSection(config, 'relationshipV2');
+  for (const key of Object.keys(relationship)) {
+    if (key !== 'enabled' && key !== 'graduated') delete relationship[key];
+  }
+  relationship.enabled = false;
+  relationship.graduated = false;
 
   // Auto update is not forced on, but its administrator is global as well.
   const autoUpdate = objectSection(config, 'autoUpdate');
