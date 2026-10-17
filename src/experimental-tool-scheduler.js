@@ -34,6 +34,7 @@ export const EXPERIMENTAL_TERMINAL_TOOL = 'finish';
 // 可以与 finish 放在同一个 assistant tool_calls 批次里；finish 的失败屏障保证前置失败时不提交。
 export const EXPERIMENTAL_SAME_ROUND_ACTION_TOOLS = new Set([
   'send_message',
+  'send_voice',
   'send_sticker',
   'send_poke',
   'memory_append',

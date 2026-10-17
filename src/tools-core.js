@@ -241,6 +241,32 @@ export function buildToolDefs() {
         }
       }
     },
+    ...(getConfig().voiceTtsPilot?.enabled === true ? [{
+      name: 'send_voice',
+      description: '实验功能：在当前 QQ 群或私聊发一条真实语音气泡。适合对方要求语音、自然简短回应；不要把所有消息都转语音。仅填写要朗读的文字。',
+      parameters: {
+        type: 'object',
+        properties: { text: { type: 'string', description: '需要朗读的短句' } },
+        required: ['text']
+      },
+      async execute(ctx, args) {
+        try {
+          if (getConfig().voiceTtsPilot?.enabled !== true) return err('本地 TTS 实验已经关闭');
+          const text = String(args.text ?? '').trim();
+          const result = await ctx.sender.sendVoice(ctx.chatKey, text, {
+            runId: ctx.session.leaseId, signal: ctx.signal
+          });
+          ctx.session.sent.push({
+            type: 'voice', text: '[语音]' + text,
+            at: new Date().toLocaleTimeString('zh-CN', { hour12: false })
+          });
+          ctx.emit('session-update', ctx.session.id);
+          return ok({ sent: true, messageId: result.message_id, note: '语音已发出，不要重复发送。' });
+        } catch (error) {
+          return err(error?.message ?? error, { incidentCaptured: error?.incidentCaptured === true });
+        }
+      }
+    }] : []),
     {
       name: 'send_sticker',
       description: '发送一个 QQ 收藏表情（一条消息只能一张表情，不能附带文字；想说的话先用 send_message 单独发）。stickerId 从 list_stickers 获取。',

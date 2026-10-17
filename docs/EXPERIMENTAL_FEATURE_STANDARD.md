@@ -67,6 +67,7 @@ incident capabilities are documented separately as stable features):
 | Feature | Runtime switch | Graduation switch | Owned page |
 | --- | --- | --- | --- |
 | 关系 V2 | — | — | 已下线；历史数据保留 |
+| 本地语音 TTS | `voiceTtsPilot.enabled` | 需验收，未固化 | 暂无；部署与回滚参见 `VOICE_TTS_PILOT.md` |
 
 ## 4. API And Persistence
 

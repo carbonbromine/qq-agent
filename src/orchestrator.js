@@ -1087,7 +1087,8 @@ export class Orchestrator {
     const identityPilot = this.getIdentityPilot();
     const identityAvailable = identityPilotEnabled(cfg) && identityPilot?.active === true;
     const friendProposalAvailable = identityAvailable && promptFriendProposalEnabled(cfg);
-    const toolDefs = this.toolDefs.filter((d) => {
+    // Rebuild for each run: experimental voice may be toggled without restarting Node.
+    const toolDefs = buildToolDefs().filter((d) => {
       if (!visionEnabled && (d.name === 'get_message_images' || d.name === 'get_sticker_image')) return false;
       if (!searchEnabled && (d.name === 'web_search' || d.name === 'web_fetch')) return false;
       if (d.feature === 'identityPilot' && !identityAvailable) return false;

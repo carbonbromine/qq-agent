@@ -4723,6 +4723,7 @@ function renderExperimentalSettingsSection(c) {
   const incoming = c.identityPilot?.incomingFriendRequest || {};
   const slang = c.slangPilot || {};
   const incident = c.incidentPilot || {};
+  const voice = c.voiceTtsPilot || {};
   const autoFriendEnabled = enabled
     && friend.enabled === true
     && incoming.enabled === true;
@@ -4769,6 +4770,15 @@ function renderExperimentalSettingsSection(c) {
               id="launch-incident-feature" ${incident.graduated === true ? 'disabled' : ''}>
               ${incident.graduated === true ? '已固化' : '固化上线'}
             </button>
+          </span>
+        </div>
+      </div>
+      <div class="control-key-list" style="margin-top:14px">
+        <div class="control-key-row">
+          <span><strong>本地语音 TTS</strong><small>${voice.enabled === true ? '已启用' : '已停用'} · 实验中 · Qwen3-TTS（需单独启动本地模型）</small></span>
+          <span class="settings-actions" style="margin:0">
+            <label class="checkbox-row" style="margin:0"><input type="checkbox" id="cfg-voice-tts-enabled" ${voice.enabled === true ? 'checked' : ''} /><span>启用</span></label>
+            <button type="button" class="btn btn-small" disabled title="真实 QQ 语音验收后才能固化">待验收</button>
           </span>
         </div>
       </div>
@@ -8124,6 +8134,10 @@ async function saveConfig({ quiet = false } = {}) {
     patch.incidentPilot = {
       ...(c.incidentPilot || {}),
       enabled: chk('#cfg-incident-pilot-enabled', c.incidentPilot?.enabled === true)
+    };
+    patch.voiceTtsPilot = {
+      ...(c.voiceTtsPilot || {}),
+      enabled: chk('#cfg-voice-tts-enabled', c.voiceTtsPilot?.enabled === true)
     };
   }
 

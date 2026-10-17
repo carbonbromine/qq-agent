@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PERSONAS, normalizeBehaviorProfile } from './personas.js';
+import { DEFAULT_VOICE_TTS_PILOT, normalizeVoiceTtsPilot } from './experimental-voice-config.js';
 import { sliderToTier } from './tier-slider.js';   // 零依赖模块，避免循环依赖
 import { DEFAULT_TIME_CONTROL, normalizeTimeControl } from './time-control.js';
 import { normalizeMomentWindows } from './moment-schedule.js';
@@ -295,6 +296,8 @@ export const DEFAULT_CONFIG = {
     unknownWritesBlockChat: false,
     retentionDays: 90
   },
+  // 独立本地 Qwen3-TTS 实验；关闭时不启动任何服务。
+  voiceTtsPilot: { ...DEFAULT_VOICE_TTS_PILOT },
   // 表情包
   sticker: {
     enabled: true,
@@ -717,6 +720,7 @@ export function updateConfig(patch) {
       throw new Error('异常告警管理员 QQ 必须同时加入私聊白名单');
     }
   }
+  next.voiceTtsPilot = normalizeVoiceTtsPilot(next.voiceTtsPilot || {});
   const autoUpdate = next.autoUpdate || {};
   const updateRepository = String(
     autoUpdate.repository || DEFAULT_CONFIG.autoUpdate.repository
